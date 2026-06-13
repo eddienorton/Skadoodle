@@ -45,3 +45,4 @@ Carthage/Build/
 *.p8
 *.p12
 GoogleService-Info.plist
+snoodle/Secrets.swift

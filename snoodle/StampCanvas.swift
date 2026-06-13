@@ -365,6 +365,8 @@ struct StampCanvasView: UIViewRepresentable {
     @Binding var undoStack: [CanvasSnapshot]
     @Binding var redoStack: [CanvasSnapshot]
     @Binding var lines: [DrawingLine]
+    @Binding var backgroundImage: UIImage?
+    @Binding var backgroundOffset: CGSize
     let canvasSize: CGSize
     @Binding var rotatingId: UUID?
 
@@ -467,7 +469,7 @@ struct StampCanvasView: UIViewRepresentable {
         func handleDrag(id: UUID, pos: CGPoint) {
             if draggingId == nil {
                 // First event of this drag — snapshot before any position change
-                parent.undoStack.append(CanvasSnapshot(lines: parent.lines, stamps: parent.stamps))
+                parent.undoStack.append(CanvasSnapshot(lines: parent.lines, stamps: parent.stamps, backgroundImage: parent.backgroundImage, backgroundOffset: parent.backgroundOffset))
                 parent.redoStack = []
             }
             draggingId = id
@@ -507,7 +509,7 @@ struct StampCanvasView: UIViewRepresentable {
         }
 
         func handleDoubleTap(id: UUID) {
-            parent.undoStack.append(CanvasSnapshot(lines: parent.lines, stamps: parent.stamps))
+            parent.undoStack.append(CanvasSnapshot(lines: parent.lines, stamps: parent.stamps, backgroundImage: parent.backgroundImage, backgroundOffset: parent.backgroundOffset))
             parent.redoStack = []
             parent.stamps.removeAll { $0.id == id }
             if parent.selectedStampId == id {
@@ -518,7 +520,7 @@ struct StampCanvasView: UIViewRepresentable {
 
         func handleDupe(id: UUID) {
             guard let idx = parent.stamps.firstIndex(where: { $0.id == id }) else { return }
-            parent.undoStack.append(CanvasSnapshot(lines: parent.lines, stamps: parent.stamps))
+            parent.undoStack.append(CanvasSnapshot(lines: parent.lines, stamps: parent.stamps, backgroundImage: parent.backgroundImage, backgroundOffset: parent.backgroundOffset))
             parent.redoStack = []
             let src = parent.stamps[idx]
             let dupe = PlacedStamp(

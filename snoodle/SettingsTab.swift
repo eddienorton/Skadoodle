@@ -33,6 +33,8 @@ struct SettingsTab: View {
     @State private var seedStatus: String = ""
     @State private var showNukeConfirm: Bool = false
     @State private var nukeStatus: String = ""
+    @State private var isBackfilling: Bool = false
+    @State private var backfillStatus: String = ""
     @StateObject private var phantomSession = PhantomSessionManager.shared
     #endif
 
@@ -266,6 +268,31 @@ struct SettingsTab: View {
                     }
                     if !nukeStatus.isEmpty {
                         Text(nukeStatus).font(.system(size: 12)).foregroundColor(.secondary)
+                    }
+                    Divider()
+                    if isBackfilling {
+                        HStack {
+                            ProgressView().scaleEffect(0.8)
+                            Text("Backfilling searchIndex…").font(.system(size: 13)).foregroundColor(.secondary)
+                        }
+                    } else {
+                        Button {
+                            isBackfilling = true
+                            backfillStatus = ""
+                            Task {
+                                let result = await WorldGalleryManager.shared.backfillSearchIndex()
+                                await MainActor.run {
+                                    isBackfilling = false
+                                    backfillStatus = result
+                                }
+                            }
+                        } label: {
+                            Label("Backfill searchIndex (run once)", systemImage: "magnifyingglass.circle")
+                                .foregroundColor(.orange)
+                        }
+                    }
+                    if !backfillStatus.isEmpty {
+                        Text(backfillStatus).font(.system(size: 12)).foregroundColor(.secondary)
                     }
                 }
 

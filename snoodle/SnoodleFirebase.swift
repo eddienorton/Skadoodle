@@ -636,6 +636,7 @@ class WorldGalleryManager: ObservableObject {
         case everyone
         case artist(String)
         case following([String])
+        case search(String)
     }
     private(set) var currentQuery: FeedQuery = .everyone
 
@@ -692,6 +693,8 @@ class WorldGalleryManager: ObservableObject {
             fetchArtist(userId: userId)
         case .following(let userIds):
             fetchFollowing(userIds: userIds)
+        case .search(let term):
+            fetchSearch(term)
         }
     }
 
@@ -770,6 +773,15 @@ class WorldGalleryManager: ObservableObject {
                     guard let self = self, let count = snapshot?.count else { return }
                     DispatchQueue.main.async { self.totalCount = count.intValue }
                 }
+        case .search(let term):
+            let primaryTerm = term.lowercased().trimmingCharacters(in: .whitespaces)
+                .components(separatedBy: .whitespaces).first(where: { !$0.isEmpty }) ?? term.lowercased()
+            db.collection(collection)
+                .whereField("searchIndex", arrayContains: primaryTerm)
+                .count.getAggregation(source: .server) { [weak self] snapshot, _ in
+                    guard let self = self, let count = snapshot?.count else { return }
+                    DispatchQueue.main.async { self.totalCount = count.intValue }
+                }
         case .following(let userIds):
             guard !userIds.isEmpty else { DispatchQueue.main.async { self.totalCount = 0 }; return }
             // Firestore count with `in` — split into batches of 30
@@ -808,6 +820,30 @@ class WorldGalleryManager: ObservableObject {
                     UserProfileManager.shared.fetchProfiles(userIds: userIds) { _ in }
                 }
             }
+    }
+
+    /// One-time admin backfill: writes searchIndex to any world_gallery doc that lacks it.
+    /// Call once from SettingsTab Debug section, then remove the button.
+    func backfillSearchIndex() async -> String {
+        guard let snapshot = try? await db.collection(collection).getDocuments() else {
+            return "Failed to fetch documents"
+        }
+        var updated = 0
+        for doc in snapshot.documents {
+            let data = doc.data()
+            if data["searchIndex"] != nil { continue }  // already has it
+            let caption = (data["caption"] as? String ?? "").lowercased()
+            let keywords = data["keywords"] as? [String] ?? []
+            let captionWords = caption
+                .components(separatedBy: .whitespacesAndNewlines)
+                .map { $0.trimmingCharacters(in: .punctuationCharacters) }
+                .filter { !$0.isEmpty }
+            let keywordsLower = keywords.map { $0.lowercased() }
+            let searchIndex = Array(Set(captionWords + keywordsLower)).filter { !$0.isEmpty }
+            try? await doc.reference.updateData(["searchIndex": searchIndex])
+            updated += 1
+        }
+        return "Done: \(updated) of \(snapshot.documents.count) docs updated"
     }
 
     private func applyProfilesAndLikes(to snoodles: [WorldSnoodle]) {
@@ -884,6 +920,32 @@ class WorldGalleryManager: ObservableObject {
         }
     }
 
+    private func fetchSearch(_ term: String) {
+        guard !isLoading else { return }
+        let termLower = term.lowercased().trimmingCharacters(in: .whitespaces)
+        // Use the first word for array-contains; GalleryTab applies secondary filter for additional words
+        let primaryTerm = termLower.components(separatedBy: .whitespaces).first(where: { !$0.isEmpty }) ?? termLower
+        guard !primaryTerm.isEmpty else { return }
+        isLoading = true
+        db.collection(collection)
+            .whereField("searchIndex", arrayContains: primaryTerm)
+            .order(by: "timestamp", descending: true)
+            .limit(to: pageSize)
+            .getDocuments { [weak self] snapshot, _ in
+                guard let self = self else { return }
+                DispatchQueue.main.async {
+                    self.isLoading = false
+                    guard let docs = snapshot?.documents else { return }
+                    self.lastDocumentSnapshot = docs.last
+                    let snoodles = self.parseDocuments(docs)
+                    self.entries = snoodles
+                    self.lastFetch = Date()
+                    self.applyProfilesAndLikes(to: snoodles)
+                    self.fetchTotalCount()
+                }
+            }
+    }
+
     /// Fetch the next page and append to entries (called as user scrolls to bottom).
     /// Respects the active query so artist/following filters stay scoped on pagination.
     func fetchNextPage() {
@@ -907,6 +969,20 @@ class WorldGalleryManager: ObservableObject {
             isLoading = true
             db.collection(collection)
                 .whereField("userId", isEqualTo: userId)
+                .order(by: "timestamp", descending: true)
+                .limit(to: pageSize)
+                .start(afterDocument: lastDoc)
+                .getDocuments { [weak self] snapshot, _ in
+                    self?.appendNextPage(snapshot?.documents)
+                }
+
+        case .search(let term):
+            guard let lastDoc = lastDocumentSnapshot else { return }
+            let primaryTerm = term.lowercased().trimmingCharacters(in: .whitespaces)
+                .components(separatedBy: .whitespaces).first(where: { !$0.isEmpty }) ?? term.lowercased()
+            isLoading = true
+            db.collection(collection)
+                .whereField("searchIndex", arrayContains: primaryTerm)
                 .order(by: "timestamp", descending: true)
                 .limit(to: pageSize)
                 .start(afterDocument: lastDoc)

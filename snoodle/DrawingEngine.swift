@@ -1357,7 +1357,7 @@ protocol AIProvider {
 class GeminiProvider: AIProvider {
     let apiKey: String
 
-    init(apiKey: String = "AIzaSyCsO0viOSXRHaD5gkIg8Vj4bm0uSvEUb78") {
+    init(apiKey: String = snoodleGeminiKey) {
         self.apiKey = apiKey
     }
 
@@ -1445,9 +1445,7 @@ class GeminiProvider: AIProvider {
 
 // MARK: - AI Manager
 
-// Baked-in Gemini key — AI works for everyone out of the box
-private let snoodleGeminiKey = "AIzaSyCsO0viOSXRHaD5gkIg8Vj4bm0uSvEUb78"
-
+// Key lives in Secrets.swift (gitignored) — see that file to rotate
 func getAIProvider() -> AIProvider {
     // User can override with their own key in Settings (power users only)
     let userKey = UserDefaults.standard.string(forKey: "geminiAPIKey") ?? ""

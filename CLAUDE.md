@@ -12,7 +12,7 @@ Eddie Brayman, 72, independent iOS developer, East Village NYC. 50+ years coding
 **App Store URL:** https://apps.apple.com/us/app/skadoodle/id6771497563  
 **Bundle ID:** maxsdad.skadoodle  
 **Firebase project:** snoodle-68bfc  
-**Current version at last session:** 1.9 build 2 (submitted June 2026)
+**Current version at last session:** 1.9 build 4 (submitted, June 2026)
 
 ---
 
@@ -67,7 +67,7 @@ Eddie Brayman, 72, independent iOS developer, East Village NYC. 50+ years coding
 
 ### FeedQuery enum (WorldGalleryManager)
 ```swift
-enum FeedQuery { case everyone, artist(String), following([String]) }
+enum FeedQuery { case everyone, artist(String), following([String]), search(String) }
 ```
 
 ### How pagination works
@@ -78,7 +78,14 @@ enum FeedQuery { case everyone, artist(String), following([String]) }
 `world_gallery`: `userId ASC, timestamp DESC, __name__ DESC` — Status: Enabled
 
 ### searchIndex field
-New doodles get a `searchIndex` array field (lowercased caption words + keywords combined). Groundwork for future Firebase `array-contains-any` text search. Current search is still client-side (filters the loaded page).
+All `world_gallery` docs have a `searchIndex` array field (lowercased caption words + keywords combined). Search routes through Firebase `array-contains` on the first query term; additional words are filtered client-side from results. Backfill of old docs was run once via SettingsTab Debug button (b4).
+
+### Search pagination
+`.search(String)` uses cursor-based pagination (`lastDocumentSnapshot` + `start(afterDocument:)`), same as `.everyone` and `.artist`.
+
+### Firestore composite indexes (both enabled)
+- `world_gallery`: `userId ASC, timestamp DESC, __name__ DESC`
+- `world_gallery`: `searchIndex ARRAYS, timestamp DESC` — for search queries
 
 ---
 
@@ -94,6 +101,26 @@ New doodles get a `searchIndex` array field (lowercased caption words + keywords
 
 ### 3. searchIndex added to submit()
 New submissions now write `searchIndex` to Firestore for future scalable text search.
+
+---
+
+## Bugs Fixed in v1.9 b4
+
+### 1. Search detail view total count changed mid-swipe
+**Root cause:** `WorldSnoodleDetailView.entries` used `worldManager.sortedEntries` as base even when `textFilter` was active. As swiping triggered pagination, newly loaded entries matching the search term were added to the filtered set, changing the count (e.g. 5 → 8 → 9).  
+**Fix:** When `textFilter` is set, lock to `initialEntries` instead of live manager entries. Live entries are only used for the unfiltered case.
+
+### 2. Stamp drag not undoable
+**Root cause:** `handleDrag` in `StampCanvas.swift` updated stamp position directly with no undo snapshot.  
+**Fix:** Push undo snapshot on the first drag event (when `draggingId` is nil), before any position change.
+
+### 3. Search was client-side only (saw 3 results instead of full database)
+**Root cause:** Search filtered only the 20 loaded entries, not the full Firestore collection.  
+**Fix:** Added `FeedQuery.search(String)` case routed through Firebase `array-contains` on `searchIndex`. Added Firestore composite index (`searchIndex ARRAYS + timestamp DESC`). Backfilled `searchIndex` on all 141 existing docs via one-time admin function. `GalleryTab` debounces 400ms then fires Firebase query; clears back to prior feed mode when search is cleared.
+
+### 4. Provisioning profile conflict
+**Root cause:** Old provisioning profile "Skadoodle Development" for `com.eddiebrayman.skadoodle` was cached and blocked Debug builds after bundle ID changed to `maxsdad.skadoodle`.  
+**Fix:** Deleted old profile from developer.apple.com, downloaded fresh profiles in Xcode Settings → Accounts, re-enabled Automatically manage signing.
 
 ---
 

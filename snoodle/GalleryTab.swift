@@ -315,6 +315,7 @@ struct GalleryTab: View {
     @State private var worldSearchPeople: [UserProfile] = []
     @State private var isSearchingPeople: Bool = false
     @State private var peopleSearchTask: Task<Void, Never>? = nil
+    @State private var doodleSearchTask: Task<Void, Never>? = nil
 
     let columns = [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
     private let dateFmt: DateFormatter = {
@@ -348,6 +349,23 @@ struct GalleryTab: View {
         }
     }
 
+    func searchWorldDoodles(_ q: String) {
+        doodleSearchTask?.cancel()
+        let trimmed = q.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty {
+            // Query cleared — revert to the active feed mode
+            applyWorldQuery()
+            return
+        }
+        doodleSearchTask = Task {
+            try? await Task.sleep(nanoseconds: 400_000_000)  // 400ms debounce
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                worldManager.setQuery(.search(trimmed))
+            }
+        }
+    }
+
     var filteredEntries: [SnoodleEntry] {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         guard !q.isEmpty else { return store.entries }
@@ -361,12 +379,20 @@ struct GalleryTab: View {
     }
 
     var displayedWorldEntries: [WorldSnoodle] {
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !q.isEmpty else { return worldManager.sortedEntries }
-        return worldManager.sortedEntries.filter {
-            $0.caption.lowercased().contains(q) ||
-            $0.keywords.contains { $0.lowercased().contains(q) }
+        // Firebase handles the primary search term; apply client-side filter only for additional words
+        if case .search(let term) = worldManager.currentQuery {
+            let terms = term.lowercased().trimmingCharacters(in: .whitespaces)
+                .components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+            guard terms.count > 1 else { return worldManager.sortedEntries }
+            let extraTerms = Array(terms.dropFirst())
+            return worldManager.sortedEntries.filter { snoodle in
+                extraTerms.allSatisfy { t in
+                    snoodle.caption.lowercased().contains(t) ||
+                    snoodle.keywords.contains { $0.lowercased().contains(t) }
+                }
+            }
         }
+        return worldManager.sortedEntries
     }
 
     var isWorldSearchActive: Bool {
@@ -460,7 +486,7 @@ struct GalleryTab: View {
                                         detailSelection = DetailSelection(entries: displayedWorldEntries, startIndex: i)
                                     })
                                     .onAppear {
-                                        if !isWorldSearchActive && i == displayedWorldEntries.count - 1 {
+                                        if i == displayedWorldEntries.count - 1 {
                                             worldManager.fetchNextPage()
                                         }
                                     }
@@ -560,7 +586,10 @@ struct GalleryTab: View {
                 applyWorldQuery()
             }
             .onChange(of: query) { _, q in
-                if showingWorld { searchWorldPeople(q) }
+                if showingWorld {
+                    searchWorldPeople(q)
+                    searchWorldDoodles(q)
+                }
             }
             .onChange(of: showingWorld) { _, showing in
                 if showing { applyWorldQuery() }
@@ -581,7 +610,7 @@ struct GalleryTab: View {
                             }
                             Picker("Sort", selection: $worldManager.sortOrder) {
                                 Text("Recent").tag(WorldSortOrder.recent)
-                                Text("Trending").tag(WorldSortOrder.trending)
+                                Text("Hot").tag(WorldSortOrder.trending)
                             }
                             .pickerStyle(.segmented)
                             .frame(width: 120)
@@ -981,17 +1010,16 @@ struct WorldSnoodleDetailView: View {
     @State private var commentDoodleId: String = ""
     @State private var profileUserId: String = ""
 
-    // Use live worldManager entries so pagination loads show up automatically.
-    // When textFilter is active, apply it so the detail view only shows matching doodles.
+    // Unfiltered: use live worldManager entries so pagination loads appear automatically.
+    // Filtered: lock to initialEntries — pagination must not change the result set mid-swipe.
     var entries: [WorldSnoodle] {
-        let live = worldManager.sortedEntries
-        let base = live.isEmpty ? initialEntries : live
         guard let filter = textFilter, !filter.trimmingCharacters(in: .whitespaces).isEmpty else {
-            return base
+            let live = worldManager.sortedEntries
+            return live.isEmpty ? initialEntries : live
         }
         let terms = filter.lowercased().trimmingCharacters(in: .whitespaces)
             .components(separatedBy: .whitespaces).filter { !$0.isEmpty }
-        return base.filter { snoodle in
+        return initialEntries.filter { snoodle in
             terms.allSatisfy { term in
                 snoodle.caption.lowercased().contains(term) ||
                 snoodle.keywords.contains { $0.lowercased().contains(term) }

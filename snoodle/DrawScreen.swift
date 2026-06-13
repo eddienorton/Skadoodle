@@ -715,7 +715,7 @@ struct DrawScreen: View {
     // Auto-place the current stamp centered on the canvas when selected from picker
     func autoPlaceStamp() {
         let center = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
-        undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps))
+        undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset))
         redoStack = []
         if isCustomStampMode, let customId = UUID(uuidString: lastCustomStampIdString) {
             var stamp = PlacedStamp(emoji: "📷", position: center, size: 120)
@@ -732,7 +732,7 @@ struct DrawScreen: View {
 
     func placeTextStamp(text: String, fontId: String, color: Color, bgColor: Color) {
         let center = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
-        undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps))
+        undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset))
         redoStack = []
 
         // Compute natural content size honoring explicit line breaks
@@ -898,6 +898,8 @@ struct DrawScreen: View {
                             undoStack: $undoStack,
                             redoStack: $redoStack,
                             lines: $lines,
+                            backgroundImage: $canvasBackgroundImage,
+                            backgroundOffset: $backgroundOffset,
                             canvasSize: canvasSize,
                             rotatingId: $stampRotatingId
                         )
@@ -922,7 +924,7 @@ struct DrawScreen: View {
                                     selectedStampId = nil
                                 },
                                 onTransform: { transform in
-                                    undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps))
+                                    undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset))
                                     redoStack = []
                                     if let idx = placedStamps.firstIndex(where: { $0.id == id }) {
                                         switch transform {
@@ -934,14 +936,14 @@ struct DrawScreen: View {
                                     showStampMagicMenu = false
                                 },
                                 onDelete: {
-                                    undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps))
+                                    undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset))
                                     redoStack = []
                                     placedStamps.removeAll { $0.id == id }
                                     showStampMagicMenu = false
                                     selectedStampId = nil
                                 },
                                 onDupe: {
-                                    undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps))
+                                    undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset))
                                     redoStack = []
                                     if let idx = placedStamps.firstIndex(where: { $0.id == id }) {
                                         var dupe = placedStamps[idx]
@@ -996,7 +998,7 @@ struct DrawScreen: View {
                                     return sqrt(dx*dx + dy*dy) <= s.size * 0.5 * 0.75
                                 }
                                 if hits.isEmpty {
-                                    undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps))
+                                    undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset))
                                     redoStack = []
                                     if isCustomStampMode, let customId = UUID(uuidString: lastCustomStampIdString) {
                                         var stamp = PlacedStamp(emoji: "📷", position: loc, size: 120)
@@ -1130,7 +1132,7 @@ struct DrawScreen: View {
                                         if let editId = editingStampId,
                                            let idx = placedStamps.firstIndex(where: { $0.id == editId }) {
                                             // Edit existing — update in place, recompute dimensions
-                                            undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps))
+                                            undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset))
                                             redoStack = []
                                             let (natW, natH, fontSize) = naturalTextStampSize(text: text, fontId: fontId, maxWidth: canvasSize.width * 0.7)
                                             placedStamps[idx].stampText = text
