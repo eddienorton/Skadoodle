@@ -172,7 +172,7 @@ struct ContentView: View {
             }
         } message: {
             Text("Version \(appStoreVersion) is available. You're on \(AppInfo.currentVersion).")
-        }
+        } 
         .onAppear {
             WorldGalleryManager.shared.fetchRecent()
             if !hasSeenOnboarding {
