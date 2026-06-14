@@ -12,7 +12,7 @@ Eddie Brayman, 72, independent iOS developer, East Village NYC. 50+ years coding
 **App Store URL:** https://apps.apple.com/us/app/skadoodle/id6771497563  
 **Bundle ID:** maxsdad.skadoodle  
 **Firebase project:** snoodle-68bfc  
-**Current version at last session:** 1.9 build 4 (submitted, June 2026)
+**Current version at last session:** 2.0 build 1 (June 2026)
 
 ---
 
@@ -53,7 +53,7 @@ Eddie Brayman, 72, independent iOS developer, East Village NYC. 50+ years coding
 | `DrawScreen.swift` | ~2127 | Main canvas, stamp placement, gesture handling, AI caption flow |
 | `DrawingEngine.swift` | ~1494 | Pen rendering (pencil/ink/brush/marker/chalk/neon/spray/watercolor/dotted/dualTone) |
 | `StampCanvas.swift` | ~556 | UIKit stamp rendering, hit testing (pixel-accurate scaleAspectFit fix) |
-| `StampTools.swift` | ~1064 | PlacedStamp model, stamp picker, renderCanvasWithStamps |
+| `StampTools.swift` | ~1200 | PlacedStamp model, stamp picker, renderCanvasWithStamps, TextStampComposer |
 | `ProfileView.swift` | ~1002 | PublicProfileView, follow lists, profile editing |
 | `SettingsTab.swift` | ~801 | Settings, account delete, download my doodles |
 | `Models.swift` | ~300 | SnoodleEntry, SnoodleStore, share card generation |
@@ -121,6 +121,26 @@ New submissions now write `searchIndex` to Firestore for future scalable text se
 ### 4. Provisioning profile conflict
 **Root cause:** Old provisioning profile "Skadoodle Development" for `com.eddiebrayman.skadoodle` was cached and blocked Debug builds after bundle ID changed to `maxsdad.skadoodle`.  
 **Fix:** Deleted old profile from developer.apple.com, downloaded fresh profiles in Xcode Settings → Accounts, re-enabled Automatically manage signing.
+
+---
+
+## New in v2.0
+
+### Text Stamp Overhaul
+- **12 fonts** — Default, Rounded, Serif, Mono, Handwriting, Futura, Typewriter, Avenir, Chalkboard, Didot, Marker, Gill Sans
+- **Bold / Italic toggles** — independent B and I buttons; combining both gives bold italic. Replaces old R/B/I/BI radio.
+- **Text alignment** — left / center / right per stamp
+- **WYSIWYG composer** — combined input/preview: TextEditor styled with the selected font/color/background, always visible above the keyboard. Controls scroll below; Place button pinned via `.safeAreaInset`.
+- **`PlacedStamp` new fields:** `fontStyle: String` ("regular"/"bold"/"italic"/"bolditalic"), `textAlignment: String` ("left"/"center"/"right")
+- All four render paths updated: live UILabel (`StampCanvas.updateVisual`), cached UIImage (`StampCanvas.renderImage`), final export (`renderCanvasWithStamps`), share card (`DrawScreen`)
+- Cache key includes `fontStyle` and `textAlignment` to prevent stale cache hits
+
+### Other 2.0 fixes (carried from 1.9.x work)
+- Artist strip no longer flickers — `topArtistEntries` only written by `fetchTopArtistEntries()`, not reset on refresh
+- Profile grid raised from 50 to 200 doodle limit; blank tiles fixed by switching to `RetryAsyncImage`
+- World gallery share card always saves correct doodle (cleared `loadedWorldImage` on swipe)
+- Update alert false-suppression fixed — dismissal key is now `"current->store"` pair
+- Text stamp padding tightened: `hPadding: 10, vPadding: 5`
 
 ---
 
