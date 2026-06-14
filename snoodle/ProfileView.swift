@@ -645,21 +645,17 @@ struct PublicProfileView: View {
             } else {
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 3) {
                     ForEach(Array(doodles.enumerated()), id: \.element.id) { index, doodle in
-                        if let url = doodle.imageStorageURL {
-                            AsyncImage(url: url) { phase in
-                                if case .success(let img) = phase {
-                                    img.resizable().aspectRatio(3/4, contentMode: .fill).clipped()
-                                } else {
-                                    Color(UIColor.secondarySystemBackground).aspectRatio(3/4, contentMode: .fill)
+                        if doodle.imageStorageURL != nil {
+                            RetryAsyncImage(url: doodle.imageStorageURL, contentMode: .fill)
+                                .aspectRatio(3/4, contentMode: .fill)
+                                .clipped()
+                                .onTapGesture {
+                                    if isOwnProfile {
+                                        actionDoodle = doodle
+                                    } else {
+                                        selectedDoodleIndex = index
+                                    }
                                 }
-                            }
-                            .onTapGesture {
-                                if isOwnProfile {
-                                    actionDoodle = doodle
-                                } else {
-                                    selectedDoodleIndex = index
-                                }
-                            }
                         }
                     }
                 }

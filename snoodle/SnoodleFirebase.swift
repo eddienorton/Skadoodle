@@ -596,7 +596,7 @@ func fetchPublicDoodles(for userId: String, completion: @escaping ([WorldSnoodle
     db.collection("world_gallery")
         .whereField("userId", isEqualTo: userId)
         .order(by: "timestamp", descending: true)
-        .limit(to: 50)
+        .limit(to: 200)
         .getDocuments { snapshot, _ in
             guard let docs = snapshot?.documents else {
                 DispatchQueue.main.async { completion([]) }
@@ -714,7 +714,6 @@ class WorldGalleryManager: ObservableObject {
                         self.currentQuery = .everyone
                         let snoodles = self.parseDocuments(docs)
                         self.entries = snoodles
-                        self.topArtistEntries = snoodles
                         self.lastFetch = Date()
                         self.applyProfilesAndLikes(to: snoodles)
                         self.fetchTopArtistEntries()
@@ -742,7 +741,6 @@ class WorldGalleryManager: ObservableObject {
                     self.lastDocumentSnapshot = docs.last
                     let snoodles = self.parseDocuments(docs)
                     self.entries = snoodles
-                    self.topArtistEntries = snoodles  // keep for strip even when filtered
                     self.lastFetch = Date()
                     self.syncLocalSubmittedFlags(worldIds: Set(self.entries.map { $0.id }))
                     self.applyProfilesAndLikes(to: snoodles)

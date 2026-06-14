@@ -1041,6 +1041,7 @@ struct WorldSnoodleDetailView: View {
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
             .scrollDisabled(isZoomed)
+            .onChange(of: currentIndex) { loadedWorldImage = nil }
 
             VStack(spacing: 0) {
                 HStack {

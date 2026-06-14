@@ -168,7 +168,7 @@ struct ContentView: View {
                 }
             }
             Button("Continue", role: .cancel) {
-                dismissedUpdateVersion = appStoreVersion
+                dismissedUpdateVersion = "\(AppInfo.currentVersion)->\(appStoreVersion)"
             }
         } message: {
             Text("Version \(appStoreVersion) is available. You're on \(AppInfo.currentVersion).")
@@ -365,8 +365,8 @@ extension ContentView {
                   let storeVersion = first["version"] as? String else { return }
             DispatchQueue.main.async {
                 let current = AppInfo.currentVersion
-                // Only show if store version is newer and user hasn't dismissed this version
-                if storeVersion != current && storeVersion != dismissedUpdateVersion {
+                // Only show if store version is newer and user hasn't dismissed this specific upgrade
+                if storeVersion != current && dismissedUpdateVersion != "\(current)->\(storeVersion)" {
                     appStoreVersion = storeVersion
                     showUpdateAlert = true
                 }
