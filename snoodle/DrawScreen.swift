@@ -730,20 +730,22 @@ struct DrawScreen: View {
         showStampMagicMenu = true
     }
 
-    func placeTextStamp(text: String, fontId: String, color: Color, bgColor: Color) {
+    func placeTextStamp(text: String, fontId: String, fontStyle: String, alignment: String, color: Color, bgColor: Color) {
         let center = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
         undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset))
         redoStack = []
 
         // Compute natural content size honoring explicit line breaks
         let (natW, natH, fontSize) = naturalTextStampSize(
-            text: text, fontId: fontId,
+            text: text, fontId: fontId, fontStyle: fontStyle,
             maxWidth: canvasSize.width * 0.7
         )
 
         var stamp = PlacedStamp(emoji: "✏️", position: center, size: fontSize)
         stamp.stampText = text
         stamp.fontName = fontId
+        stamp.fontStyle = fontStyle
+        stamp.textAlignment = alignment
         stamp.textColor = color
         stamp.textBgColor = bgColor
         stamp.stampWidth = natW
@@ -756,10 +758,11 @@ struct DrawScreen: View {
     /// Measure text at a good starting font size, respecting ONLY explicit line breaks.
     /// Each line is measured independently — no word wrap.
     /// Returns (width, height, fontSize).
-    func naturalTextStampSize(text: String, fontId: String, maxWidth: CGFloat) -> (CGFloat, CGFloat, CGFloat) {
+    func naturalTextStampSize(text: String, fontId: String, fontStyle: String, maxWidth: CGFloat) -> (CGFloat, CGFloat, CGFloat) {
         let baseFontSize: CGFloat = 48
-        let padding: CGFloat = 24
-        let font = TextStampFont.font(forId: fontId).withSize(baseFontSize)
+        let hPadding: CGFloat = 10
+        let vPadding: CGFloat = 5
+        let font = TextStampFont.font(forId: fontId, style: fontStyle).withSize(baseFontSize)
         let attrs: [NSAttributedString.Key: Any] = [.font: font]
 
         // Measure each explicit line with unlimited width — no word wrap
@@ -775,8 +778,8 @@ struct DrawScreen: View {
 
         // Add line spacing between lines
         let lineSpacing: CGFloat = baseFontSize * 0.15 * CGFloat(max(lines.count - 1, 0))
-        let w = maxLineW + padding * 2
-        let h = totalH + lineSpacing + padding * 2
+        let w = maxLineW + hPadding * 2
+        let h = totalH + lineSpacing + vPadding * 2
         return (w, h, baseFontSize)
     }
 
@@ -1128,15 +1131,23 @@ struct DrawScreen: View {
                                     initialText: editingStampId.flatMap { id in
                                         placedStamps.first(where: { $0.id == id })?.stampText
                                     },
-                                    onPlace: { text, fontId, color, bgColor in
+                                    initialFontStyle: editingStampId.flatMap { id in
+                                        placedStamps.first(where: { $0.id == id })?.fontStyle
+                                    },
+                                    initialAlignment: editingStampId.flatMap { id in
+                                        placedStamps.first(where: { $0.id == id })?.textAlignment
+                                    },
+                                    onPlace: { text, fontId, fontStyle, alignment, color, bgColor in
                                         if let editId = editingStampId,
                                            let idx = placedStamps.firstIndex(where: { $0.id == editId }) {
                                             // Edit existing — update in place, recompute dimensions
                                             undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset))
                                             redoStack = []
-                                            let (natW, natH, fontSize) = naturalTextStampSize(text: text, fontId: fontId, maxWidth: canvasSize.width * 0.7)
+                                            let (natW, natH, fontSize) = naturalTextStampSize(text: text, fontId: fontId, fontStyle: fontStyle, maxWidth: canvasSize.width * 0.7)
                                             placedStamps[idx].stampText = text
                                             placedStamps[idx].fontName = fontId
+                                            placedStamps[idx].fontStyle = fontStyle
+                                            placedStamps[idx].textAlignment = alignment
                                             placedStamps[idx].textColor = color
                                             placedStamps[idx].textBgColor = bgColor
                                             placedStamps[idx].size = fontSize
@@ -1145,7 +1156,7 @@ struct DrawScreen: View {
                                             selectedStampId = editId
                                             showStampMagicMenu = true
                                         } else {
-                                            placeTextStamp(text: text, fontId: fontId, color: color, bgColor: bgColor)
+                                            placeTextStamp(text: text, fontId: fontId, fontStyle: fontStyle, alignment: alignment, color: color, bgColor: bgColor)
                                         }
                                         showTextComposer = false
                                         editingStampId = nil
@@ -1750,15 +1761,20 @@ struct WindowPinchView: UIViewRepresentable {
                             UIBezierPath(roundedRect: CGRect(x: 0, y: 0, width: dw, height: dh),
                                          cornerRadius: 8).fill()
                         }
-                        let font = TextStampFont.font(forId: stamp.fontName).withSize(fontSize)
-                        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor(stamp.textColor)]
+                        let font = TextStampFont.font(forId: stamp.fontName, style: stamp.fontStyle).withSize(fontSize)
+                        let nsAlignment: NSTextAlignment = stamp.textAlignment == "left" ? .left : stamp.textAlignment == "right" ? .right : .center
+                        let para = NSMutableParagraphStyle()
+                        para.alignment = nsAlignment
+                        para.lineBreakMode = .byClipping
+                        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor(stamp.textColor), .paragraphStyle: para]
                         let str = text as NSString
-                        let pad: CGFloat = 20
-                        let br = str.boundingRect(with: CGSize(width: dw - pad * 2, height: dh - pad * 2),
+                        let hPad: CGFloat = 10
+                        let vPad: CGFloat = 5
+                        let br = str.boundingRect(with: CGSize(width: dw - hPad * 2, height: dh - vPad * 2),
                                                    options: [.usesLineFragmentOrigin, .usesFontLeading],
                                                    attributes: attrs, context: nil)
-                        str.draw(with: CGRect(x: (dw - br.width) / 2, y: (dh - br.height) / 2,
-                                              width: br.width, height: br.height),
+                        str.draw(with: CGRect(x: hPad, y: (dh - br.height) / 2,
+                                              width: dw - hPad * 2, height: br.height),
                                  options: [.usesLineFragmentOrigin, .usesFontLeading],
                                  attributes: attrs, context: nil)
                     }
@@ -1921,9 +1937,9 @@ struct StampItemView: View {
                 .scaledToFit()
         } else if let text = stamp.stampText {
             Text(text)
-                .font(textStampSwiftUIFont(fontId: stamp.fontName, size: stamp.size * 0.55))
+                .font(textStampSwiftUIFont(fontId: stamp.fontName, fontStyle: stamp.fontStyle, size: stamp.size * 0.55))
                 .foregroundColor(stamp.textColor)
-                .multilineTextAlignment(.center)
+                .multilineTextAlignment(stamp.textAlignment == "left" ? .leading : stamp.textAlignment == "right" ? .trailing : .center)
                 .lineLimit(nil)
                 .minimumScaleFactor(0.3)
                 .frame(width: stamp.size, height: stamp.size)
@@ -1935,14 +1951,31 @@ struct StampItemView: View {
         }
     }
 
-    func textStampSwiftUIFont(fontId: String?, size: CGFloat) -> Font {
+    func textStampSwiftUIFont(fontId: String?, fontStyle: String, size: CGFloat) -> Font {
+        let isBold   = fontStyle == "bold"   || fontStyle == "bolditalic"
+        let isItalic = fontStyle == "italic" || fontStyle == "bolditalic"
+
+        func apply(_ base: Font) -> Font {
+            var f = base
+            if isBold   { f = f.bold() }
+            if isItalic { f = f.italic() }
+            return f
+        }
+
         switch fontId {
-        case "bold":        return .system(size: size, weight: .bold)
-        case "rounded":     return .system(size: size, weight: .regular, design: .rounded)
-        case "serif":       return .custom("Georgia", size: size)
-        case "mono":        return .system(size: size, design: .monospaced)
-        case "handwriting": return .custom("SnellRoundhand", size: size)
-        default:            return .system(size: size)
+        case "system":      return apply(.system(size: size))
+        case "rounded":     return apply(.system(size: size, weight: .regular, design: .rounded))
+        case "serif":       return apply(.custom("Georgia", size: size))
+        case "mono":        return apply(.system(size: size, design: .monospaced))
+        case "handwriting": return apply(.custom("SnellRoundhand", size: size))
+        case "futura":      return apply(.custom("Futura-Medium", size: size))
+        case "typewriter":  return apply(.custom("AmericanTypewriter", size: size))
+        case "avenir":      return apply(.custom("Avenir-Book", size: size))
+        case "chalkboard":  return apply(.custom("ChalkboardSE-Regular", size: size))
+        case "didot":       return apply(.custom("Didot", size: size))
+        case "marker":      return apply(.custom("MarkerFelt-Thin", size: size))
+        case "gillsans":    return apply(.custom("GillSans", size: size))
+        default:            return apply(.system(size: size))
         }
     }
 

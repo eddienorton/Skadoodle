@@ -108,11 +108,11 @@ class StampItemUIView: UIView, UIGestureRecognizerDelegate {
             emojiLabel.text = text
             // stamp.size stores the base font size for content-sized text stamps
             let fontSize = stamp.stampWidth > 0 ? stamp.size : fitTextFontSize(text: text, stampSize: s, baseFontId: stamp.fontName)
-            emojiLabel.font = TextStampFont.font(forId: stamp.fontName).withSize(fontSize)
+            emojiLabel.font = TextStampFont.font(forId: stamp.fontName, style: stamp.fontStyle).withSize(fontSize)
             emojiLabel.textColor = UIColor(stamp.textColor)
             emojiLabel.numberOfLines = 0
             emojiLabel.lineBreakMode = .byClipping  // no word wrap — only explicit CRs
-            emojiLabel.textAlignment = .center
+            emojiLabel.textAlignment = stamp.textAlignment == "left" ? .left : stamp.textAlignment == "right" ? .right : .center
             emojiLabel.adjustsFontSizeToFitWidth = false
             emojiLabel.isHidden = false
             imageView.isHidden = true
@@ -420,11 +420,11 @@ struct StampCanvasView: UIViewRepresentable {
                 let hasBg = bgColor != .clear
                 let dw = stamp.displayWidth
                 let dh = stamp.displayHeight
-                let key = "txt_\(text.hashValue)_\(stamp.fontName ?? "system")_\(Int(dw))x\(Int(dh))_\(hasBg)"
+                let key = "txt_\(text.hashValue)_\(stamp.fontName ?? "system")_\(stamp.fontStyle)_\(stamp.textAlignment)_\(Int(dw))x\(Int(dh))_\(hasBg)"
                 if let cached = emojiCache[key] { return cached }
                 // Font size is stored in stamp.size for content-sized stamps
                 let fontSize = stamp.stampWidth > 0 ? stamp.size : fitTextFontSize(text: text, stampSize: s, baseFontId: stamp.fontName)
-                let font = TextStampFont.font(forId: stamp.fontName).withSize(fontSize)
+                let font = TextStampFont.font(forId: stamp.fontName, style: stamp.fontStyle).withSize(fontSize)
                 let color = UIColor(stamp.textColor)
                 let fmt = UIGraphicsImageRendererFormat()
                 fmt.opaque = hasBg
@@ -435,15 +435,20 @@ struct StampCanvasView: UIViewRepresentable {
                         UIBezierPath(roundedRect: CGRect(x: 0, y: 0, width: dw, height: dh),
                                      cornerRadius: 8).fill()
                     }
-                    let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
-                    let pad: CGFloat = 20
+                    let nsAlignment: NSTextAlignment = stamp.textAlignment == "left" ? .left : stamp.textAlignment == "right" ? .right : .center
+                    let para = NSMutableParagraphStyle()
+                    para.alignment = nsAlignment
+                    para.lineBreakMode = .byClipping
+                    let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color, .paragraphStyle: para]
+                    let hPad: CGFloat = 10
+                    let vPad: CGFloat = 5
                     let str = text as NSString
                     let br = str.boundingRect(
-                        with: CGSize(width: dw - pad * 2, height: dh - pad * 2),
+                        with: CGSize(width: dw - hPad * 2, height: dh - vPad * 2),
                         options: [.usesLineFragmentOrigin, .usesFontLeading],
                         attributes: attrs, context: nil)
-                    str.draw(with: CGRect(x: (dw - br.width) / 2, y: (dh - br.height) / 2,
-                                          width: br.width, height: br.height),
+                    str.draw(with: CGRect(x: hPad, y: (dh - br.height) / 2,
+                                          width: dw - hPad * 2, height: br.height),
                              options: [.usesLineFragmentOrigin, .usesFontLeading],
                              attributes: attrs, context: nil)
                 }

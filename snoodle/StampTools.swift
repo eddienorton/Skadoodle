@@ -98,6 +98,8 @@ struct PlacedStamp: Identifiable {
     var customImageId: UUID? = nil  // if set, render from CustomStampManager instead of emoji
     var stampText: String? = nil    // if set, render as text stamp
     var fontName: String? = nil     // font for text stamp
+    var fontStyle: String = "regular"    // "regular", "bold", "italic", "bolditalic"
+    var textAlignment: String = "center" // "left", "center", "right"
     var textColor: Color = .black   // color for text stamp
     var textBgColor: Color = .clear // background color for text stamp
 
@@ -125,20 +127,31 @@ struct TextStampFont: Identifiable {
     let font: UIFont
 
     static let all: [TextStampFont] = [
-        TextStampFont(id: "system",     label: "Default",    font: .systemFont(ofSize: 48, weight: .regular)),
-        TextStampFont(id: "bold",       label: "Bold",       font: .systemFont(ofSize: 48, weight: .bold)),
-        TextStampFont(id: "rounded",    label: "Rounded",    font: {
-            let desc = UIFontDescriptor.preferredFontDescriptor(withTextStyle: .body)
-                .withDesign(.rounded)!
+        TextStampFont(id: "system",      label: "Default",      font: .systemFont(ofSize: 48, weight: .regular)),
+        TextStampFont(id: "rounded",     label: "Rounded",      font: {
+            let desc = UIFontDescriptor.preferredFontDescriptor(withTextStyle: .body).withDesign(.rounded)!
             return UIFont(descriptor: desc, size: 48)
         }()),
-        TextStampFont(id: "serif",      label: "Serif",      font: .init(name: "Georgia", size: 48) ?? .systemFont(ofSize: 48)),
-        TextStampFont(id: "mono",       label: "Mono",       font: .monospacedSystemFont(ofSize: 48, weight: .regular)),
-        TextStampFont(id: "handwriting",label: "Script",     font: .init(name: "SnellRoundhand", size: 48) ?? .systemFont(ofSize: 48)),
+        TextStampFont(id: "serif",       label: "Serif",        font: .init(name: "Georgia", size: 48) ?? .systemFont(ofSize: 48)),
+        TextStampFont(id: "mono",        label: "Mono",         font: .monospacedSystemFont(ofSize: 48, weight: .regular)),
+        TextStampFont(id: "handwriting", label: "Script",       font: .init(name: "SnellRoundhand", size: 48) ?? .systemFont(ofSize: 48)),
+        TextStampFont(id: "futura",      label: "Futura",       font: .init(name: "Futura-Medium", size: 48) ?? .systemFont(ofSize: 48)),
+        TextStampFont(id: "typewriter",  label: "Typewriter",   font: .init(name: "AmericanTypewriter", size: 48) ?? .systemFont(ofSize: 48)),
+        TextStampFont(id: "avenir",      label: "Avenir",       font: .init(name: "Avenir-Book", size: 48) ?? .systemFont(ofSize: 48)),
+        TextStampFont(id: "chalkboard",  label: "Chalkboard",   font: .init(name: "ChalkboardSE-Regular", size: 48) ?? .systemFont(ofSize: 48)),
+        TextStampFont(id: "didot",       label: "Didot",        font: .init(name: "Didot", size: 48) ?? .systemFont(ofSize: 48)),
+        TextStampFont(id: "marker",      label: "Marker",       font: .init(name: "MarkerFelt-Thin", size: 48) ?? .systemFont(ofSize: 48)),
+        TextStampFont(id: "gillsans",    label: "Gill Sans",    font: .init(name: "GillSans", size: 48) ?? .systemFont(ofSize: 48)),
     ]
 
-    static func font(forId id: String?) -> UIFont {
-        all.first(where: { $0.id == id })?.font ?? all[0].font
+    static func font(forId id: String?, style: String = "regular") -> UIFont {
+        let base = all.first(where: { $0.id == id })?.font ?? all[0].font
+        var traits: UIFontDescriptor.SymbolicTraits = []
+        if style == "bold" || style == "bolditalic" { traits.insert(.traitBold) }
+        if style == "italic" || style == "bolditalic" { traits.insert(.traitItalic) }
+        guard !traits.isEmpty,
+              let descriptor = base.fontDescriptor.withSymbolicTraits(traits) else { return base }
+        return UIFont(descriptor: descriptor, size: base.pointSize)
     }
 }
 
@@ -589,13 +602,28 @@ struct StampToolButton: View {
 
 func renderFontFor(stamp: PlacedStamp) -> Font {
     let s = stamp.size
+    let isBold   = stamp.fontStyle == "bold"   || stamp.fontStyle == "bolditalic"
+    let isItalic = stamp.fontStyle == "italic" || stamp.fontStyle == "bolditalic"
+    func apply(_ base: Font) -> Font {
+        var f = base
+        if isBold   { f = f.bold() }
+        if isItalic { f = f.italic() }
+        return f
+    }
     switch stamp.fontName ?? "system" {
-    case "bold":         return .system(size: s, weight: .bold)
-    case "rounded":      return .system(size: s, weight: .regular, design: .rounded)
-    case "serif":        return .custom("Georgia", size: s)
-    case "mono":         return .system(size: s, design: .monospaced)
-    case "handwriting":  return .custom("SnellRoundhand", size: s)
-    default:             return .system(size: s)
+    case "system":      return apply(.system(size: s))
+    case "rounded":     return apply(.system(size: s, weight: .regular, design: .rounded))
+    case "serif":       return apply(.custom("Georgia", size: s))
+    case "mono":        return apply(.system(size: s, design: .monospaced))
+    case "handwriting": return apply(.custom("SnellRoundhand", size: s))
+    case "futura":      return apply(.custom("Futura-Medium", size: s))
+    case "typewriter":  return apply(.custom("AmericanTypewriter", size: s))
+    case "avenir":      return apply(.custom("Avenir-Book", size: s))
+    case "chalkboard":  return apply(.custom("ChalkboardSE-Regular", size: s))
+    case "didot":       return apply(.custom("Didot", size: s))
+    case "marker":      return apply(.custom("MarkerFelt-Thin", size: s))
+    case "gillsans":    return apply(.custom("GillSans", size: s))
+    default:            return apply(.system(size: s))
     }
 }
 
@@ -631,7 +659,7 @@ func renderCanvasWithStamps(lines: [DrawingLine], stamps: [PlacedStamp], size: C
                     Text(text)
                         .font(renderFontFor(stamp: stamp))
                         .foregroundColor(stamp.textColor)
-                        .multilineTextAlignment(.center)
+                        .multilineTextAlignment(stamp.textAlignment == "left" ? .leading : stamp.textAlignment == "right" ? .trailing : .center)
                         .lineLimit(nil)
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(24)
@@ -800,9 +828,11 @@ struct StampMagicMenu: View {
 struct TextStampComposer: View {
     @Binding var textInput: String
     @Binding var selectedFontId: String
+    @Binding var selectedFontStyle: String       // "regular", "bold", "italic", "bolditalic"
+    @Binding var selectedAlignment: String       // "left", "center", "right"
     @Binding var selectedTextColorIndex: Int
     @Binding var selectedTextBgColorIndex: Int   // -1 = clear
-    var onPlace: (String, String, Color, Color) -> Void
+    var onPlace: (String, String, String, String, Color, Color) -> Void
 
     @FocusState private var isFocused: Bool
 
@@ -815,213 +845,270 @@ struct TextStampComposer: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 20) {
+        VStack(spacing: 0) {
 
-                // Preview
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12)
-                        .fill(selectedBgColor == .clear
-                              ? Color(UIColor.secondarySystemBackground)
-                              : selectedBgColor)
-                        .frame(height: 110)
-                        // checkerboard hint when transparent
-                        .overlay(
-                            Group {
-                                if selectedBgColor == .clear {
-                                    Text(textInput.isEmpty ? "Your text" : textInput)
-                                        .font(swiftUIFont(forId: selectedFontId, size: 28))
-                                        .foregroundColor(textInput.isEmpty ? .secondary : selectedTextColor)
-                                        .multilineTextAlignment(.center)
-                                        .minimumScaleFactor(0.2)
-                                        .lineLimit(nil)
-                                        .padding(.horizontal, 12)
-                                } else {
-                                    Text(textInput.isEmpty ? "Your text" : textInput)
-                                        .font(swiftUIFont(forId: selectedFontId, size: 28))
-                                        .foregroundColor(textInput.isEmpty ? .secondary : selectedTextColor)
-                                        .multilineTextAlignment(.center)
-                                        .minimumScaleFactor(0.2)
-                                        .lineLimit(nil)
-                                        .padding(.horizontal, 12)
-                                }
-                            }
-                        )
+            // ── Combined input / preview ──────────────────────────────────
+            // TextEditor styled to match stamp output — what you type IS the preview
+            ZStack(alignment: .topLeading) {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(selectedBgColor == .clear
+                          ? Color(UIColor.secondarySystemBackground)
+                          : selectedBgColor)
+
+                if textInput.isEmpty {
+                    Text("Type your text...")
+                        .font(swiftUIFont(forId: selectedFontId, size: 22, style: selectedFontStyle))
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 12)
+                        .allowsHitTesting(false)
                 }
-                .cornerRadius(12)
-                .padding(.horizontal, 16)
 
-                // Multi-line text editor
-                ZStack(alignment: .topLeading) {
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(Color(UIColor.secondarySystemBackground))
-                    if textInput.isEmpty {
-                        Text("Type your text...")
-                            .foregroundColor(.secondary)
-                            .font(.system(size: 16))
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 10)
-                    }
-                    TextEditor(text: $textInput)
-                        .font(.system(size: 16))
-                        .scrollContentBackground(.hidden)
-                        .background(Color.clear)
-                        .frame(minHeight: 80, maxHeight: 120)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .padding(.trailing, 28)
-                        .focused($isFocused)
-                    // Clear button
-                    if !textInput.isEmpty {
-                        VStack {
-                            HStack {
-                                Spacer()
-                                Button {
-                                    textInput = ""
-                                } label: {
-                                    Image(systemName: "xmark.circle.fill")
-                                        .font(.system(size: 18))
-                                        .foregroundColor(.secondary)
-                                        .padding(8)
-                                }
-                            }
+                TextEditor(text: $textInput)
+                    .font(swiftUIFont(forId: selectedFontId, size: 22, style: selectedFontStyle))
+                    .foregroundColor(selectedTextColor)
+                    .multilineTextAlignment(selectedAlignment == "left" ? .leading : selectedAlignment == "right" ? .trailing : .center)
+                    .scrollContentBackground(.hidden)
+                    .background(Color.clear)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .padding(.trailing, textInput.isEmpty ? 0 : 28)
+                    .focused($isFocused)
+
+                if !textInput.isEmpty {
+                    VStack {
+                        HStack {
                             Spacer()
-                        }
-                    }
-                }
-                .frame(minHeight: 80, maxHeight: 120)
-                .padding(.horizontal, 16)
-                .onAppear { isFocused = true }
-
-                // Place button — above keyboard
-                Button {
-                    onPlace(textInput, selectedFontId, selectedTextColor, selectedBgColor)
-                } label: {
-                    Text("Place Text Stamp")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundColor(.white)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
-                        .background(textInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Color.gray : Color.purple)
-                        .cornerRadius(14)
-                        .padding(.horizontal, 16)
-                }
-                .disabled(textInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-
-                // Font picker
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Font")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(.secondary)
-                        .padding(.horizontal, 16)
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 10) {
-                            ForEach(TextStampFont.all) { f in
-                                Button {
-                                    selectedFontId = f.id
-                                } label: {
-                                    Text(f.label)
-                                        .font(swiftUIFont(forId: f.id, size: 15))
-                                        .padding(.horizontal, 14)
-                                        .padding(.vertical, 8)
-                                        .background(selectedFontId == f.id ? Color.purple.opacity(0.15) : Color(UIColor.secondarySystemBackground))
-                                        .foregroundColor(selectedFontId == f.id ? .purple : .primary)
-                                        .cornerRadius(20)
-                                        .overlay(RoundedRectangle(cornerRadius: 20)
-                                            .stroke(selectedFontId == f.id ? Color.purple : Color.gray.opacity(0.2), lineWidth: 1.5))
-                                }
-                            }
-                        }
-                        .padding(.horizontal, 16)
-                    }
-                }
-
-                // Text color picker
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Text Color")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(.secondary)
-                        .padding(.horizontal, 16)
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 10) {
-                            ForEach(Array(paletteColors.enumerated()), id: \.offset) { idx, color in
-                                Button { selectedTextColorIndex = idx } label: {
-                                    Circle()
-                                        .fill(color)
-                                        .frame(width: 32, height: 32)
-                                        .overlay(Circle().stroke(Color.white, lineWidth: selectedTextColorIndex == idx ? 3 : 0))
-                                        .overlay(Circle().stroke(Color.gray.opacity(0.3), lineWidth: 1))
-                                        .shadow(color: .black.opacity(selectedTextColorIndex == idx ? 0.3 : 0), radius: 3)
-                                }
-                            }
-                        }
-                        .padding(.horizontal, 16)
-                    }
-                }
-
-                // Background color picker
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Background")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(.secondary)
-                        .padding(.horizontal, 16)
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 10) {
-                            // Transparent option first
-                            Button { selectedTextBgColorIndex = -1 } label: {
+                            Button { textInput = "" } label: {
                                 ZStack {
                                     Circle()
-                                        .fill(Color(UIColor.secondarySystemBackground))
-                                        .frame(width: 32, height: 32)
-                                    // diagonal slash = transparent
-                                    Image(systemName: "circle.slash")
+                                        .fill(Color.white)
+                                        .frame(width: 18, height: 18)
+                                    Image(systemName: "xmark.circle.fill")
                                         .font(.system(size: 20))
                                         .foregroundColor(.secondary)
                                 }
-                                .overlay(Circle().stroke(Color.purple, lineWidth: selectedTextBgColorIndex == -1 ? 3 : 0))
-                                .overlay(Circle().stroke(Color.gray.opacity(0.3), lineWidth: selectedTextBgColorIndex == -1 ? 0 : 1))
+                                .padding(8)
                             }
-                            ForEach(Array(paletteColors.enumerated()), id: \.offset) { idx, color in
-                                Button { selectedTextBgColorIndex = idx } label: {
-                                    Circle()
-                                        .fill(color)
-                                        .frame(width: 32, height: 32)
-                                        .overlay(Circle().stroke(Color.white, lineWidth: selectedTextBgColorIndex == idx ? 3 : 0))
-                                        .overlay(Circle().stroke(Color.gray.opacity(0.3), lineWidth: 1))
-                                        .shadow(color: .black.opacity(selectedTextBgColorIndex == idx ? 0.3 : 0), radius: 3)
+                        }
+                        Spacer()
+                    }
+                }
+            }
+            .frame(height: 90)
+            .cornerRadius(12)
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .padding(.bottom, 8)
+            .onAppear { isFocused = true }
+
+            Divider()
+
+            // ── Controls (scrollable) ─────────────────────────────────────
+            ScrollView {
+                VStack(spacing: 16) {
+
+                    // Font picker
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Font")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 16)
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 10) {
+                                ForEach(TextStampFont.all) { f in
+                                    Button {
+                                        selectedFontId = f.id
+                                    } label: {
+                                        Text(f.label)
+                                            .font(swiftUIFont(forId: f.id, size: 15, style: selectedFontStyle))
+                                            .padding(.horizontal, 14)
+                                            .padding(.vertical, 8)
+                                            .background(selectedFontId == f.id ? Color.purple.opacity(0.15) : Color(UIColor.secondarySystemBackground))
+                                            .foregroundColor(selectedFontId == f.id ? .purple : .primary)
+                                            .cornerRadius(20)
+                                            .overlay(RoundedRectangle(cornerRadius: 20)
+                                                .stroke(selectedFontId == f.id ? Color.purple : Color.gray.opacity(0.2), lineWidth: 1.5))
+                                    }
+                                }
+                            }
+                            .padding(.horizontal, 16)
+                        }
+                    }
+
+                    // Style + Alignment
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Style")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 16)
+                        HStack(spacing: 10) {
+                            let isBold   = selectedFontStyle == "bold" || selectedFontStyle == "bolditalic"
+                            let isItalic = selectedFontStyle == "italic" || selectedFontStyle == "bolditalic"
+
+                            Button {
+                                let nowB = !isBold
+                                selectedFontStyle = nowB ? (isItalic ? "bolditalic" : "bold") : (isItalic ? "italic" : "regular")
+                            } label: {
+                                Text("B")
+                                    .font(.system(size: 17, weight: .bold))
+                                    .frame(width: 44, height: 36)
+                                    .background(isBold ? Color.purple.opacity(0.15) : Color(UIColor.secondarySystemBackground))
+                                    .foregroundColor(isBold ? .purple : .primary)
+                                    .cornerRadius(10)
+                                    .overlay(RoundedRectangle(cornerRadius: 10)
+                                        .stroke(isBold ? Color.purple : Color.gray.opacity(0.2), lineWidth: 1.5))
+                            }
+
+                            Button {
+                                let nowI = !isItalic
+                                selectedFontStyle = isBold ? (nowI ? "bolditalic" : "bold") : (nowI ? "italic" : "regular")
+                            } label: {
+                                Text("I")
+                                    .font(.system(size: 17).italic())
+                                    .frame(width: 44, height: 36)
+                                    .background(isItalic ? Color.purple.opacity(0.15) : Color(UIColor.secondarySystemBackground))
+                                    .foregroundColor(isItalic ? .purple : .primary)
+                                    .cornerRadius(10)
+                                    .overlay(RoundedRectangle(cornerRadius: 10)
+                                        .stroke(isItalic ? Color.purple : Color.gray.opacity(0.2), lineWidth: 1.5))
+                            }
+
+                            Spacer()
+
+                            ForEach([("left","text.alignleft"),("center","text.aligncenter"),("right","text.alignright")], id: \.0) { align, icon in
+                                Button { selectedAlignment = align } label: {
+                                    Image(systemName: icon)
+                                        .font(.system(size: 14, weight: .medium))
+                                        .frame(width: 40, height: 36)
+                                        .background(selectedAlignment == align ? Color.purple.opacity(0.15) : Color(UIColor.secondarySystemBackground))
+                                        .foregroundColor(selectedAlignment == align ? .purple : .primary)
+                                        .cornerRadius(10)
+                                        .overlay(RoundedRectangle(cornerRadius: 10)
+                                            .stroke(selectedAlignment == align ? Color.purple : Color.gray.opacity(0.2), lineWidth: 1.5))
                                 }
                             }
                         }
                         .padding(.horizontal, 16)
                     }
+
+                    // Text color picker
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Text Color")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 16)
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 10) {
+                                ForEach(Array(paletteColors.enumerated()), id: \.offset) { idx, color in
+                                    Button { selectedTextColorIndex = idx } label: {
+                                        Circle()
+                                            .fill(color)
+                                            .frame(width: 32, height: 32)
+                                            .overlay(Circle().stroke(Color.white, lineWidth: selectedTextColorIndex == idx ? 3 : 0))
+                                            .overlay(Circle().stroke(Color.gray.opacity(0.3), lineWidth: 1))
+                                            .shadow(color: .black.opacity(selectedTextColorIndex == idx ? 0.3 : 0), radius: 3)
+                                    }
+                                }
+                            }
+                            .padding(.horizontal, 16)
+                        }
+                    }
+
+                    // Background color picker
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Background")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 16)
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 10) {
+                                Button { selectedTextBgColorIndex = -1 } label: {
+                                    ZStack {
+                                        Circle()
+                                            .fill(Color(UIColor.secondarySystemBackground))
+                                            .frame(width: 32, height: 32)
+                                        Image(systemName: "circle.slash")
+                                            .font(.system(size: 20))
+                                            .foregroundColor(.secondary)
+                                    }
+                                    .overlay(Circle().stroke(Color.purple, lineWidth: selectedTextBgColorIndex == -1 ? 3 : 0))
+                                    .overlay(Circle().stroke(Color.gray.opacity(0.3), lineWidth: selectedTextBgColorIndex == -1 ? 0 : 1))
+                                }
+                                ForEach(Array(paletteColors.enumerated()), id: \.offset) { idx, color in
+                                    Button { selectedTextBgColorIndex = idx } label: {
+                                        Circle()
+                                            .fill(color)
+                                            .frame(width: 32, height: 32)
+                                            .overlay(Circle().stroke(Color.white, lineWidth: selectedTextBgColorIndex == idx ? 3 : 0))
+                                            .overlay(Circle().stroke(Color.gray.opacity(0.3), lineWidth: 1))
+                                            .shadow(color: .black.opacity(selectedTextBgColorIndex == idx ? 0.3 : 0), radius: 3)
+                                    }
+                                }
+                            }
+                            .padding(.horizontal, 16)
+                        }
+                    }
+
                 }
-
-
+                .padding(.vertical, 12)
             }
-            .padding(.vertical, 16)
+        }
+        .safeAreaInset(edge: .bottom) {
+            // Place button — always visible above keyboard
+            Button {
+                onPlace(textInput, selectedFontId, selectedFontStyle, selectedAlignment, selectedTextColor, selectedBgColor)
+            } label: {
+                Text("Place Text Stamp")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .background(textInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Color.gray : Color.purple)
+                    .cornerRadius(14)
+                    .padding(.horizontal, 16)
+            }
+            .disabled(textInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .padding(.vertical, 8)
+            .background(Color(UIColor.systemBackground))
         }
     }
 
-    func swiftUIFont(forId id: String, size: CGFloat) -> Font {
+    func swiftUIFont(forId id: String, size: CGFloat, style: String = "regular") -> Font {
+        var base: Font
         switch id {
-        case "bold":        return .system(size: size, weight: .bold)
-        case "rounded":     return .system(size: size, weight: .regular, design: .rounded)
-        case "serif":       return .custom("Georgia", size: size)
-        case "mono":        return .system(size: size, design: .monospaced)
-        case "handwriting": return .custom("SnellRoundhand", size: size)
-        default:            return .system(size: size)
+        case "rounded":     base = .system(size: size, weight: .regular, design: .rounded)
+        case "serif":       base = .custom("Georgia", size: size)
+        case "mono":        base = .system(size: size, design: .monospaced)
+        case "handwriting": base = .custom("SnellRoundhand", size: size)
+        case "futura":      base = .custom("Futura-Medium", size: size)
+        case "typewriter":  base = .custom("AmericanTypewriter", size: size)
+        case "avenir":      base = .custom("Avenir-Book", size: size)
+        case "chalkboard":  base = .custom("ChalkboardSE-Regular", size: size)
+        case "didot":       base = .custom("Didot", size: size)
+        case "marker":      base = .custom("MarkerFelt-Thin", size: size)
+        case "gillsans":    base = .custom("GillSans", size: size)
+        default:            base = .system(size: size)
         }
+        if style == "bold" || style == "bolditalic" { base = base.bold() }
+        if style == "italic" || style == "bolditalic" { base = base.italic() }
+        return base
     }
+
 }
 
 // MARK: - Text Composer Sheet (standalone, accessed via T button)
 
 struct TextComposerSheet: View {
     var initialText: String? = nil
-    var onPlace: (String, String, Color, Color) -> Void
+    var initialFontStyle: String? = nil
+    var initialAlignment: String? = nil
+    var onPlace: (String, String, String, String, Color, Color) -> Void
 
     @AppStorage("lastTextStampText") private var textInput: String = ""
     @AppStorage("lastTextStampFontId") private var selectedFontId: String = "system"
+    @AppStorage("lastTextStampFontStyle") private var selectedFontStyle: String = "regular"
+    @AppStorage("lastTextStampAlignment") private var selectedAlignment: String = "center"
     @AppStorage("lastTextStampColorIndex") private var selectedTextColorIndex: Int = 0
     @AppStorage("lastTextStampBgColorIndex") private var selectedTextBgColorIndex: Int = -1
     @Environment(\.dismiss) private var dismiss
@@ -1046,10 +1133,12 @@ struct TextComposerSheet: View {
             TextStampComposer(
                 textInput: $textInput,
                 selectedFontId: $selectedFontId,
+                selectedFontStyle: $selectedFontStyle,
+                selectedAlignment: $selectedAlignment,
                 selectedTextColorIndex: $selectedTextColorIndex,
                 selectedTextBgColorIndex: $selectedTextBgColorIndex,
-                onPlace: { text, fontId, color, bgColor in
-                    onPlace(text, fontId, color, bgColor)
+                onPlace: { text, fontId, fontStyle, alignment, color, bgColor in
+                    onPlace(text, fontId, fontStyle, alignment, color, bgColor)
                 }
             )
         }
@@ -1058,6 +1147,12 @@ struct TextComposerSheet: View {
         .onAppear {
             if let initial = initialText {
                 textInput = initial
+            }
+            if let style = initialFontStyle {
+                selectedFontStyle = style
+            }
+            if let align = initialAlignment {
+                selectedAlignment = align
             }
         }
     }
