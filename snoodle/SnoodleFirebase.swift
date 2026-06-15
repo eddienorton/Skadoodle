@@ -1028,9 +1028,6 @@ class WorldGalleryManager: ObservableObject {
             self.lastDocumentSnapshot = docs.last
             let newSnoodles = self.parseDocuments(docs)
             self.entries.append(contentsOf: newSnoodles)
-            if self.currentQuery == .everyone {
-                self.topArtistEntries = self.entries
-            }
             self.lastFetch = Date()
             self.postPageProfilesAndLikes(newSnoodles)
         }

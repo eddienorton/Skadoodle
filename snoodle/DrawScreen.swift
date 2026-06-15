@@ -81,6 +81,20 @@ class BackgroundPhotoHistory: ObservableObject {
         load()
     }
 
+    func remove(at index: Int) {
+        guard index < thumbnails.count else { return }
+        var existingFull = loadRaw(key: fullKey)
+        var existingThumbs = loadRaw(key: thumbKey)
+        var existingIds = loadIds()
+        if index < existingFull.count { existingFull.remove(at: index) }
+        if index < existingThumbs.count { existingThumbs.remove(at: index) }
+        if index < existingIds.count { existingIds.remove(at: index) }
+        save(existingFull, key: fullKey)
+        save(existingThumbs, key: thumbKey)
+        UserDefaults.standard.set(existingIds, forKey: idKey)
+        load()
+    }
+
     func fullImage(at index: Int) -> UIImage? {
         index < fullImages.count ? fullImages[index] : thumbnails[safe: index]
     }
@@ -137,119 +151,114 @@ struct CanvasColorPickerView: View {
         _selectedIndex = State(initialValue: currentIndex)
     }
 
-    let columns = Array(repeating: GridItem(.flexible()), count: 6)
 
     var body: some View {
         NavigationView {
-            VStack(alignment: .leading, spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
 
-                // MARK: Browse button — always visible above scroll list
-                Button {
-                    dismiss()
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                        onPickPhoto?()
-                    }
-                } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: "photo.stack")
-                            .font(.system(size: 18))
-                        Text("Browse Camera Roll")
-                            .font(.system(size: 15, weight: .medium))
-                    }
-                    .foregroundColor(.white)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
-                    .background(Color.purple)
-                    .cornerRadius(12)
-                }
-                .padding(.horizontal, 20)
-                .padding(.top, 16)
-                .padding(.bottom, 12)
+                    // MARK: Color row (top)
+                    Text("Solid Color")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 20)
+                        .padding(.top, 16)
+                        .padding(.bottom, 10)
 
-                // MARK: Recent backgrounds history
-                Text("Recent Backgrounds")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(.secondary)
-                    .padding(.horizontal, 20)
-                    .padding(.bottom, 8)
-
-                if history.thumbnails.isEmpty {
-                    HStack {
-                        Spacer()
-                        VStack(spacing: 6) {
-                            Image(systemName: "clock.arrow.circlepath")
-                                .font(.system(size: 28))
-                                .foregroundColor(.gray.opacity(0.4))
-                            Text("Photos you use as backgrounds\nwill appear here")
-                                .font(.system(size: 12))
-                                .foregroundColor(.gray)
-                                .multilineTextAlignment(.center)
-                        }
-                        Spacer()
-                    }
-                    .frame(height: 90)
-                    .padding(.bottom, 12)
-                } else {
                     ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 10) {
-                            ForEach(history.thumbnails.indices, id: \.self) { i in
-                                Button {
-                                    let img = history.fullImage(at: i) ?? history.thumbnails[i]
-                                    history.moveToTop(at: i)  // move to front without adding dupe
-                                    let callback = onUsePhoto
-                                    dismiss()
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                                        callback?(img)
+                        HStack(spacing: 12) {
+                            ForEach(canvasColorOptions.indices, id: \.self) { i in
+                                let color = canvasColorOptions[i]
+                                Circle()
+                                    .fill(color)
+                                    .frame(width: 42, height: 42)
+                                    .overlay(
+                                        Group {
+                                            if selectedIndex == i {
+                                                ZStack {
+                                                    Circle().stroke(Color.white, lineWidth: 3).padding(-3)
+                                                    Circle().stroke(Color.blue, lineWidth: 3).padding(-7)
+                                                }
+                                            } else {
+                                                Circle().stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                                            }
+                                        }
+                                    )
+                                    .shadow(color: .black.opacity(0.1), radius: 3)
+                                    .onTapGesture {
+                                        selectedIndex = i
+                                        onSelect(i)
+                                        dismiss()
                                     }
-                                } label: {
-                                    Image(uiImage: history.thumbnails[i])
-                                        .resizable()
-                                        .scaledToFill()
-                                        .frame(width: 90, height: 90)
-                                        .clipShape(RoundedRectangle(cornerRadius: 10))
-                                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.gray.opacity(0.2), lineWidth: 0.5))
-                                }
                             }
                         }
                         .padding(.horizontal, 20)
+                        .padding(.top, 14)
+                        .padding(.bottom, 16)
                     }
-                    .padding(.bottom, 12)
-                }
 
-                Divider().padding(.horizontal, 20).padding(.bottom, 12)
+                    Divider().padding(.horizontal, 20).padding(.bottom, 12)
 
-                // MARK: Color grid
-                Text("Solid Color")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(.secondary)
-                    .padding(.horizontal, 20)
-                    .padding(.bottom, 10)
+                    // MARK: Background images grid (plus cell + recents)
+                    Text("Recent Backgrounds")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 20)
+                        .padding(.bottom, 10)
 
-                ScrollView {
-                    LazyVGrid(columns: columns, spacing: 16) {
-                        ForEach(canvasColorOptions.indices, id: \.self) { i in
-                            let color = canvasColorOptions[i]
-                            Circle()
-                                .fill(color)
-                                .frame(width: 42, height: 42)
-                                .overlay(
-                                    Group {
-                                        if selectedIndex == i {
-                                            ZStack {
-                                                Circle().stroke(Color.white, lineWidth: 3).padding(-3)
-                                                Circle().stroke(Color.blue, lineWidth: 3).padding(-7)
-                                            }
-                                        } else {
-                                            Circle().stroke(Color.gray.opacity(0.3), lineWidth: 1)
-                                        }
-                                    }
-                                )
-                                .shadow(color: .black.opacity(0.1), radius: 3)
-                                .onTapGesture {
-                                    selectedIndex = i
-                                    onSelect(i)
-                                    dismiss()
+                    let cols = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
+                    LazyVGrid(columns: cols, spacing: 10) {
+                        // Plus cell — browse camera roll
+                        Button {
+                            dismiss()
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                onPickPhoto?()
+                            }
+                        } label: {
+                            GeometryReader { geo in
+                                ZStack {
+                                    RoundedRectangle(cornerRadius: 10)
+                                        .fill(Color.purple.opacity(0.08))
+                                    RoundedRectangle(cornerRadius: 10)
+                                        .stroke(Color.purple.opacity(0.7), style: StrokeStyle(lineWidth: 2, dash: [4]))
+                                    Image(systemName: "plus")
+                                        .font(.system(size: 28))
+                                        .foregroundColor(.purple)
                                 }
+                                .frame(width: geo.size.width, height: geo.size.width)
+                            }
+                            .aspectRatio(1, contentMode: .fit)
+                        }
+
+                        // Recent background thumbnails
+                        ForEach(history.thumbnails.indices, id: \.self) { i in
+                            Button {
+                                let img = history.fullImage(at: i) ?? history.thumbnails[i]
+                                history.moveToTop(at: i)
+                                let callback = onUsePhoto
+                                dismiss()
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                    callback?(img)
+                                }
+                            } label: {
+                                GeometryReader { geo in
+                                    Image(uiImage: history.thumbnails[i])
+                                        .resizable()
+                                        .scaledToFill()
+                                        .frame(width: geo.size.width, height: geo.size.width)
+                                        .clipped()
+                                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.gray.opacity(0.2), lineWidth: 0.5))
+                                }
+                                .aspectRatio(1, contentMode: .fit)
+                            }
+                            .contextMenu {
+                                Button(role: .destructive) {
+                                    history.remove(at: i)
+                                } label: {
+                                    Label("Remove", systemImage: "trash")
+                                }
+                            }
                         }
                     }
                     .padding(.horizontal, 20)
@@ -264,8 +273,7 @@ struct CanvasColorPickerView: View {
                 }
             }
         }
-        .frame(minHeight: UIDevice.current.userInterfaceIdiom == .pad ? 480 : 0)
-        .presentationDetents([.height(UIDevice.current.userInterfaceIdiom == .pad ? 480 : 460), .large])
+        .presentationDetents([.large])
         .presentationDragIndicator(.visible)
     }
 }

@@ -12,7 +12,8 @@ Eddie Brayman, 72, independent iOS developer, East Village NYC. 50+ years coding
 **App Store URL:** https://apps.apple.com/us/app/skadoodle/id6771497563  
 **Bundle ID:** maxsdad.skadoodle  
 **Firebase project:** snoodle-68bfc  
-**Current version at last session:** 2.0 build 1 (June 2026)
+**Current version at last session:** 2.1 build 1 (June 2026)
+**Last submitted to App Store:** 2.0 build 3 (in review, June 2026)
 
 ---
 
@@ -144,12 +145,19 @@ New submissions now write `searchIndex` to Firestore for future scalable text se
 
 ---
 
+## New in v2.1
+
+### Fixes
+- **Artist strip showing only 2 artists** — `appendNextPage()` was overwriting `topArtistEntries` with the narrow paginated window on every page load, stomping the stable "top 100 by likes" dataset. Removed that line; `topArtistEntries` is now exclusively owned by `fetchTopArtistEntries()`.
+- **Background picker redesign** — Color swatches moved to top of tray. Recent backgrounds now display in a uniform 3-column square grid (was adaptive columns with varying cell heights). Long-press any background thumbnail to remove it from the list. Added `remove(at:)` to `BackgroundPhotoHistory`.
+
+---
+
 ## Outstanding Items (for next version)
 
 ### Recommended fixes
 1. **`@StateObject` on singletons** — Multiple views use `@StateObject` with `.shared` singletons. Should be `@ObservedObject`. Affects: `DrawScreen`, `GalleryTab` (5 places), `ProfileView`, `StampTools`.
-2. **`fetchCommunityCount()` in SettingsTab** — Downloads all documents to count; should use Firestore `.count.getAggregation()` instead.
-3. **`deleteAccount()` swallows all errors silently** — User sees success even if Firebase deletes partially fail.
+2. **`deleteAccount()` swallows all errors silently** — User sees success even if Firebase deletes partially fail.
 
 ### Low priority / style
 - `ProfileView.swift:409-410` — `.presentationDetents` / `.presentationDragIndicator` after `.fullScreenCover` are dead code.

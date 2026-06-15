@@ -308,6 +308,7 @@ struct StampToolButton: View {
     @State private var segmentationItem: SegmentationItem? = nil  // drives sheet(item:) atomically
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
     @State private var showSourcePicker = false
+    @State private var pendingSource: Int = 0  // 1 = camera, 2 = library
     @State private var showCamera = false
     @State private var showPhotoPicker = false
     @State private var isLoadingPhotos = false
@@ -341,7 +342,11 @@ struct StampToolButton: View {
                 }
             }
         }
-        .sheet(isPresented: $showPicker) {
+        .sheet(isPresented: $showPicker, onDismiss: {
+            if pendingSource == 1 { showCamera = true }
+            else if pendingSource == 2 { showPhotoPicker = true }
+            pendingSource = 0
+        }) {
             VStack(spacing: 0) {
                 // Drag handle
                 Capsule()
@@ -500,16 +505,12 @@ struct StampToolButton: View {
             // confirmationDialog inside sheet so it appears centered
             .confirmationDialog("Add Photo Stamp", isPresented: $showSourcePicker) {
                 Button("Take Photo") {
+                    pendingSource = 1
                     showPicker = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                        showCamera = true
-                    }
                 }
                 Button("Choose from Library") {
+                    pendingSource = 2
                     showPicker = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                        showPhotoPicker = true
-                    }
                 }
                 Button("Cancel", role: .cancel) {}
             }
