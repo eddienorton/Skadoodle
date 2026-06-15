@@ -478,9 +478,10 @@ struct SettingsTab: View {
         guard let userId = SnoodleAuthManager.shared.userId else { return }
         Firestore.firestore().collection("world_gallery")
             .whereField("userId", isEqualTo: userId)
-            .getDocuments { snapshot, _ in
+            .count
+            .getAggregation(source: .server) { snapshot, _ in
                 DispatchQueue.main.async {
-                    communityCount = snapshot?.documents.count ?? 0
+                    communityCount = Int(truncating: snapshot?.count ?? 0)
                 }
             }
     }

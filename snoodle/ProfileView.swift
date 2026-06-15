@@ -406,8 +406,6 @@ struct PublicProfileView: View {
         )) { idx in
             WorldSnoodleDetailView(initialEntries: doodles, startIndex: idx.value)
         }
-        .presentationDetents(UIDevice.current.userInterfaceIdiom == .pad ? [.large] : [.medium, .large])
-        .presentationDragIndicator(.visible)
     }
 
     // MARK: - Banner Zone

@@ -142,6 +142,10 @@ struct TextStampFont: Identifiable {
         TextStampFont(id: "didot",       label: "Didot",        font: .init(name: "Didot", size: 48) ?? .systemFont(ofSize: 48)),
         TextStampFont(id: "marker",      label: "Marker",       font: .init(name: "MarkerFelt-Thin", size: 48) ?? .systemFont(ofSize: 48)),
         TextStampFont(id: "gillsans",    label: "Gill Sans",    font: .init(name: "GillSans", size: 48) ?? .systemFont(ofSize: 48)),
+        TextStampFont(id: "zapfino",     label: "Zapfino",      font: .init(name: "Zapfino", size: 48) ?? .systemFont(ofSize: 48)),
+        TextStampFont(id: "chalkduster", label: "Chalkduster",  font: .init(name: "Chalkduster", size: 48) ?? .systemFont(ofSize: 48)),
+        TextStampFont(id: "bradleyhand", label: "Bradley Hand", font: .init(name: "BradleyHandITCTT-Bold", size: 48) ?? .systemFont(ofSize: 48)),
+        TextStampFont(id: "papyrus",     label: "Papyrus",      font: .init(name: "Papyrus", size: 48) ?? .systemFont(ofSize: 48)),
     ]
 
     static func font(forId id: String?, style: String = "regular") -> UIFont {
@@ -447,7 +451,7 @@ struct StampToolButton: View {
                                                 .fill(Color.purple.opacity(0.08))
                                                 .frame(width: 70, height: 70)
                                                 .overlay(RoundedRectangle(cornerRadius: 10)
-                                                    .stroke(Color.purple.opacity(0.3), style: StrokeStyle(lineWidth: 1.5, dash: [4])))
+                                                    .stroke(Color.purple.opacity(0.7), style: StrokeStyle(lineWidth: 2, dash: [4])))
                                             Image(systemName: "plus")
                                                 .font(.system(size: 20))
                                                 .foregroundColor(.purple)
@@ -486,7 +490,6 @@ struct StampToolButton: View {
                                 }
                                 .padding(12)
                             }
-                            addPhotoButton.padding(.bottom, 8)
                         }
                     }
                 }
@@ -623,6 +626,10 @@ func renderFontFor(stamp: PlacedStamp) -> Font {
     case "didot":       return apply(.custom("Didot", size: s))
     case "marker":      return apply(.custom("MarkerFelt-Thin", size: s))
     case "gillsans":    return apply(.custom("GillSans", size: s))
+    case "zapfino":     return apply(.custom("Zapfino", size: s))
+    case "chalkduster": return apply(.custom("Chalkduster", size: s))
+    case "bradleyhand": return apply(.custom("BradleyHandITCTT-Bold", size: s))
+    case "papyrus":     return apply(.custom("Papyrus", size: s))
     default:            return apply(.system(size: s))
     }
 }
@@ -1089,6 +1096,10 @@ struct TextStampComposer: View {
         case "didot":       base = .custom("Didot", size: size)
         case "marker":      base = .custom("MarkerFelt-Thin", size: size)
         case "gillsans":    base = .custom("GillSans", size: size)
+        case "zapfino":     base = .custom("Zapfino", size: size)
+        case "chalkduster": base = .custom("Chalkduster", size: size)
+        case "bradleyhand": base = .custom("BradleyHandITCTT-Bold", size: size)
+        case "papyrus":     base = .custom("Papyrus", size: size)
         default:            base = .system(size: size)
         }
         if style == "bold" || style == "bolditalic" { base = base.bold() }

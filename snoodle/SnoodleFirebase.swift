@@ -616,7 +616,7 @@ func fetchPublicDoodles(for userId: String, completion: @escaping ([WorldSnoodle
                     likes: d["likes"] as? Int ?? 0,
                     commentCount: d["commentCount"] as? Int ?? 0
                 )
-            }.sorted { $0.timestamp > $1.timestamp } // sort client-side
+            }
             DispatchQueue.main.async { completion(snoodles) }
         }
 }
