@@ -661,7 +661,10 @@ func renderCanvasWithStamps(lines: [DrawingLine], stamps: [PlacedStamp], size: C
                         .foregroundColor(stamp.textColor)
                         .multilineTextAlignment(stamp.textAlignment == "left" ? .leading : stamp.textAlignment == "right" ? .trailing : .center)
                         .lineLimit(nil)
-                        .frame(width: stamp.displayWidth, height: stamp.displayHeight)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(width: stamp.displayWidth)
+                        .frame(height: stamp.displayHeight)
+                        .clipped()
                         .background(stamp.textBgColor == .clear ? Color.clear : stamp.textBgColor)
                         .cornerRadius(stamp.textBgColor == .clear ? 0 : 8)
                 } else {
