@@ -116,22 +116,14 @@ struct DrawingCanvas: View {
         let isIPad = UIDevice.current.userInterfaceIdiom == .pad
         return Canvas { context, size in
             let _ = redrawTrigger
-            // Draw background photo if set — cover fit (preserve aspect ratio) with pan offset
-            if let bgImg = backgroundImage {
-                let imgW = bgImg.size.width, imgH = bgImg.size.height
-                guard imgW > 0, imgH > 0 else { return }
-                let scale = max(size.width / imgW, size.height / imgH)
-                let drawW = imgW * scale, drawH = imgH * scale
-                let x = (size.width - drawW) / 2 + backgroundOffset.width
-                let y = (size.height - drawH) / 2 + backgroundOffset.height
-                let uiImg = Image(uiImage: bgImg)
-                context.draw(uiImg, in: CGRect(x: x, y: y, width: drawW, height: drawH))
-            }
+            // Background photo is rendered as a SwiftUI layer in DrawScreen (behind this Canvas)
+            // so effects (blur, brightness, opacity, saturation) can be applied via SwiftUI modifiers.
             for line in lines { drawLine(line, in: &context) }
             if let current = currentLine { drawLine(current, in: &context) }
         }
         .allowsHitTesting(false)
         .background(canvasColor)
+        .contentShape(Rectangle())
         .gesture(isIPad ? nil : DragGesture(minimumDistance: 0)
             .onChanged { value in
                 guard !isLongPressing && stampResizeTargetId == nil else {

@@ -617,7 +617,24 @@ func fetchPublicDoodles(for userId: String, completion: @escaping ([WorldSnoodle
                     commentCount: d["commentCount"] as? Int ?? 0
                 )
             }
-            DispatchQueue.main.async { completion(snoodles) }
+            DispatchQueue.main.async {
+                // Apply cached profile so username/avatar are populated immediately.
+                // If not cached yet, fetch it and patch the snoodles on return.
+                let mgr = UserProfileManager.shared
+                if mgr.getCached(userId) != nil {
+                    let patched = snoodles.map { s -> WorldSnoodle in
+                        var e = s; e.applyProfile(mgr.getCached(e.userId)); return e
+                    }
+                    completion(patched)
+                } else {
+                    mgr.fetchProfiles(userIds: Set([userId])) { _ in
+                        let patched = snoodles.map { s -> WorldSnoodle in
+                            var e = s; e.applyProfile(mgr.getCached(e.userId)); return e
+                        }
+                        completion(patched)
+                    }
+                }
+            }
         }
 }
 

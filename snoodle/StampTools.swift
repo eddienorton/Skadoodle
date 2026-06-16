@@ -635,12 +635,49 @@ func renderFontFor(stamp: PlacedStamp) -> Font {
     }
 }
 
-func renderCanvasWithStamps(lines: [DrawingLine], stamps: [PlacedStamp], size: CGSize, canvasColor: UIColor = .white, backgroundImage: UIImage? = nil, backgroundOffset: CGSize = .zero) -> UIImage {
+/// Apply background effects (blur, brightness, saturation, opacity) to a UIImage for export.
+func applyBgEffectsForExport(to image: UIImage, bgOpacity: Double, bgBlur: Double, bgBrightness: Double, bgSaturation: Double) -> UIImage {
+    guard let ciImage = CIImage(image: image) else { return image }
+    var output = ciImage
+
+    if bgSaturation != 1.0 || bgBrightness != 0.0 {
+        let filter = CIFilter(name: "CIColorControls")!
+        filter.setValue(output, forKey: kCIInputImageKey)
+        filter.setValue(Float(bgSaturation), forKey: kCIInputSaturationKey)
+        filter.setValue(Float(bgBrightness), forKey: kCIInputBrightnessKey)
+        if let result = filter.outputImage { output = result }
+    }
+    if bgBlur > 0 {
+        let filter = CIFilter(name: "CIGaussianBlur")!
+        filter.setValue(output, forKey: kCIInputImageKey)
+        filter.setValue(Float(bgBlur * 2), forKey: kCIInputRadiusKey)
+        if let result = filter.outputImage {
+            output = result.clampedToExtent().cropped(to: ciImage.extent)
+        }
+    }
+
+    let context = CIContext()
+    guard let cgImage = context.createCGImage(output, from: ciImage.extent) else { return image }
+    let processed = UIImage(cgImage: cgImage, scale: image.scale, orientation: image.imageOrientation)
+
+    if bgOpacity < 1.0 {
+        UIGraphicsBeginImageContextWithOptions(processed.size, false, processed.scale)
+        defer { UIGraphicsEndImageContext() }
+        processed.draw(at: .zero, blendMode: .normal, alpha: CGFloat(bgOpacity))
+        return UIGraphicsGetImageFromCurrentImageContext() ?? processed
+    }
+    return processed
+}
+
+func renderCanvasWithStamps(lines: [DrawingLine], stamps: [PlacedStamp], size: CGSize, canvasColor: UIColor = .white, backgroundImage: UIImage? = nil, backgroundOffset: CGSize = .zero, bgOpacity: Double = 1.0, bgBlur: Double = 0.0, bgBrightness: Double = 0.0, bgSaturation: Double = 1.0) -> UIImage {
     let canvasSwiftUI = Color(canvasColor)
+    let effectiveBgImage: UIImage? = backgroundImage.map { img in
+        let needsProcessing = bgOpacity < 1.0 || bgBlur > 0 || bgBrightness != 0 || bgSaturation != 1.0
+        return needsProcessing ? applyBgEffectsForExport(to: img, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation) : img
+    }
     let view = ZStack {
         Canvas { context, canvasSize in
-            // Draw background photo — cover fit with offset
-            if let bgImg = backgroundImage {
+            if let bgImg = effectiveBgImage {
                 let imgW = bgImg.size.width, imgH = bgImg.size.height
                 guard imgW > 0, imgH > 0 else { return }
                 let scale = max(canvasSize.width / imgW, canvasSize.height / imgH)

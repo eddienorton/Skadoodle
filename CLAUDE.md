@@ -12,8 +12,8 @@ Eddie Brayman, 72, independent iOS developer, East Village NYC. 50+ years coding
 **App Store URL:** https://apps.apple.com/us/app/skadoodle/id6771497563  
 **Bundle ID:** maxsdad.skadoodle  
 **Firebase project:** snoodle-68bfc  
-**Current version at last session:** 2.1 build 1 (June 2026)
-**Last submitted to App Store:** 2.0 build 3 (in review, June 2026)
+**Current version at last session:** 2.1 build 2 (June 2026)
+**Last released to App Store:** 2.0 build 3 (June 2026)
 
 ---
 
@@ -151,6 +151,19 @@ New submissions now write `searchIndex` to Firestore for future scalable text se
 - **Artist strip showing only 2 artists** — `appendNextPage()` was overwriting `topArtistEntries` with the narrow paginated window on every page load, stomping the stable "top 100 by likes" dataset. Removed that line; `topArtistEntries` is now exclusively owned by `fetchTopArtistEntries()`.
 - **Background picker redesign** — Color swatches moved to top of tray. Recent backgrounds now display in a uniform 3-column square grid (was adaptive columns with varying cell heights). Long-press any background thumbnail to remove it from the list. Added `remove(at:)` to `BackgroundPhotoHistory`.
 
+### New Feature: Image Backgrounds with Effects (v2.1 b2)
+- **`BackgroundPhotoHistory`** — persists up to 20 recent background photos (full + thumbnail) in UserDefaults. `add()` and `moveToTop()` are async (background thread) to avoid main thread blocking. `remove(at:)` is synchronous (low impact, user-initiated).
+- **`BackgroundEditorView`** — Effects panel with Opacity, Blur, Brightness, Saturation sliders. Embedded in a `NavigationStack` sheet (picker → effects horizontal push, no double-animation). Also presented standalone (long-press on existing background) with Cancel button.
+- **`CanvasColorPickerView` redesign** — new UX: tap thumbnail = select/preview (red border + "Tap for Effects" hint), tap again = push Effects panel, Apply = commit + undo point, Cancel = restore all. Swipe-to-dismiss acts as Cancel (`bgPickerWasApplied` flag + `onDismiss` handler).
+- **Canvas background layer** — rendered as a SwiftUI layer in DrawScreen `ZStack` so `.blur`, `.brightness`, `.saturation`, `.opacity` modifiers apply cleanly. `DrawingCanvas` receives `canvasColor: .clear` when a background image is set; `.contentShape(Rectangle())` added to keep pen hittable on transparent canvas.
+- **Export** — `applyBgEffectsForExport()` in `StampTools.swift` applies CIColorControls + CIGaussianBlur + alpha compositing for the flattened image. `renderCanvasWithStamps` accepts all effect params and calls it when needed.
+- **`renderCanvasWithStamps` call in `handleDone()`** moved to background thread; `BackgroundPhotoHistory.add()` and `moveToTop()` made async — eliminates 2-second delay before sheet appeared.
+
+---
+
+## Scaling / Render Bug — Resolved (v2.1 b2)
+Investigated and tested extensively. Pen lines and stamp positions are geometrically consistent between live canvas and the flattened export. Could not reproduce the previously observed offset. Likely resolved as a side effect of the background feature work (coordinate space cleanup). Closed.
+
 ---
 
 ## Outstanding Items (for next version)
@@ -158,6 +171,8 @@ New submissions now write `searchIndex` to Firestore for future scalable text se
 ### Recommended fixes
 1. **`@StateObject` on singletons** — Multiple views use `@StateObject` with `.shared` singletons. Should be `@ObservedObject`. Affects: `DrawScreen`, `GalleryTab` (5 places), `ProfileView`, `StampTools`.
 2. **`deleteAccount()` swallows all errors silently** — User sees success even if Firebase deletes partially fail.
+3. **`CanvasSnapshot` doesn't capture bg effect params** — Undo restores background image but not blur/brightness/saturation/opacity values. Requires adding fields to `CanvasSnapshot` and updating all callsites (~8 places). Medium refactor, defer to next version.
+4. **`BackgroundPhotoHistory.remove(at:)` is synchronous** — `add()` and `moveToTop()` are async; `remove()` isn't. Low impact (user-initiated), but inconsistent. Easy fix when touching that file next.
 
 ### Low priority / style
 - `ProfileView.swift:409-410` — `.presentationDetents` / `.presentationDragIndicator` after `.fullScreenCover` are dead code.

@@ -22,63 +22,70 @@ class BackgroundPhotoHistory: ObservableObject {
 
     init() { load() }
 
-    /// Add with optional asset localIdentifier for reliable dedup
+    /// Add with optional asset localIdentifier for reliable dedup.
+    /// Heavy work (JPEG encode, UserDefaults write) runs off the main thread.
     func add(_ image: UIImage, assetId: String? = nil) {
-        let full = resized(image, maxDim: 1600)
-        let thumb = resized(image, maxDim: 200)
-        let fullData = full.jpegData(compressionQuality: 0.85) ?? Data()
-        let thumbData = thumb.jpegData(compressionQuality: 0.8) ?? Data()
-        let idValue = assetId ?? ""
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self = self else { return }
+            let full = self.resized(image, maxDim: 1600)
+            let thumb = self.resized(image, maxDim: 200)
+            let fullData = full.jpegData(compressionQuality: 0.85) ?? Data()
+            let thumbData = thumb.jpegData(compressionQuality: 0.8) ?? Data()
+            let idValue = assetId ?? ""
 
-        var existingFull = loadRaw(key: fullKey)
-        var existingThumbs = loadRaw(key: thumbKey)
-        var existingIds = loadIds()
+            var existingFull = self.loadRaw(key: self.fullKey)
+            var existingThumbs = self.loadRaw(key: self.thumbKey)
+            var existingIds = self.loadIds()
 
-        // Dedup: if we have an assetId, match on that; otherwise exact data match
-        let dupeIdx: [Int]
-        if !idValue.isEmpty {
-            dupeIdx = existingIds.indices.filter { existingIds[$0] == idValue }
-        } else {
-            dupeIdx = existingThumbs.indices.filter { existingThumbs[$0] == thumbData }
+            // Dedup: if we have an assetId, match on that; otherwise exact data match
+            let dupeIdx: [Int]
+            if !idValue.isEmpty {
+                dupeIdx = existingIds.indices.filter { existingIds[$0] == idValue }
+            } else {
+                dupeIdx = existingThumbs.indices.filter { existingThumbs[$0] == thumbData }
+            }
+            for i in dupeIdx.reversed() {
+                if i < existingFull.count { existingFull.remove(at: i) }
+                if i < existingThumbs.count { existingThumbs.remove(at: i) }
+                if i < existingIds.count { existingIds.remove(at: i) }
+            }
+
+            existingFull.insert(fullData, at: 0)
+            existingThumbs.insert(thumbData, at: 0)
+            existingIds.insert(idValue, at: 0)
+
+            if existingFull.count > maxCount {
+                existingFull = Array(existingFull.prefix(maxCount))
+                existingThumbs = Array(existingThumbs.prefix(maxCount))
+                existingIds = Array(existingIds.prefix(maxCount))
+            }
+
+            self.save(existingFull, key: self.fullKey)
+            self.save(existingThumbs, key: self.thumbKey)
+            UserDefaults.standard.set(existingIds, forKey: self.idKey)
+            DispatchQueue.main.async { self.load() }
         }
-        for i in dupeIdx.reversed() {
-            if i < existingFull.count { existingFull.remove(at: i) }
-            if i < existingThumbs.count { existingThumbs.remove(at: i) }
-            if i < existingIds.count { existingIds.remove(at: i) }
-        }
-
-        existingFull.insert(fullData, at: 0)
-        existingThumbs.insert(thumbData, at: 0)
-        existingIds.insert(idValue, at: 0)
-
-        if existingFull.count > maxCount {
-            existingFull = Array(existingFull.prefix(maxCount))
-            existingThumbs = Array(existingThumbs.prefix(maxCount))
-            existingIds = Array(existingIds.prefix(maxCount))
-        }
-
-        save(existingFull, key: fullKey)
-        save(existingThumbs, key: thumbKey)
-        UserDefaults.standard.set(existingIds, forKey: idKey)
-        load()
     }
 
     func moveToTop(at index: Int) {
         guard index < fullImages.count, index < thumbnails.count else { return }
-        var existingFull = loadRaw(key: fullKey)
-        var existingThumbs = loadRaw(key: thumbKey)
-        var existingIds = loadIds()
-        guard index < existingFull.count else { return }
-        let full = existingFull.remove(at: index)
-        let thumb = existingThumbs.remove(at: index)
-        let id = existingIds.count > index ? existingIds.remove(at: index) : ""
-        existingFull.insert(full, at: 0)
-        existingThumbs.insert(thumb, at: 0)
-        existingIds.insert(id, at: 0)
-        save(existingFull, key: fullKey)
-        save(existingThumbs, key: thumbKey)
-        UserDefaults.standard.set(existingIds, forKey: idKey)
-        load()
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self = self else { return }
+            var existingFull = self.loadRaw(key: self.fullKey)
+            var existingThumbs = self.loadRaw(key: self.thumbKey)
+            var existingIds = self.loadIds()
+            guard index < existingFull.count else { return }
+            let full = existingFull.remove(at: index)
+            let thumb = existingThumbs.remove(at: index)
+            let id = existingIds.count > index ? existingIds.remove(at: index) : ""
+            existingFull.insert(full, at: 0)
+            existingThumbs.insert(thumb, at: 0)
+            existingIds.insert(id, at: 0)
+            self.save(existingFull, key: self.fullKey)
+            self.save(existingThumbs, key: self.thumbKey)
+            UserDefaults.standard.set(existingIds, forKey: self.idKey)
+            DispatchQueue.main.async { self.load() }
+        }
     }
 
     func remove(at index: Int) {
@@ -134,37 +141,178 @@ extension Array {
     }
 }
 
+// MARK: - Background Editor
+
+struct BackgroundEditorView: View {
+    let backgroundImage: UIImage?
+    let canvasColor: Color
+    @Binding var bgOpacity: Double
+    @Binding var bgBlur: Double
+    @Binding var bgBrightness: Double
+    @Binding var bgSaturation: Double
+    var showCancel: Bool = false
+    let lines: [DrawingLine]
+    let stamps: [PlacedStamp]
+    let canvasSize: CGSize
+    var onCancel: () -> Void
+    var onDone: () -> Void
+
+    @State private var canvasSnapshot: UIImage? = nil
+
+    var body: some View {
+        VStack(spacing: 0) {
+
+                // MARK: Full doodle preview
+                GeometryReader { geo in
+                    let pad: CGFloat = 16
+                    let availW = geo.size.width - pad * 2
+                    let availH = geo.size.height - pad * 2
+                    ZStack {
+                        // Canvas background color
+                        canvasColor
+
+                        // Background image with live effects
+                        if let bgImg = backgroundImage {
+                            let imgW = bgImg.size.width, imgH = bgImg.size.height
+                            let scale = imgW > 0 && imgH > 0 ? max(availW / imgW, availH / imgH) : 1
+                            Image(uiImage: bgImg)
+                                .resizable()
+                                .frame(width: imgW * scale, height: imgH * scale)
+                                .frame(width: availW, height: availH, alignment: .center)
+                                .clipped()
+                                .blur(radius: bgBlur, opaque: true)
+                                .brightness(bgBrightness)
+                                .saturation(bgSaturation)
+                                .opacity(bgOpacity)
+                        }
+
+                        // Static canvas snapshot (strokes + stamps)
+                        if let snap = canvasSnapshot {
+                            Image(uiImage: snap)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: availW, height: availH)
+                        } else {
+                            ProgressView()
+                        }
+                    }
+                    .frame(width: availW, height: availH)
+                    .cornerRadius(12)
+                    .shadow(color: .black.opacity(0.15), radius: 8, x: 0, y: 4)
+                    .frame(width: geo.size.width, height: geo.size.height, alignment: .center)
+                    .onAppear { renderSnapshot(size: CGSize(width: availW, height: availH)) }
+                }
+
+                // MARK: Sliders
+                ScrollView {
+                    VStack(spacing: 18) {
+
+                        effectSlider(label: "Opacity", icon: "circle.lefthalf.filled",
+                                     value: $bgOpacity, range: 0.05...1, displayPercent: true)
+
+                        effectSlider(label: "Blur", icon: "aqi.low",
+                                     value: $bgBlur, range: 0...20, displayPercent: false)
+
+                        effectSlider(label: "Brightness", icon: "sun.max",
+                                     value: $bgBrightness, range: -0.5...0.5, displayPercent: false)
+
+                        effectSlider(label: "Saturation", icon: "drop.halffull",
+                                     value: $bgSaturation,
+                                     range: 0...1, displayPercent: true)
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 20)
+                }
+                .frame(maxHeight: 320)
+        }
+        .navigationTitle("Effects")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if showCancel {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Cancel", role: .cancel) { onCancel() }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    func effectSlider(label: String, icon: String, value: Binding<Double>, range: ClosedRange<Double>, displayPercent: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Image(systemName: icon)
+                    .font(.system(size: 13))
+                    .foregroundColor(.secondary)
+                    .frame(width: 18)
+                Text(label)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.secondary)
+                Spacer()
+                Text(displayPercent
+                     ? "\(Int(value.wrappedValue * 100))%"
+                     : String(format: "%.1f", value.wrappedValue))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.secondary)
+                    .frame(width: 40, alignment: .trailing)
+            }
+            Slider(value: value, in: range)
+                .tint(.purple)
+        }
+    }
+
+    func renderSnapshot(size: CGSize) {
+        // Capture values for background thread
+        let capturedLines = lines
+        let capturedStamps = stamps
+        let capturedSize = canvasSize
+        DispatchQueue.global(qos: .userInitiated).async {
+            let snap = renderCanvasWithStamps(
+                lines: capturedLines, stamps: capturedStamps, size: capturedSize,
+                canvasColor: .clear, backgroundImage: nil
+            )
+            DispatchQueue.main.async { canvasSnapshot = snap }
+        }
+    }
+}
+
 struct CanvasColorPickerView: View {
     let currentIndex: Int
     let onSelect: (Int) -> Void
     var onPickPhoto: (() -> Void)? = nil
-    var onUsePhoto: ((UIImage) -> Void)? = nil
+    var onPreviewPhoto: ((UIImage) -> Void)? = nil
+    var onGoToEffects: (() -> Void)? = nil
+    var onApply: ((Int) -> Void)? = nil
+    var onPickerCancel: (() -> Void)? = nil
+    var onExtractStamps: ((UIImage) -> Void)? = nil
+    var initialHistoryIndex: Int? = nil
     @Environment(\.dismiss) var dismiss
     @State private var selectedIndex: Int
+    @State private var wipSelectedIndex: Int? = nil
     @ObservedObject private var history = BackgroundPhotoHistory.shared
 
-    init(currentIndex: Int, onSelect: @escaping (Int) -> Void, onPickPhoto: (() -> Void)? = nil, onUsePhoto: ((UIImage) -> Void)? = nil) {
+    init(currentIndex: Int, onSelect: @escaping (Int) -> Void, onPickPhoto: (() -> Void)? = nil,
+         onPreviewPhoto: ((UIImage) -> Void)? = nil, onGoToEffects: (() -> Void)? = nil,
+         onApply: ((Int) -> Void)? = nil, onPickerCancel: (() -> Void)? = nil,
+         onExtractStamps: ((UIImage) -> Void)? = nil, initialHistoryIndex: Int? = nil) {
         self.currentIndex = currentIndex
         self.onSelect = onSelect
         self.onPickPhoto = onPickPhoto
-        self.onUsePhoto = onUsePhoto
+        self.onPreviewPhoto = onPreviewPhoto
+        self.onGoToEffects = onGoToEffects
+        self.onApply = onApply
+        self.onPickerCancel = onPickerCancel
+        self.onExtractStamps = onExtractStamps
+        self.initialHistoryIndex = initialHistoryIndex
         _selectedIndex = State(initialValue: currentIndex)
+        _wipSelectedIndex = State(initialValue: initialHistoryIndex)
     }
 
 
     var body: some View {
-        NavigationView {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
 
                     // MARK: Color row (top)
-                    Text("Solid Color")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(.secondary)
-                        .padding(.horizontal, 20)
-                        .padding(.top, 16)
-                        .padding(.bottom, 10)
-
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 12) {
                             ForEach(canvasColorOptions.indices, id: \.self) { i in
@@ -193,20 +341,14 @@ struct CanvasColorPickerView: View {
                             }
                         }
                         .padding(.horizontal, 20)
-                        .padding(.top, 14)
-                        .padding(.bottom, 16)
+                        .padding(.top, 10)
+                        .padding(.bottom, 10)
                     }
 
-                    Divider().padding(.horizontal, 20).padding(.bottom, 12)
-
-                    // MARK: Background images grid (plus cell + recents)
-                    Text("Recent Backgrounds")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(.secondary)
-                        .padding(.horizontal, 20)
-                        .padding(.bottom, 10)
+                    Divider().padding(.horizontal, 20).padding(.bottom, 8)
 
                     let cols = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
+                    ScrollViewReader { proxy in
                     LazyVGrid(columns: cols, spacing: 10) {
                         // Plus cell — browse camera roll
                         Button {
@@ -232,25 +374,65 @@ struct CanvasColorPickerView: View {
 
                         // Recent background thumbnails
                         ForEach(history.thumbnails.indices, id: \.self) { i in
-                            Button {
+                            GeometryReader { geo in
+                                Image(uiImage: history.thumbnails[i])
+                                    .resizable()
+                                    .scaledToFill()
+                                    .frame(width: geo.size.width, height: geo.size.width)
+                                    .clipped()
+                                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 10)
+                                            .stroke(wipSelectedIndex == i ? Color.red : Color.gray.opacity(0.2),
+                                                    lineWidth: wipSelectedIndex == i ? 3 : 0.5)
+                                    )
+                                    .overlay(
+                                        VStack {
+                                            HStack {
+                                                Spacer()
+                                                Button {
+                                                    let img = history.fullImage(at: i) ?? history.thumbnails[i]
+                                                    onExtractStamps?(img)
+                                                } label: {
+                                                    Text("✂️")
+                                                        .font(.system(size: 16))
+                                                        .padding(5)
+                                                        .background(Color.yellow.opacity(0.85))
+                                                        .clipShape(Circle())
+                                                        .overlay(Circle().stroke(Color.orange.opacity(0.6), lineWidth: 1))
+                                                        .padding(4)
+                                                        .opacity(0.8)
+                                                }
+                                            }
+                                            Spacer()
+                                            if wipSelectedIndex == i {
+                                                Text("Tap for Effects")
+                                                    .font(.system(size: 9, weight: .semibold))
+                                                    .foregroundColor(.white)
+                                                    .padding(.horizontal, 4)
+                                                    .padding(.vertical, 2)
+                                                    .background(Color.red.opacity(0.75))
+                                                    .clipShape(Capsule())
+                                                    .padding(.bottom, 4)
+                                            }
+                                        }
+                                    )
+                            }
+                            .aspectRatio(1, contentMode: .fit)
+                            .id(i)
+                            .contentShape(Rectangle())
+                            .onTapGesture(count: 2) {
                                 let img = history.fullImage(at: i) ?? history.thumbnails[i]
-                                history.moveToTop(at: i)
-                                let callback = onUsePhoto
-                                dismiss()
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                                    callback?(img)
+                                onExtractStamps?(img)
+                            }
+                            .onTapGesture(count: 1) {
+                                if wipSelectedIndex == i {
+                                    onGoToEffects?()
+                                } else {
+                                    wipSelectedIndex = i
+                                    let img = history.fullImage(at: i) ?? history.thumbnails[i]
+                                    onPreviewPhoto?(img)
                                 }
-                            } label: {
-                                GeometryReader { geo in
-                                    Image(uiImage: history.thumbnails[i])
-                                        .resizable()
-                                        .scaledToFill()
-                                        .frame(width: geo.size.width, height: geo.size.width)
-                                        .clipped()
-                                        .clipShape(RoundedRectangle(cornerRadius: 10))
-                                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.gray.opacity(0.2), lineWidth: 0.5))
-                                }
-                                .aspectRatio(1, contentMode: .fit)
                             }
                             .contextMenu {
                                 Button(role: .destructive) {
@@ -263,18 +445,35 @@ struct CanvasColorPickerView: View {
                     }
                     .padding(.horizontal, 20)
                     .padding(.bottom, 24)
+                    .onAppear {
+                        if let idx = initialHistoryIndex {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                proxy.scrollTo(idx, anchor: .center)
+                            }
+                        }
+                    }
+                    } // ScrollViewReader
+                }
+        }
+        .navigationTitle("Background")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarLeading) {
+                Button("Cancel") {
+                    onPickerCancel?()
+                    dismiss()
                 }
             }
-            .navigationTitle("Background")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Done") { dismiss() }
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button("Apply") {
+                    if let idx = wipSelectedIndex {
+                        onApply?(idx)
+                    }
                 }
+                .fontWeight(.semibold)
+                .disabled(wipSelectedIndex == nil)
             }
         }
-        .presentationDetents([.large])
-        .presentationDragIndicator(.visible)
     }
 }
 
@@ -578,10 +777,27 @@ struct DrawScreen: View {
     var currentColor: Color { paletteColors[selectedColorIndex] }
     var canvasColor: Color { canvasColorOptions[canvasColorIndex] }
 
-    @State private var showCanvasColorPicker: Bool = false
-    @State private var canvasBackgroundImage: UIImage? = nil
+    @State private var showCanvasBgSheet: Bool = false
+    @State private var bgNavPath = NavigationPath()
+    @State private var bgPickerWasApplied: Bool = false
+    @State private var bgSegmentationItem: SegmentationItem? = nil
+@State private var canvasBackgroundImage: UIImage? = nil
     @State private var backgroundOffset: CGSize = .zero
     @State private var backgroundDragStart: CGSize = .zero
+
+    // Background effects
+    @State private var bgOpacity: Double = 1.0
+    @State private var bgBlur: Double = 0.0
+    @State private var bgBrightness: Double = 0.0
+    @State private var bgSaturation: Double = 1.0
+    @State private var showBgEditor: Bool = false
+    // Saved state for cancel in background editor
+    @State private var savedBgImage: UIImage? = nil
+    @State private var savedBgOffset: CGSize = .zero
+    @State private var savedBgOpacity: Double = 1.0
+    @State private var savedBgBlur: Double = 0.0
+    @State private var savedBgBrightness: Double = 0.0
+    @State private var savedBgSaturation: Double = 1.0
 
     @State private var showCanvasImagePicker: Bool = false
     @StateObject private var auth = SnoodleAuthManager.shared
@@ -627,9 +843,31 @@ struct DrawScreen: View {
     @State private var canvasOriginInWindow: CGPoint = .zero
     @State private var isLongPressing: Bool = false
 
+    func resetBgEffects() {
+        bgOpacity = 1.0; bgBlur = 0.0; bgBrightness = 0.0; bgSaturation = 1.0
+    }
+
+    func saveBgStateForCancel() {
+        savedBgImage = canvasBackgroundImage
+        savedBgOffset = backgroundOffset
+        savedBgOpacity = bgOpacity
+        savedBgBlur = bgBlur
+        savedBgBrightness = bgBrightness
+        savedBgSaturation = bgSaturation
+    }
+
+    func restoreSavedBgState() {
+        canvasBackgroundImage = savedBgImage
+        backgroundOffset = savedBgOffset
+        bgOpacity = savedBgOpacity
+        bgBlur = savedBgBlur
+        bgBrightness = savedBgBrightness
+        bgSaturation = savedBgSaturation
+    }
+
     // stampView replaced by StampItemView struct below
     func handleDone() {
-        let img = renderCanvasWithStamps(lines: lines, stamps: placedStamps, size: canvasSize, canvasColor: UIColor(canvasColor), backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset)
+        let img = renderCanvasWithStamps(lines: lines, stamps: placedStamps, size: canvasSize, canvasColor: UIColor(canvasColor), backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation)
         resultImage = img
         isGeneratingCaption = true
         Task {
@@ -820,51 +1058,147 @@ struct DrawScreen: View {
     }
 
     var canvasColorButton: some View {
-        Button {
-            showCanvasColorPicker = true
-        } label: {
-            ZStack {
-                if let img = canvasBackgroundImage {
-                    Image(uiImage: img)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: 42, height: 42)
-                        .clipped()
-                } else {
-                    canvasColor
-                }
+        ZStack {
+            if let img = canvasBackgroundImage {
+                Image(uiImage: img)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 42, height: 42)
+                    .clipped()
+            } else {
+                canvasColor
             }
-            .frame(width: 42, height: 42)
-            .cornerRadius(8)
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.gray.opacity(0.5), lineWidth: 2))
         }
-        .buttonStyle(.plain)
+        .frame(width: 42, height: 42)
+        .cornerRadius(8)
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.gray.opacity(0.5), lineWidth: 2))
+        .onTapGesture {
+            bgNavPath = NavigationPath()
+            saveBgStateForCancel()
+            showCanvasBgSheet = true
+        }
+        .onLongPressGesture {
+            // Long-press: jump straight to background editor (image backgrounds only)
+            if canvasBackgroundImage != nil {
+                saveBgStateForCancel()
+                showBgEditor = true
+            } else {
+                bgNavPath = NavigationPath()
+                showCanvasBgSheet = true
+            }
+        }
         .sheet(isPresented: $showCanvasImagePicker) {
             ImagePickerCallback { image in
-                undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset))
-                redoStack = []
-                BackgroundPhotoHistory.shared.add(image)
+                BackgroundPhotoHistory.shared.add(image) // async internally — won't block
                 canvasBackgroundImage = image
                 backgroundOffset = .zero
+                resetBgEffects()
             }
         }
-        .sheet(isPresented: $showCanvasColorPicker) {
-            CanvasColorPickerView(currentIndex: canvasColorIndex,
-                onSelect: { newIndex in
-                    undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset))
-                    redoStack = []
-                    canvasColorIndex = newIndex
-                    canvasBackgroundImage = nil
-                    backgroundOffset = .zero
-                }, onPickPhoto: {
-                    showCanvasImagePicker = true
-                }, onUsePhoto: { img in
-                    // History tap — moveToTop already called in picker, just set the image
-                    undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset))
-                    redoStack = []
-                    canvasBackgroundImage = img
-                    backgroundOffset = .zero
-                })
+        .sheet(isPresented: $showCanvasBgSheet, onDismiss: {
+            if !bgPickerWasApplied {
+                restoreSavedBgState()
+            }
+            bgPickerWasApplied = false
+        }) {
+            NavigationStack(path: $bgNavPath) {
+                CanvasColorPickerView(currentIndex: canvasColorIndex,
+                    onSelect: { newIndex in
+                        bgPickerWasApplied = true
+                        undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset))
+                        redoStack = []
+                        canvasColorIndex = newIndex
+                        canvasBackgroundImage = nil
+                        backgroundOffset = .zero
+                        resetBgEffects()
+                    }, onPickPhoto: {
+                        showCanvasImagePicker = true
+                    }, onPreviewPhoto: { img in
+                        canvasBackgroundImage = img
+                        backgroundOffset = .zero
+                        resetBgEffects()
+                    }, onGoToEffects: {
+                        bgNavPath.append(0)
+                    }, onApply: { idx in
+                        bgPickerWasApplied = true
+                        undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: savedBgImage, backgroundOffset: savedBgOffset))
+                        redoStack = []
+                        BackgroundPhotoHistory.shared.moveToTop(at: idx)
+                        showCanvasBgSheet = false
+                    }, onPickerCancel: {
+                        bgPickerWasApplied = true // restore already done here; skip onDismiss restore
+                        restoreSavedBgState()
+                    }, onExtractStamps: { img in
+                        // dismiss picker (onDismiss will restore canvas state), then launch segmentation
+                        showCanvasBgSheet = false
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                            bgSegmentationItem = SegmentationItem(images: [img])
+                        }
+                    }, initialHistoryIndex: {
+                        guard canvasBackgroundImage != nil else { return nil }
+                        return BackgroundPhotoHistory.shared.fullImages.isEmpty ? nil : 0
+                    }())
+                    .navigationDestination(for: Int.self) { _ in
+                        BackgroundEditorView(
+                            backgroundImage: canvasBackgroundImage,
+                            canvasColor: canvasColor,
+                            bgOpacity: $bgOpacity,
+                            bgBlur: $bgBlur,
+                            bgBrightness: $bgBrightness,
+                            bgSaturation: $bgSaturation,
+                            lines: lines,
+                            stamps: placedStamps,
+                            canvasSize: canvasSize,
+                            onCancel: {
+                                restoreSavedBgState()
+                                bgNavPath.removeLast()
+                            },
+                            onDone: {
+                                bgNavPath.removeLast()
+                            }
+                        )
+                    }
+            }
+            .presentationDetents([.large])
+            .presentationDragIndicator(.visible)
+        }
+        .sheet(item: $bgSegmentationItem) { item in
+            ObjectSegmentationSheet(images: item.images) { cutouts in
+                bgSegmentationItem = nil
+                var lastStamp: CustomStamp? = nil
+                for cutout in cutouts {
+                    if let stamp = CustomStampManager.shared.addStamp(image: cutout) {
+                        lastStamp = stamp
+                    }
+                }
+                if let stamp = lastStamp {
+                    lastCustomStampIdString = stamp.id.uuidString
+                    isCustomStampMode = true
+                }
+            }
+        }
+        .sheet(isPresented: $showBgEditor) {
+            NavigationView {
+                BackgroundEditorView(
+                    backgroundImage: canvasBackgroundImage,
+                    canvasColor: canvasColor,
+                    bgOpacity: $bgOpacity,
+                    bgBlur: $bgBlur,
+                    bgBrightness: $bgBrightness,
+                    bgSaturation: $bgSaturation,
+                    showCancel: true,
+                    lines: lines,
+                    stamps: placedStamps,
+                    canvasSize: canvasSize,
+                    onCancel: {
+                        restoreSavedBgState()
+                        showBgEditor = false
+                    },
+                    onDone: { showBgEditor = false }
+                )
+            }
+            .presentationDetents([.large])
+            .presentationDragIndicator(.visible)
         }
     }
 
@@ -873,13 +1207,31 @@ struct DrawScreen: View {
             ZStack {
                 VStack(spacing: 0) {
                     GeometryReader { geo in
+                        // Background image layer — rendered here so SwiftUI modifiers apply cleanly
+                        if let bgImg = canvasBackgroundImage {
+                            let imgW = bgImg.size.width, imgH = bgImg.size.height
+                            let scale = imgW > 0 && imgH > 0 ? max(geo.size.width / imgW, geo.size.height / imgH) : 1
+                            Image(uiImage: bgImg)
+                                .resizable()
+                                .frame(width: imgW * scale, height: imgH * scale)
+                                .offset(x: backgroundOffset.width, y: backgroundOffset.height)
+                                .frame(width: geo.size.width, height: geo.size.height, alignment: .center)
+                                .clipped()
+                                .blur(radius: bgBlur, opaque: true)
+                                .brightness(bgBrightness)
+                                .saturation(bgSaturation)
+                                .opacity(bgOpacity)
+                                .allowsHitTesting(false)
+                        }
                         DrawingCanvas(lines: $lines, undoStack: $undoStack, redoStack: $redoStack, currentColor: currentColor,
                                       lineWidth: $lineWidth, isEraser: $isEraser,
-                                      canvasColor: canvasColor, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset, penType: currentPenType,
+                                      canvasColor: canvasBackgroundImage != nil ? .clear : canvasColor,
+                                      backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset, penType: currentPenType,
                                       colorB: dualToneColorB,
                                       currentStamps: placedStamps,
                                       isLongPressing: isLongPressing,
                                       stampResizeTargetId: stampResizeTargetId)
+                            .contentShape(Rectangle())
                             .allowsHitTesting(!isLongPressing)
                             .simultaneousGesture(TapGesture().onEnded {
                                 selectedStampId = nil

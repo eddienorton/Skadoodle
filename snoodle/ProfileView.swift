@@ -404,7 +404,7 @@ struct PublicProfileView: View {
             get: { selectedDoodleIndex.map { IdentifiableInt(value: $0) } },
             set: { selectedDoodleIndex = $0?.value }
         )) { idx in
-            WorldSnoodleDetailView(initialEntries: doodles, startIndex: idx.value)
+            WorldSnoodleDetailView(initialEntries: doodles, startIndex: idx.value, lockToInitial: true)
         }
     }
 

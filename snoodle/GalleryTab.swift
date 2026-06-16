@@ -986,6 +986,9 @@ struct WorldSnoodleDetailView: View {
     /// Active text search query from the gallery. When set, the detail view filters
     /// its entries to only show matching doodles instead of the full unfiltered feed.
     var textFilter: String? = nil
+    /// When true, always use initialEntries instead of live worldManager entries.
+    /// Set by callers that supply their own scoped entry list (e.g. PublicProfileView).
+    var lockToInitial: Bool = false
     @State private var currentIndex: Int = 0
     @State private var showDeleteConfirm = false
     @State private var showReportConfirm = false
@@ -1010,9 +1013,10 @@ struct WorldSnoodleDetailView: View {
     @State private var commentDoodleId: String = ""
     @State private var profileUserId: String = ""
 
-    // Unfiltered: use live worldManager entries so pagination loads appear automatically.
-    // Filtered: lock to initialEntries — pagination must not change the result set mid-swipe.
+    // Unfiltered gallery: use live worldManager entries so pagination loads appear automatically.
+    // Filtered or locked (profile, search): lock to initialEntries so the set can't change mid-swipe.
     var entries: [WorldSnoodle] {
+        if lockToInitial { return initialEntries }
         guard let filter = textFilter, !filter.trimmingCharacters(in: .whitespaces).isEmpty else {
             let live = worldManager.sortedEntries
             return live.isEmpty ? initialEntries : live
