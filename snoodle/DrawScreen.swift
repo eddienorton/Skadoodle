@@ -1207,6 +1207,8 @@ struct DrawScreen: View {
             ZStack {
                 VStack(spacing: 0) {
                     GeometryReader { geo in
+                        // Canvas color — always rendered first so bg image opacity tints correctly
+                        canvasColor
                         // Background image layer — rendered here so SwiftUI modifiers apply cleanly
                         if let bgImg = canvasBackgroundImage {
                             let imgW = bgImg.size.width, imgH = bgImg.size.height
@@ -1759,7 +1761,7 @@ struct DrawScreen: View {
                         ProgressView().scaleEffect(0.8)
                     } else if !showResultCard {
                         Button("Done") { handleDone() }
-                            .disabled(lines.isEmpty && placedStamps.isEmpty)
+                            .disabled(lines.isEmpty && placedStamps.isEmpty && canvasBackgroundImage == nil)
                             .fontWeight(.bold)
                     }
                 }

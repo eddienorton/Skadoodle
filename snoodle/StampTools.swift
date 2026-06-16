@@ -677,6 +677,8 @@ func renderCanvasWithStamps(lines: [DrawingLine], stamps: [PlacedStamp], size: C
     }
     let view = ZStack {
         Canvas { context, canvasSize in
+            // Fill canvas color explicitly so bg image opacity composites correctly
+            context.fill(Path(CGRect(origin: .zero, size: canvasSize)), with: .color(canvasSwiftUI))
             if let bgImg = effectiveBgImage {
                 let imgW = bgImg.size.width, imgH = bgImg.size.height
                 guard imgW > 0, imgH > 0 else { return }
