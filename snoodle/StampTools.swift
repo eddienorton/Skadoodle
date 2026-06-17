@@ -669,7 +669,7 @@ func applyBgEffectsForExport(to image: UIImage, bgOpacity: Double, bgBlur: Doubl
     return processed
 }
 
-func renderCanvasWithStamps(lines: [DrawingLine], stamps: [PlacedStamp], size: CGSize, canvasColor: UIColor = .white, backgroundImage: UIImage? = nil, backgroundOffset: CGSize = .zero, bgOpacity: Double = 1.0, bgBlur: Double = 0.0, bgBrightness: Double = 0.0, bgSaturation: Double = 1.0) -> UIImage {
+func renderCanvasWithStamps(lines: [DrawingLine], stamps: [PlacedStamp], size: CGSize, canvasColor: UIColor = .white, backgroundImage: UIImage? = nil, backgroundOffset: CGSize = .zero, bgOpacity: Double = 1.0, bgBlur: Double = 0.0, bgBrightness: Double = 0.0, bgSaturation: Double = 1.0, extractedSubject: UIImage? = nil) -> UIImage {
     let canvasSwiftUI = Color(canvasColor)
     let effectiveBgImage: UIImage? = backgroundImage.map { img in
         let needsProcessing = bgOpacity < 1.0 || bgBlur > 0 || bgBrightness != 0 || bgSaturation != 1.0
@@ -688,6 +688,16 @@ func renderCanvasWithStamps(lines: [DrawingLine], stamps: [PlacedStamp], size: C
                 let y = (canvasSize.height - drawH) / 2 + backgroundOffset.height
                 let uiImg = Image(uiImage: bgImg)
                 context.draw(uiImg, in: CGRect(x: x, y: y, width: drawW, height: drawH))
+            }
+            // Extracted subject — drawn above effected bg, no effects applied
+            if let subject = extractedSubject {
+                let imgW = subject.size.width, imgH = subject.size.height
+                guard imgW > 0, imgH > 0 else { return }
+                let scale = max(canvasSize.width / imgW, canvasSize.height / imgH)
+                let drawW = imgW * scale, drawH = imgH * scale
+                let x = (canvasSize.width - drawW) / 2
+                let y = (canvasSize.height - drawH) / 2
+                context.draw(Image(uiImage: subject), in: CGRect(x: x, y: y, width: drawW, height: drawH))
             }
             for line in lines {
                 renderLine(line, in: &context, canvasColor: canvasSwiftUI)

@@ -12,7 +12,7 @@ Eddie Brayman, 72, independent iOS developer, East Village NYC. 50+ years coding
 **App Store URL:** https://apps.apple.com/us/app/skadoodle/id6771497563  
 **Bundle ID:** maxsdad.skadoodle  
 **Firebase project:** snoodle-68bfc  
-**Current version at last session:** 2.1 build 2 (June 2026)
+**Current version at last session:** 2.1 build 3 (June 2026)
 **Last released to App Store:** 2.0 build 3 (June 2026)
 
 ---
@@ -158,6 +158,27 @@ New submissions now write `searchIndex` to Firestore for future scalable text se
 - **Canvas background layer** — rendered as a SwiftUI layer in DrawScreen `ZStack` so `.blur`, `.brightness`, `.saturation`, `.opacity` modifiers apply cleanly. `DrawingCanvas` receives `canvasColor: .clear` when a background image is set; `.contentShape(Rectangle())` added to keep pen hittable on transparent canvas.
 - **Export** — `applyBgEffectsForExport()` in `StampTools.swift` applies CIColorControls + CIGaussianBlur + alpha compositing for the flattened image. `renderCanvasWithStamps` accepts all effect params and calls it when needed.
 - **`renderCanvasWithStamps` call in `handleDone()`** moved to background thread; `BackgroundPhotoHistory.add()` and `moveToTop()` made async — eliminates 2-second delay before sheet appeared.
+
+---
+
+## New in v2.1 b3
+
+### Fixes
+- **Extract Objects auto-extraction not running on screen entry** — `.task` fired when `backgroundImage` was nil because the image arrives slightly after the view appears (during nav transition). Fixed by switching to `.task(id: backgroundImage != nil)` so the task re-fires the moment the image lands.
+- **Sliders affecting full image while extraction in progress** — Wrapped the four effect sliders in a `Group` with `.disabled` and `.opacity(0.4)` while `extractionEnabled && extraction.isExtracting`. Prevents slider interaction before extracted subject layer is ready.
+
+### New Features
+- **`extractionFailed` flag on `ExtractionModel`** — `@Published var extractionFailed: Bool` is set when Vision finds no objects. The Extract Objects toggle is disabled (`extraction.extractionFailed`) so the user can't retry on an image with no detectable subjects.
+- **Effect slider values now persist across sessions** — `bgOpacity`, `bgBlur`, `bgBrightness`, `bgSaturation` changed from `@State` to `@AppStorage` in `DrawScreen`. Supports creative theme workflows (e.g. black-and-white with object extraction stays configured). Cancel still correctly rolls back via `restoreSavedBgState()`.
+- **Reset button in Effects screen** — Resets all four sliders to neutral defaults (opacity 1.0, blur 0, brightness 0, saturation 1.0). Positioned to the right of the Extract Objects label on iPhone; below the sliders on iPad.
+- **Extract Objects toggle repositioned (iPhone)** — Toggle now sits immediately right of the label with no Spacer. Spinner appears between label and toggle while extracting.
+- **Camera roll → Effects direct navigation** — Selecting a photo via the + button in the background picker now navigates straight to the Effects screen (same as tapping an existing thumbnail), instead of returning to the picker. Uses 0.35s delay to allow sheet transition to complete.
+
+### iPad Effects Screen Redesign
+- On iPad, `BackgroundEditorView` uses a side-by-side layout: preview constrained to 280×260pt on the left, Extract Objects toggle (with icon, label, spinner, and toggle control) on the right.
+- Sliders fill remaining space below with a Reset button at bottom right.
+- iPhone layout is completely unchanged.
+- Note: SwiftUI `.sheet` on iPad is locked to a "form sheet" container with a fixed max height (~715pt). `.presentationDetents` with `.fraction()` measures against that container, not the screen — `.large` and `.fraction(0.99)` are equivalent. Sheet stays at `.large` on both devices; the iPad layout redesign works within the fixed container.
 
 ---
 

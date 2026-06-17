@@ -9,6 +9,7 @@ import FirebaseFirestore
 import FirebaseStorage
 import Combine
 import Photos
+import Vision
 
 // MARK: - Background History Manager
 class BackgroundPhotoHistory: ObservableObject {
@@ -141,6 +142,56 @@ extension Array {
     }
 }
 
+// MARK: - Subject Extraction (free function — safe to call from Task.detached)
+
+func extractBgSubject(from image: UIImage) -> UIImage? {
+    guard #available(iOS 17.0, *) else { return nil }
+    guard let cgImage = image.cgImage else { return nil }
+    let handler = VNImageRequestHandler(cgImage: cgImage)
+    let request = VNGenerateForegroundInstanceMaskRequest()
+    do { try handler.perform([request]) } catch { return nil }
+    guard let observation = request.results?.first else { return nil }
+    do {
+        let maskBuffer = try observation.generateScaledMaskForImage(
+            forInstances: observation.allInstances, from: handler)
+        let originalCI = CIImage(cgImage: cgImage)
+        let maskCI = CIImage(cvPixelBuffer: maskBuffer)
+        guard let blendFilter = CIFilter(name: "CIBlendWithMask") else { return nil }
+        blendFilter.setValue(originalCI, forKey: kCIInputImageKey)
+        blendFilter.setValue(
+            CIImage(color: CIColor(red: 0, green: 0, blue: 0, alpha: 0))
+                .cropped(to: originalCI.extent),
+            forKey: kCIInputBackgroundImageKey)
+        blendFilter.setValue(maskCI, forKey: kCIInputMaskImageKey)
+        guard let output = blendFilter.outputImage else { return nil }
+        let context = CIContext()
+        guard let outCG = context.createCGImage(output, from: originalCI.extent) else { return nil }
+        return UIImage(cgImage: outCG, scale: image.scale, orientation: image.imageOrientation)
+    } catch { return nil }
+}
+
+// MARK: - Extraction state (ObservableObject so @Published triggers reliable re-renders)
+
+@MainActor
+class ExtractionModel: ObservableObject {
+    @Published var extractedSubject: UIImage? = nil
+    @Published var isExtracting: Bool = false
+    @Published var extractionFailed: Bool = false
+
+    func start(for image: UIImage) async {
+        guard !isExtracting, extractedSubject == nil else { return }
+        isExtracting = true
+        extractionFailed = false
+        let img = image
+        let result = await Task.detached(priority: .userInitiated) {
+            extractBgSubject(from: img)
+        }.value
+        extractedSubject = result
+        extractionFailed = result == nil
+        isExtracting = false
+    }
+}
+
 // MARK: - Background Editor
 
 struct BackgroundEditorView: View {
@@ -154,15 +205,21 @@ struct BackgroundEditorView: View {
     let lines: [DrawingLine]
     let stamps: [PlacedStamp]
     let canvasSize: CGSize
+    var onExtractionResult: ((UIImage?) -> Void)? = nil
     var onCancel: () -> Void
     var onDone: () -> Void
 
     @State private var canvasSnapshot: UIImage? = nil
+    @AppStorage("bgExtractionEnabled") private var extractionEnabled: Bool = false
+    @StateObject private var extraction = ExtractionModel()
 
     var body: some View {
         VStack(spacing: 0) {
 
-                // MARK: Full doodle preview
+            // MARK: Preview [+ side toggle on iPad]
+            HStack(alignment: .center, spacing: 16) {
+
+                // Full doodle preview
                 GeometryReader { geo in
                     let pad: CGFloat = 16
                     let availW = geo.size.width - pad * 2
@@ -186,6 +243,18 @@ struct BackgroundEditorView: View {
                                 .opacity(bgOpacity)
                         }
 
+                        // Extracted subject layer — sits above effects, no modifiers applied
+                        if extractionEnabled, let subject = extraction.extractedSubject {
+                            let imgW = subject.size.width, imgH = subject.size.height
+                            let scale = imgW > 0 && imgH > 0 ? max(availW / imgW, availH / imgH) : 1
+                            Image(uiImage: subject)
+                                .resizable()
+                                .frame(width: imgW * scale, height: imgH * scale)
+                                .frame(width: availW, height: availH, alignment: .center)
+                                .clipped()
+                                .allowsHitTesting(false)
+                        }
+
                         // Static canvas snapshot (strokes + stamps)
                         if let snap = canvasSnapshot {
                             Image(uiImage: snap)
@@ -202,11 +271,45 @@ struct BackgroundEditorView: View {
                     .frame(width: geo.size.width, height: geo.size.height, alignment: .center)
                     .onAppear { renderSnapshot(size: CGSize(width: availW, height: availH)) }
                 }
+                .frame(maxWidth: UIDevice.current.userInterfaceIdiom == .pad ? 280 : .infinity)
+                .frame(maxHeight: UIDevice.current.userInterfaceIdiom == .pad ? 260 : .infinity)
 
-                // MARK: Sliders
-                ScrollView {
-                    VStack(spacing: 18) {
+                // Extract Objects toggle — iPad only, sits beside the preview
+                if UIDevice.current.userInterfaceIdiom == .pad {
+                    if #available(iOS 17.0, *) {
+                        VStack(spacing: 12) {
+                            Image(systemName: "person.and.background.dotted")
+                                .font(.system(size: 22))
+                                .foregroundColor(.secondary)
+                            Text("Extract\nObjects")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.center)
+                            if extraction.isExtracting {
+                                ProgressView().scaleEffect(0.75)
+                            }
+                            Toggle("", isOn: $extractionEnabled)
+                                .labelsHidden()
+                                .tint(.purple)
+                                .disabled(extraction.extractionFailed)
+                                .onChange(of: extractionEnabled) { _, enabled in
+                                    if enabled, let img = backgroundImage {
+                                        Task { await extraction.start(for: img) }
+                                    }
+                                }
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                }
+            }
+            .padding(.horizontal, UIDevice.current.userInterfaceIdiom == .pad ? 20 : 0)
+            .padding(.top, UIDevice.current.userInterfaceIdiom == .pad ? 16 : 0)
 
+            // MARK: Sliders + (iPhone: toggle row / iPad: reset button)
+            ScrollView {
+                VStack(spacing: 18) {
+
+                    Group {
                         effectSlider(label: "Opacity", icon: "circle.lefthalf.filled",
                                      value: $bgOpacity, range: 0.05...1, displayPercent: true)
 
@@ -220,19 +323,80 @@ struct BackgroundEditorView: View {
                                      value: $bgSaturation,
                                      range: 0...1, displayPercent: true)
                     }
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 20)
+                    .disabled(extractionEnabled && extraction.isExtracting)
+                    .opacity(extractionEnabled && extraction.isExtracting ? 0.4 : 1.0)
+
+                    if UIDevice.current.userInterfaceIdiom == .pad {
+                        // iPad: Reset button below sliders
+                        HStack {
+                            Spacer()
+                            Button("Reset") {
+                                bgOpacity = 1.0; bgBlur = 0.0; bgBrightness = 0.0; bgSaturation = 1.0
+                            }
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.secondary)
+                        }
+                    } else {
+                        // iPhone: full toggle + reset row (unchanged)
+                        if #available(iOS 17.0, *) {
+                            Divider()
+                            HStack {
+                                Image(systemName: "person.and.background.dotted")
+                                    .font(.system(size: 13))
+                                    .foregroundColor(.secondary)
+                                    .frame(width: 18)
+                                Text("Extract Objects")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundColor(.secondary)
+                                if extraction.isExtracting {
+                                    ProgressView()
+                                        .scaleEffect(0.75)
+                                        .padding(.leading, 4)
+                                }
+                                Toggle("", isOn: $extractionEnabled)
+                                    .labelsHidden()
+                                    .tint(.purple)
+                                    .fixedSize()
+                                    .padding(.leading, 6)
+                                    .disabled(extraction.extractionFailed)
+                                    .onChange(of: extractionEnabled) { _, enabled in
+                                        if enabled, let img = backgroundImage {
+                                            Task { await extraction.start(for: img) }
+                                        }
+                                    }
+                                Spacer()
+                                Button("Reset") {
+                                    bgOpacity = 1.0; bgBlur = 0.0; bgBrightness = 0.0; bgSaturation = 1.0
+                                }
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundColor(.secondary)
+                            }
+                        }
+                    }
                 }
-                .frame(maxHeight: 320)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 20)
+            }
+            .frame(maxHeight: UIDevice.current.userInterfaceIdiom == .pad ? .infinity : 340)
         }
         .navigationTitle("Effects")
         .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(true)
         .toolbar {
-            if showCancel {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button("Cancel", role: .cancel) { onCancel() }
-                }
+            ToolbarItem(placement: .navigationBarLeading) {
+                Button("Cancel", role: .cancel) { onCancel() }
             }
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button("Done") {
+                    onExtractionResult?(extractionEnabled ? extraction.extractedSubject : nil)
+                    onDone()
+                }
+                .fontWeight(.semibold)
+            }
+        }
+        .task(id: backgroundImage != nil) {
+            guard extractionEnabled, let img = backgroundImage else { return }
+            await extraction.start(for: img)
         }
     }
 
@@ -261,7 +425,6 @@ struct BackgroundEditorView: View {
     }
 
     func renderSnapshot(size: CGSize) {
-        // Capture values for background thread
         let capturedLines = lines
         let capturedStamps = stamps
         let capturedSize = canvasSize
@@ -273,6 +436,7 @@ struct BackgroundEditorView: View {
             DispatchQueue.main.async { canvasSnapshot = snap }
         }
     }
+
 }
 
 struct CanvasColorPickerView: View {
@@ -280,7 +444,7 @@ struct CanvasColorPickerView: View {
     let onSelect: (Int) -> Void
     var onPickPhoto: (() -> Void)? = nil
     var onPreviewPhoto: ((UIImage) -> Void)? = nil
-    var onGoToEffects: (() -> Void)? = nil
+    var onGoToEffects: ((Int) -> Void)? = nil
     var onApply: ((Int) -> Void)? = nil
     var onPickerCancel: (() -> Void)? = nil
     var onExtractStamps: ((UIImage) -> Void)? = nil
@@ -291,7 +455,7 @@ struct CanvasColorPickerView: View {
     @ObservedObject private var history = BackgroundPhotoHistory.shared
 
     init(currentIndex: Int, onSelect: @escaping (Int) -> Void, onPickPhoto: (() -> Void)? = nil,
-         onPreviewPhoto: ((UIImage) -> Void)? = nil, onGoToEffects: (() -> Void)? = nil,
+         onPreviewPhoto: ((UIImage) -> Void)? = nil, onGoToEffects: ((Int) -> Void)? = nil,
          onApply: ((Int) -> Void)? = nil, onPickerCancel: (() -> Void)? = nil,
          onExtractStamps: ((UIImage) -> Void)? = nil, initialHistoryIndex: Int? = nil) {
         self.currentIndex = currentIndex
@@ -372,75 +536,33 @@ struct CanvasColorPickerView: View {
                             .aspectRatio(1, contentMode: .fit)
                         }
 
-                        // Recent background thumbnails
+                        // Recent background thumbnails — tap goes straight to Effects
                         ForEach(history.thumbnails.indices, id: \.self) { i in
                             GeometryReader { geo in
-                                Image(uiImage: history.thumbnails[i])
-                                    .resizable()
-                                    .scaledToFill()
-                                    .frame(width: geo.size.width, height: geo.size.width)
-                                    .clipped()
-                                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 10)
-                                            .stroke(wipSelectedIndex == i ? Color.red : Color.gray.opacity(0.2),
-                                                    lineWidth: wipSelectedIndex == i ? 3 : 0.5)
-                                    )
-                                    .overlay(
-                                        VStack {
-                                            HStack {
-                                                Spacer()
-                                                Button {
-                                                    let img = history.fullImage(at: i) ?? history.thumbnails[i]
-                                                    onExtractStamps?(img)
-                                                } label: {
-                                                    Text("✂️")
-                                                        .font(.system(size: 16))
-                                                        .padding(5)
-                                                        .background(Color.yellow.opacity(0.85))
-                                                        .clipShape(Circle())
-                                                        .overlay(Circle().stroke(Color.orange.opacity(0.6), lineWidth: 1))
-                                                        .padding(4)
-                                                        .opacity(0.8)
-                                                }
-                                            }
-                                            Spacer()
-                                            if wipSelectedIndex == i {
-                                                Text("Tap for Effects")
-                                                    .font(.system(size: 9, weight: .semibold))
-                                                    .foregroundColor(.white)
-                                                    .padding(.horizontal, 4)
-                                                    .padding(.vertical, 2)
-                                                    .background(Color.red.opacity(0.75))
-                                                    .clipShape(Capsule())
-                                                    .padding(.bottom, 4)
-                                            }
-                                        }
-                                    )
+                                Button {
+                                    let img = history.fullImage(at: i) ?? history.thumbnails[i]
+                                    onPreviewPhoto?(img)
+                                    onGoToEffects?(i)
+                                } label: {
+                                    Image(uiImage: history.thumbnails[i])
+                                        .resizable()
+                                        .scaledToFill()
+                                        .frame(width: geo.size.width, height: geo.size.width)
+                                        .clipped()
+                                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 10)
+                                                .stroke(Color.gray.opacity(0.2), lineWidth: 0.5)
+                                        )
+                                }
+                                .contextMenu {
+                                    Button("Remove", role: .destructive) {
+                                        history.remove(at: i)
+                                    }
+                                }
                             }
                             .aspectRatio(1, contentMode: .fit)
                             .id(i)
-                            .contentShape(Rectangle())
-                            .onTapGesture(count: 2) {
-                                let img = history.fullImage(at: i) ?? history.thumbnails[i]
-                                onExtractStamps?(img)
-                            }
-                            .onTapGesture(count: 1) {
-                                if wipSelectedIndex == i {
-                                    onGoToEffects?()
-                                } else {
-                                    wipSelectedIndex = i
-                                    let img = history.fullImage(at: i) ?? history.thumbnails[i]
-                                    onPreviewPhoto?(img)
-                                }
-                            }
-                            .contextMenu {
-                                Button(role: .destructive) {
-                                    history.remove(at: i)
-                                } label: {
-                                    Label("Remove", systemImage: "trash")
-                                }
-                            }
                         }
                     }
                     .padding(.horizontal, 20)
@@ -463,15 +585,6 @@ struct CanvasColorPickerView: View {
                     onPickerCancel?()
                     dismiss()
                 }
-            }
-            ToolbarItem(placement: .navigationBarTrailing) {
-                Button("Apply") {
-                    if let idx = wipSelectedIndex {
-                        onApply?(idx)
-                    }
-                }
-                .fontWeight(.semibold)
-                .disabled(wipSelectedIndex == nil)
             }
         }
     }
@@ -785,15 +898,18 @@ struct DrawScreen: View {
     @State private var backgroundOffset: CGSize = .zero
     @State private var backgroundDragStart: CGSize = .zero
 
-    // Background effects
-    @State private var bgOpacity: Double = 1.0
-    @State private var bgBlur: Double = 0.0
-    @State private var bgBrightness: Double = 0.0
-    @State private var bgSaturation: Double = 1.0
+    // Background effects (persisted so theme settings carry across sessions)
+    @AppStorage("bgOpacity") private var bgOpacity: Double = 1.0
+    @AppStorage("bgBlur") private var bgBlur: Double = 0.0
+    @AppStorage("bgBrightness") private var bgBrightness: Double = 0.0
+    @AppStorage("bgSaturation") private var bgSaturation: Double = 1.0
     @State private var showBgEditor: Bool = false
     // Saved state for cancel in background editor
     @State private var savedBgImage: UIImage? = nil
     @State private var savedBgOffset: CGSize = .zero
+    @State private var extractedBgSubject: UIImage? = nil
+    @State private var savedExtractedBgSubject: UIImage? = nil
+    @State private var pendingBgHistoryIndex: Int? = nil
     @State private var savedBgOpacity: Double = 1.0
     @State private var savedBgBlur: Double = 0.0
     @State private var savedBgBrightness: Double = 0.0
@@ -854,6 +970,7 @@ struct DrawScreen: View {
         savedBgBlur = bgBlur
         savedBgBrightness = bgBrightness
         savedBgSaturation = bgSaturation
+        savedExtractedBgSubject = extractedBgSubject
     }
 
     func restoreSavedBgState() {
@@ -863,11 +980,12 @@ struct DrawScreen: View {
         bgBlur = savedBgBlur
         bgBrightness = savedBgBrightness
         bgSaturation = savedBgSaturation
+        extractedBgSubject = savedExtractedBgSubject
     }
 
     // stampView replaced by StampItemView struct below
     func handleDone() {
-        let img = renderCanvasWithStamps(lines: lines, stamps: placedStamps, size: canvasSize, canvasColor: UIColor(canvasColor), backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation)
+        let img = renderCanvasWithStamps(lines: lines, stamps: placedStamps, size: canvasSize, canvasColor: UIColor(canvasColor), backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation, extractedSubject: extractedBgSubject)
         resultImage = img
         isGeneratingCaption = true
         Task {
@@ -1093,6 +1211,12 @@ struct DrawScreen: View {
                 canvasBackgroundImage = image
                 backgroundOffset = .zero
                 resetBgEffects()
+                extractedBgSubject = nil
+                // Go straight to effects screen, same as tapping a thumbnail
+                pendingBgHistoryIndex = 0
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    bgNavPath.append(0)
+                }
             }
         }
         .sheet(isPresented: $showCanvasBgSheet, onDismiss: {
@@ -1111,13 +1235,16 @@ struct DrawScreen: View {
                         canvasBackgroundImage = nil
                         backgroundOffset = .zero
                         resetBgEffects()
+                        extractedBgSubject = nil
                     }, onPickPhoto: {
                         showCanvasImagePicker = true
                     }, onPreviewPhoto: { img in
                         canvasBackgroundImage = img
                         backgroundOffset = .zero
                         resetBgEffects()
-                    }, onGoToEffects: {
+                        extractedBgSubject = nil
+                    }, onGoToEffects: { idx in
+                        pendingBgHistoryIndex = idx
                         bgNavPath.append(0)
                     }, onApply: { idx in
                         bgPickerWasApplied = true
@@ -1149,12 +1276,23 @@ struct DrawScreen: View {
                             lines: lines,
                             stamps: placedStamps,
                             canvasSize: canvasSize,
+                            onExtractionResult: { subject in
+                                extractedBgSubject = subject
+                            },
                             onCancel: {
                                 restoreSavedBgState()
-                                bgNavPath.removeLast()
+                                pendingBgHistoryIndex = nil
+                                showCanvasBgSheet = false
                             },
                             onDone: {
-                                bgNavPath.removeLast()
+                                bgPickerWasApplied = true
+                                if let idx = pendingBgHistoryIndex {
+                                    undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: savedBgImage, backgroundOffset: savedBgOffset))
+                                    redoStack = []
+                                    BackgroundPhotoHistory.shared.moveToTop(at: idx)
+                                    pendingBgHistoryIndex = nil
+                                }
+                                showCanvasBgSheet = false
                             }
                         )
                     }
@@ -1186,10 +1324,12 @@ struct DrawScreen: View {
                     bgBlur: $bgBlur,
                     bgBrightness: $bgBrightness,
                     bgSaturation: $bgSaturation,
-                    showCancel: true,
                     lines: lines,
                     stamps: placedStamps,
                     canvasSize: canvasSize,
+                    onExtractionResult: { subject in
+                        extractedBgSubject = subject
+                    },
                     onCancel: {
                         restoreSavedBgState()
                         showBgEditor = false
@@ -1223,6 +1363,17 @@ struct DrawScreen: View {
                                 .brightness(bgBrightness)
                                 .saturation(bgSaturation)
                                 .opacity(bgOpacity)
+                                .allowsHitTesting(false)
+                        }
+                        // Extracted subject layer — above bg effects, unaffected by sliders
+                        if let subject = extractedBgSubject {
+                            let imgW = subject.size.width, imgH = subject.size.height
+                            let scale = imgW > 0 && imgH > 0 ? max(geo.size.width / imgW, geo.size.height / imgH) : 1
+                            Image(uiImage: subject)
+                                .resizable()
+                                .frame(width: imgW * scale, height: imgH * scale)
+                                .frame(width: geo.size.width, height: geo.size.height, alignment: .center)
+                                .clipped()
                                 .allowsHitTesting(false)
                         }
                         DrawingCanvas(lines: $lines, undoStack: $undoStack, redoStack: $redoStack, currentColor: currentColor,

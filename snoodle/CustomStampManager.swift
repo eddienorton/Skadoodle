@@ -67,8 +67,8 @@ class CustomStampManager: ObservableObject {
         try? data.write(to: metadataURL)
     }
 
-    func addStamp(image: UIImage) -> CustomStamp? {
-        let downsampled = image.downsampled(toMaxDimension: 600)
+    func addStamp(image: UIImage, maxDimension: CGFloat = 600) -> CustomStamp? {
+        let downsampled = image.downsampled(toMaxDimension: maxDimension)
         guard let png = downsampled.pngData() else { return nil }
         let id = UUID()
         let filename = "\(id.uuidString).png"
