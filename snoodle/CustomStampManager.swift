@@ -12,17 +12,35 @@ import CoreImage
 import CoreImage.CIFilterBuiltins
 import Combine
 
+// MARK: - Stamp Source
+
+enum StampSource: String, Codable {
+    case photo, doodle
+}
+
 // MARK: - Custom Stamp Model
 
 struct CustomStamp: Identifiable, Codable {
     let id: UUID
     let filename: String  // UUID.png in Documents
     var dateAdded: Date
+    var source: StampSource
 
-    init(id: UUID = UUID(), filename: String, dateAdded: Date = Date()) {
+    init(id: UUID = UUID(), filename: String, dateAdded: Date = Date(), source: StampSource = .photo) {
         self.id = id
         self.filename = filename
         self.dateAdded = dateAdded
+        self.source = source
+    }
+
+    // Custom decoder: default source to .photo so existing saved stamps decode cleanly
+    enum CodingKeys: String, CodingKey { case id, filename, dateAdded, source }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id        = try c.decode(UUID.self,   forKey: .id)
+        filename  = try c.decode(String.self, forKey: .filename)
+        dateAdded = try c.decode(Date.self,   forKey: .dateAdded)
+        source    = try c.decodeIfPresent(StampSource.self, forKey: .source) ?? .photo
     }
 
     var imageURL: URL {
@@ -39,6 +57,9 @@ struct CustomStamp: Identifiable, Codable {
 class CustomStampManager: ObservableObject {
     static let shared = CustomStampManager()
     @Published var stamps: [CustomStamp] = []
+
+    var photoStamps: [CustomStamp]  { stamps.filter { $0.source == .photo } }
+    var doodleStamps: [CustomStamp] { stamps.filter { $0.source == .doodle } }
 
     let documentsURL: URL = {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -67,14 +88,14 @@ class CustomStampManager: ObservableObject {
         try? data.write(to: metadataURL)
     }
 
-    func addStamp(image: UIImage, maxDimension: CGFloat = 600) -> CustomStamp? {
+    func addStamp(image: UIImage, maxDimension: CGFloat = 600, source: StampSource = .photo) -> CustomStamp? {
         let downsampled = image.downsampled(toMaxDimension: maxDimension)
         guard let png = downsampled.pngData() else { return nil }
         let id = UUID()
         let filename = "\(id.uuidString).png"
         let url = documentsURL.appendingPathComponent(filename)
         guard (try? png.write(to: url)) != nil else { return nil }
-        let stamp = CustomStamp(id: id, filename: filename)
+        let stamp = CustomStamp(id: id, filename: filename, source: source)
         stamps.insert(stamp, at: 0)
         save()
         return stamp
@@ -101,6 +122,14 @@ class ObjectSegmentationModel: ObservableObject {
     @Published var isProcessing = false
     @Published var error: String? = nil
     @Published var progressText: String = "Finding objects…"
+
+    /// Load pre-processed objects directly — skips Vision processing entirely.
+    @MainActor
+    func load(preProcessed: [SegmentedObject]) {
+        objects = preProcessed
+        isProcessing = false
+        error = nil
+    }
 
     func processAll(images: [UIImage]) async {
         await MainActor.run {
@@ -199,6 +228,38 @@ extension UIImage {
         UIGraphicsEndImageContext()
         return normalized
     }
+    /// Returns the cropped image and its top-left origin within the receiver (point coordinates).
+    func croppedToContentWithOrigin() -> (image: UIImage, origin: CGPoint)? {
+        guard let cgImage = cgImage else { return nil }
+        let width = cgImage.width, height = cgImage.height
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        guard let context = CGContext(data: &pixels, width: width, height: height,
+                                      bitsPerComponent: 8, bytesPerRow: width * 4,
+                                      space: colorSpace,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        var minX = width, minY = height, maxX = 0, maxY = 0
+        for y in 0..<height {
+            for x in 0..<width {
+                if pixels[(y * width + x) * 4 + 3] > 10 {
+                    minX = min(minX, x); maxX = max(maxX, x)
+                    minY = min(minY, y); maxY = max(maxY, y)
+                }
+            }
+        }
+        guard maxX > minX && maxY > minY else { return nil }
+        let padding = 4
+        let cropX = max(0, minX - padding)
+        let cropY = max(0, minY - padding)
+        let cropW = min(width - cropX, maxX - minX + padding * 2)
+        let cropH = min(height - cropY, maxY - minY + padding * 2)
+        guard let cgCropped = cgImage.cropping(to: CGRect(x: cropX, y: cropY, width: cropW, height: cropH)) else { return nil }
+        let croppedImage = UIImage(cgImage: cgCropped, scale: scale, orientation: imageOrientation)
+        let origin = CGPoint(x: CGFloat(cropX) / scale, y: CGFloat(cropY) / scale)
+        return (croppedImage, origin)
+    }
+
     /// Crop transparent padding to content bounds
     func croppedToContent() -> UIImage? {
         guard let cgImage = cgImage else { return self }

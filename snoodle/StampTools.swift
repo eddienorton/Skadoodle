@@ -16,6 +16,12 @@ struct SegmentationItem: Identifiable {
     let images: [UIImage]
 }
 
+// Wraps already-processed segmentation objects for sheet(item:) — skips re-processing
+struct PreProcessedSegmentation: Identifiable {
+    let id = UUID()
+    let objects: [SegmentedObject]
+}
+
 
 struct SubmitButton: View {
     let entry: SnoodleEntry
@@ -96,6 +102,7 @@ struct PlacedStamp: Identifiable {
     var flipY: Bool = false
     var flipStep: Int = 0
     var customImageId: UUID? = nil  // if set, render from CustomStampManager instead of emoji
+    var inlineImage: UIImage? = nil  // extracted subject — held in memory, not saved to library
     var stampText: String? = nil    // if set, render as text stamp
     var fontName: String? = nil     // font for text stamp
     var fontStyle: String = "regular"    // "regular", "bold", "italic", "bolditalic"
@@ -304,6 +311,7 @@ struct StampToolButton: View {
     @Binding var selectedCustomStampId: String
     @Binding var isCustomStampMode: Bool
     let canvasSize: CGSize
+    var allowDoodleCreation: Bool = true   // false inside DoodleStampCreatorView to prevent nesting
     @State private var showPicker = false
     @State private var segmentationItem: SegmentationItem? = nil  // drives sheet(item:) atomically
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
@@ -312,8 +320,9 @@ struct StampToolButton: View {
     @State private var showCamera = false
     @State private var showPhotoPicker = false
     @State private var isLoadingPhotos = false
-    @State private var pickerTab = 0  // 0 = emoji, 1 = photos, 2 = text
+    @State private var pickerTab = 0  // 0 = emoji, 1 = photos, 2 = doodle
     @State private var catProxy: ScrollViewProxy? = nil
+    @State private var showDoodleCreator = false
 
     @ObservedObject var customManager = CustomStampManager.shared
 
@@ -359,6 +368,7 @@ struct StampToolButton: View {
                 Picker("", selection: $pickerTab) {
                     Text("😊 Emoji").tag(0)
                     Text("📷 Photos").tag(1)
+                    Text("✏️ Doodle").tag(2)
                 }
                 .pickerStyle(.segmented)
                 .padding(.horizontal, 16)
@@ -431,7 +441,7 @@ struct StampToolButton: View {
                 } else if pickerTab == 1 {
                     // Photo stamps
                     VStack(spacing: 0) {
-                        if customManager.stamps.isEmpty {
+                        if customManager.photoStamps.isEmpty {
                             Spacer()
                             VStack(spacing: 12) {
                                 Image(systemName: "photo.badge.plus")
@@ -462,7 +472,7 @@ struct StampToolButton: View {
                                                 .foregroundColor(.purple)
                                         }
                                     }
-                                    ForEach(customManager.stamps) { stamp in
+                                    ForEach(customManager.photoStamps) { stamp in
                                         if let img = stamp.image {
                                             Button {
                                                 selectedCustomStampId = stamp.id.uuidString
@@ -478,6 +488,106 @@ struct StampToolButton: View {
                                                     .overlay(RoundedRectangle(cornerRadius: 10)
                                                         .stroke(isCustomStampMode && selectedCustomStampId == stamp.id.uuidString ? Color.purple : Color.gray.opacity(0.2),
                                                                 lineWidth: isCustomStampMode && selectedCustomStampId == stamp.id.uuidString ? 2.5 : 1))
+                                            }
+                                            .contextMenu {
+                                                Button(role: .destructive) {
+                                                    customManager.delete(stamp)
+                                                    if selectedCustomStampId == stamp.id.uuidString {
+                                                        selectedCustomStampId = ""
+                                                        isCustomStampMode = false
+                                                    }
+                                                } label: {
+                                                    Label("Delete", systemImage: "trash")
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                .padding(12)
+                            }
+                        }
+                    }
+                } else if pickerTab == 2 {
+                    // Doodle stamps
+                    VStack(spacing: 0) {
+                        if customManager.doodleStamps.isEmpty {
+                            Spacer()
+                            VStack(spacing: 12) {
+                                Image(systemName: "pencil.and.scribble")
+                                    .font(.system(size: 36))
+                                    .foregroundColor(.secondary)
+                                Text("No doodle stamps yet")
+                                    .font(.system(size: 15, weight: .semibold))
+                                if allowDoodleCreation {
+                                    Text("Draw something and extract objects")
+                                        .font(.system(size: 13))
+                                        .foregroundColor(.secondary)
+                                    Button {
+                                        showPicker = false
+                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                                            showDoodleCreator = true
+                                        }
+                                    } label: {
+                                        Label("Draw a Stamp", systemImage: "plus")
+                                            .font(.system(size: 15, weight: .semibold))
+                                            .padding(.horizontal, 18)
+                                            .padding(.vertical, 10)
+                                            .background(Color.purple)
+                                            .foregroundColor(.white)
+                                            .cornerRadius(10)
+                                    }
+                                } else {
+                                    Text("Create doodle stamps from the main canvas")
+                                        .font(.system(size: 13))
+                                        .foregroundColor(.secondary)
+                                        .multilineTextAlignment(.center)
+                                        .padding(.horizontal, 24)
+                                }
+                            }
+                            Spacer()
+                        } else {
+                            ScrollView {
+                                let cols = [GridItem(.adaptive(minimum: 70), spacing: 10)]
+                                LazyVGrid(columns: cols, spacing: 10) {
+                                    if allowDoodleCreation {
+                                    Button {
+                                        showPicker = false
+                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                                            showDoodleCreator = true
+                                        }
+                                    } label: {
+                                        ZStack {
+                                            RoundedRectangle(cornerRadius: 10)
+                                                .fill(Color.purple.opacity(0.08))
+                                                .frame(width: 70, height: 70)
+                                                .overlay(RoundedRectangle(cornerRadius: 10)
+                                                    .stroke(Color.purple.opacity(0.7), style: StrokeStyle(lineWidth: 2, dash: [4])))
+                                            Image(systemName: "plus")
+                                                .font(.system(size: 20))
+                                                .foregroundColor(.purple)
+                                        }
+                                    }
+                                    }
+                                    ForEach(customManager.doodleStamps) { stamp in
+                                        if let img = stamp.image {
+                                            Button {
+                                                selectedCustomStampId = stamp.id.uuidString
+                                                isCustomStampMode = true
+                                                showPicker = false
+                                            } label: {
+                                                ZStack {
+                                                    CheckerboardView()
+                                                        .frame(width: 70, height: 70)
+                                                        .cornerRadius(10)
+                                                    Image(uiImage: img)
+                                                        .resizable()
+                                                        .scaledToFit()
+                                                        .frame(width: 66, height: 66)
+                                                }
+                                                .cornerRadius(10)
+                                                .overlay(RoundedRectangle(cornerRadius: 10)
+                                                    .stroke(isCustomStampMode && selectedCustomStampId == stamp.id.uuidString ? Color.purple : Color.gray.opacity(0.2),
+                                                            lineWidth: isCustomStampMode && selectedCustomStampId == stamp.id.uuidString ? 2.5 : 1))
                                             }
                                             .contextMenu {
                                                 Button(role: .destructive) {
@@ -574,7 +684,7 @@ struct StampToolButton: View {
                 segmentationItem = nil
                 var lastStamp: CustomStamp? = nil
                 for cutout in cutouts {
-                    if let stamp = customManager.addStamp(image: cutout) {
+                    if let stamp = customManager.addStamp(image: cutout, source: .photo) {
                         lastStamp = stamp
                     }
                 }
@@ -582,6 +692,15 @@ struct StampToolButton: View {
                     selectedCustomStampId = stamp.id.uuidString
                     isCustomStampMode = true
                     showPicker = false
+                }
+            }
+        }
+        .fullScreenCover(isPresented: $showDoodleCreator) {
+            DoodleStampCreatorView { stampAdded in
+                showDoodleCreator = false
+                if stampAdded, let newest = customManager.doodleStamps.first {
+                    selectedCustomStampId = newest.id.uuidString
+                    isCustomStampMode = true
                 }
             }
         }
@@ -669,7 +788,7 @@ func applyBgEffectsForExport(to image: UIImage, bgOpacity: Double, bgBlur: Doubl
     return processed
 }
 
-func renderCanvasWithStamps(lines: [DrawingLine], stamps: [PlacedStamp], size: CGSize, canvasColor: UIColor = .white, backgroundImage: UIImage? = nil, backgroundOffset: CGSize = .zero, bgOpacity: Double = 1.0, bgBlur: Double = 0.0, bgBrightness: Double = 0.0, bgSaturation: Double = 1.0, extractedSubject: UIImage? = nil) -> UIImage {
+func renderCanvasWithStamps(lines: [DrawingLine], stamps: [PlacedStamp], size: CGSize, canvasColor: UIColor = .white, backgroundImage: UIImage? = nil, backgroundOffset: CGSize = .zero, bgOpacity: Double = 1.0, bgBlur: Double = 0.0, bgBrightness: Double = 0.0, bgSaturation: Double = 1.0) -> UIImage {
     let canvasSwiftUI = Color(canvasColor)
     let effectiveBgImage: UIImage? = backgroundImage.map { img in
         let needsProcessing = bgOpacity < 1.0 || bgBlur > 0 || bgBrightness != 0 || bgSaturation != 1.0
@@ -689,23 +808,19 @@ func renderCanvasWithStamps(lines: [DrawingLine], stamps: [PlacedStamp], size: C
                 let uiImg = Image(uiImage: bgImg)
                 context.draw(uiImg, in: CGRect(x: x, y: y, width: drawW, height: drawH))
             }
-            // Extracted subject — drawn above effected bg, no effects applied
-            if let subject = extractedSubject {
-                let imgW = subject.size.width, imgH = subject.size.height
-                guard imgW > 0, imgH > 0 else { return }
-                let scale = max(canvasSize.width / imgW, canvasSize.height / imgH)
-                let drawW = imgW * scale, drawH = imgH * scale
-                let x = (canvasSize.width - drawW) / 2
-                let y = (canvasSize.height - drawH) / 2
-                context.draw(Image(uiImage: subject), in: CGRect(x: x, y: y, width: drawW, height: drawH))
-            }
             for line in lines {
                 renderLine(line, in: &context, canvasColor: canvasSwiftUI)
             }
         }
         ForEach(stamps) { stamp in
             Group {
-                if let customId = stamp.customImageId,
+                if let img = stamp.inlineImage {
+                    Image(uiImage: img)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: stamp.displayWidth, height: stamp.displayHeight)
+                        .clipped()
+                } else if let customId = stamp.customImageId,
                    let customStamp = CustomStampManager.shared.stamps.first(where: { $0.id == customId }),
                    let img = customStamp.image {
                     Image(uiImage: img)
@@ -808,6 +923,42 @@ enum StampTransform {
     case flipH, flipV, rotate90
 }
 
+// Fires action immediately on press, then repeats every `interval` seconds until release.
+private struct TweakRepeatButton: View {
+    let label: String
+    let action: () -> Void
+    var interval: TimeInterval
+    @State private var timer: Timer?
+
+    init(_ label: String, interval: TimeInterval = 0.12, action: @escaping () -> Void) {
+        self.label = label
+        self.interval = interval
+        self.action = action
+    }
+
+    var body: some View {
+        Text(label)
+            .font(.system(size: 18, weight: .regular))
+            .foregroundColor(.white.opacity(0.85))
+            .frame(width: 40, height: 36)
+            .background(Color.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in
+                        guard timer == nil else { return }
+                        action()
+                        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { _ in
+                            action()
+                        }
+                    }
+                    .onEnded { _ in
+                        timer?.invalidate()
+                        timer = nil
+                    }
+            )
+    }
+}
+
 struct StampMagicMenu: View {
     let stamp: PlacedStamp
     let canvasSize: CGSize
@@ -816,50 +967,170 @@ struct StampMagicMenu: View {
     var onDelete: (() -> Void)? = nil
     var onDupe: (() -> Void)? = nil
     var onEdit: (() -> Void)? = nil
+    var onNudge: ((CGSize) -> Void)? = nil
+    var onResizeBy: ((CGFloat) -> Void)? = nil
+    var onRotateBy: ((CGFloat) -> Void)? = nil
+
+    @State private var showTweak = false
 
     var body: some View {
         VStack(spacing: 0) {
-            // Handle / title
+            // Header
             HStack {
+                if showTweak {
+                    Button { showTweak = false } label: {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundColor(.white.opacity(0.7))
+                            .frame(width: 28, height: 28)
+                    }
+                } else {
+                    Spacer().frame(width: 28)
+                }
                 Spacer()
-                if stamp.isTextStamp {
+                if showTweak {
+                    Text("Precision Tweak")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(.white.opacity(0.85))
+                } else if stamp.isTextStamp {
                     Text("✏️ Text")
                         .font(.system(size: 14, weight: .medium))
                         .foregroundColor(.white.opacity(0.85))
                 } else {
-                    Text(stamp.emoji)
-                        .font(.system(size: 20))
+                    Text(stamp.emoji).font(.system(size: 20))
                 }
                 Spacer()
                 Button(action: onDismiss) {
                     Image(systemName: "xmark")
                         .font(.system(size: 12, weight: .bold))
                         .foregroundColor(.white.opacity(0.7))
+                        .frame(width: 28, height: 28)
                 }
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 10)
             .padding(.vertical, 10)
 
             Divider()
 
-            let columns = stamp.isTextStamp
-                ? Array(repeating: GridItem(.flexible()), count: 6)
-                : Array(repeating: GridItem(.flexible()), count: 5)
-            LazyVGrid(columns: columns, spacing: 0) {
-                magicButton("↔️", "Flip H",   "↔️ swipe")  { onTransform(.flipH) }
-                magicButton("↕️", "Flip V",   "↕️ swipe")  { onTransform(.flipV) }
-                magicButton("🔄", "Rotate",   "↻ pinch")  { onTransform(.rotate90) }
-                magicButton("📋", "Dupe",     "copy")      { onDupe?() }
-                if stamp.isTextStamp {
-                    magicButton("✏️", "Edit",  "")          { onEdit?() }
+            if showTweak {
+                tweakPanel
+            } else {
+                let columns = stamp.isTextStamp
+                    ? Array(repeating: GridItem(.flexible()), count: 6)
+                    : Array(repeating: GridItem(.flexible()), count: 5)
+                LazyVGrid(columns: columns, spacing: 0) {
+                    magicButton("↔️", "Flip H",  "↔️ swipe") { onTransform(.flipH) }
+                    magicButton("↕️", "Flip V",  "↕️ swipe") { onTransform(.flipV) }
+                    magicButton("🔄", "Rotate",  "↻ pinch")  { onTransform(.rotate90) }
+                    magicButton("📋", "Dupe",    "copy")      { onDupe?() }
+                    if stamp.isTextStamp {
+                        magicButton("✏️", "Edit", "")         { onEdit?() }
+                    }
+                    magicButton("🗑️", "Delete",  "tap tap")  { onDelete?() }
                 }
-                magicButton("🗑️", "Delete",   "tap tap")  { onDelete?() }
+                .padding(.bottom, 2)
+
+                Divider()
+
+                Button {
+                    showTweak = true
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "slider.horizontal.3")
+                            .font(.system(size: 13))
+                        Text("Precision Tweak")
+                            .font(.system(size: 13, weight: .medium))
+                    }
+                    .foregroundColor(.white.opacity(0.8))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 9)
+                }
             }
-            .padding(.bottom, 6)
         }
         .background(Color.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 16))
         .shadow(color: .black.opacity(0.2), radius: 12, x: 0, y: 4)
         .frame(width: 300)
+    }
+
+    // MARK: — Precision tweak panel
+
+    private let dpadCell: CGFloat = 44
+    private let dpadCellH: CGFloat = 38
+
+    var tweakPanel: some View {
+        HStack(alignment: .top, spacing: 0) {
+
+            // ── Left: SIZE ──────────────────────────────────────
+            VStack(spacing: 6) {
+                Text("SIZE")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.5))
+                    .frame(maxWidth: .infinity)
+
+                HStack(spacing: 8) {
+                    TweakRepeatButton("−") { onResizeBy?(-5) }
+                    TweakRepeatButton("+") { onResizeBy?(5)  }
+                }
+
+                Divider().padding(.top, 4)
+
+                Text("ROTATE")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.5))
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 2)
+
+                HStack(spacing: 8) {
+                    TweakRepeatButton("↺") { onRotateBy?(-5) }
+                    TweakRepeatButton("↻") { onRotateBy?(5)  }
+                }
+            }
+            .frame(width: 100)
+            .padding(.vertical, 12)
+            .padding(.leading, 12)
+
+            // Vertical divider
+            Rectangle()
+                .fill(Color.white.opacity(0.15))
+                .frame(width: 1)
+                .padding(.vertical, 10)
+                .padding(.horizontal, 10)
+
+            // ── Right: MOVE (cross D-pad) ───────────────────────
+            VStack(spacing: 6) {
+                Text("MOVE")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.5))
+                    .frame(maxWidth: .infinity)
+
+                // Row 0: up arrow centered
+                HStack(spacing: 0) {
+                    Color.clear.frame(width: dpadCell, height: dpadCellH)
+                    TweakRepeatButton("↑") { onNudge?(CGSize(width: 0, height: -8)) }
+                        .frame(width: dpadCell, height: dpadCellH)
+                    Color.clear.frame(width: dpadCell, height: dpadCellH)
+                }
+                // Row 1: left, (gap), right
+                HStack(spacing: 0) {
+                    TweakRepeatButton("←") { onNudge?(CGSize(width: -8, height: 0)) }
+                        .frame(width: dpadCell, height: dpadCellH)
+                    Color.clear.frame(width: dpadCell, height: dpadCellH)
+                    TweakRepeatButton("→") { onNudge?(CGSize(width: 8, height: 0)) }
+                        .frame(width: dpadCell, height: dpadCellH)
+                }
+                // Row 2: down arrow centered
+                HStack(spacing: 0) {
+                    Color.clear.frame(width: dpadCell, height: dpadCellH)
+                    TweakRepeatButton("↓") { onNudge?(CGSize(width: 0, height: 8)) }
+                        .frame(width: dpadCell, height: dpadCellH)
+                    Color.clear.frame(width: dpadCell, height: dpadCellH)
+                }
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.vertical, 12)
+            .padding(.trailing, 12)
+        }
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     @ViewBuilder

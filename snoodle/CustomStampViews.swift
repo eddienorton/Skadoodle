@@ -5,15 +5,31 @@
 
 import SwiftUI
 import PhotosUI
+import UIKit
 
 // MARK: - Object Segmentation Sheet
 
 struct ObjectSegmentationSheet: View {
     let images: [UIImage]
+    let preProcessedObjects: [SegmentedObject]?   // non-nil = skip Vision processing
     let onSelect: ([UIImage]) -> Void
     @StateObject private var model = ObjectSegmentationModel()
     @Environment(\.dismiss) var dismiss
     @State private var selectedIds: Set<UUID> = []
+
+    /// Convenience init for raw images (StampToolButton photo flow).
+    init(images: [UIImage], onSelect: @escaping ([UIImage]) -> Void) {
+        self.images = images
+        self.preProcessedObjects = nil
+        self.onSelect = onSelect
+    }
+
+    /// Init for already-processed objects (DoodleStampCreatorView 2+ object flow).
+    init(preProcessedObjects: [SegmentedObject], onSelect: @escaping ([UIImage]) -> Void) {
+        self.images = []
+        self.preProcessedObjects = preProcessedObjects
+        self.onSelect = onSelect
+    }
 
     var body: some View {
         NavigationView {
@@ -129,7 +145,17 @@ struct ObjectSegmentationSheet: View {
                 }
             }
             .task {
-                await model.processAll(images: images)
+                if let pre = preProcessedObjects {
+                    // Already processed — load directly, no Vision work needed
+                    model.load(preProcessed: pre)
+                } else {
+                    await model.processAll(images: images)
+                    // Single object from photo flow — bypass picker
+                    if model.objects.count == 1 {
+                        onSelect([model.objects[0].image])
+                        dismiss()
+                    }
+                }
             }
         }
     }
@@ -193,6 +219,653 @@ struct CameraView: UIViewControllerRepresentable {
             print("📷 CameraView: cancelled")
             picker.dismiss(animated: true) {
                 self.onCapture(nil)
+            }
+        }
+    }
+}
+
+// MARK: - Doodle Stamp Creator
+
+struct DoodleStampCreatorView: View {
+    let onDone: (Bool) -> Void   // true = stamps were added, false = cancelled
+
+    // Drawing state
+    @State private var lines: [DrawingLine] = []
+    @State private var lineWidth: CGFloat = 4
+    @State private var isEraser: Bool = false
+    @State private var canvasSize: CGSize = CGSize(width: 300, height: 300)
+    @State private var undoStack: [CanvasSnapshot] = []
+    @State private var redoStack: [CanvasSnapshot] = []
+
+    // Pen
+    @State private var currentPenType: PenType = .pencil
+    @State private var dualToneColorB: Color = .orange
+    @State private var showPenStudio: Bool = false
+    @AppStorage("doodleStampColorIndex") private var selectedColorIndex: Int = 0
+
+    // Stamps
+    @AppStorage("doodleStampLastEmoji") private var selectedStamp: String = "⭐️"
+    @State private var placedStamps: [PlacedStamp] = []
+    @State private var stampUndoStack: [[PlacedStamp]] = []
+    @State private var stampRedoStack: [[PlacedStamp]] = []
+    @State private var stampResizeStartSize: CGFloat = 0
+    @State private var showStampMagicMenu: Bool = false
+    @State private var selectedStampId: UUID? = nil
+    @State private var stampResizeTargetId: UUID? = nil
+    @State private var stampRotatingId: UUID? = nil
+    @State private var canvasOriginInWindow: CGPoint = .zero
+    @State private var isLongPressing: Bool = false
+    @State private var lastCustomStampIdString: String = ""
+    @State private var isCustomStampMode: Bool = false
+
+    // Text stamps
+    @State private var showTextComposer: Bool = false
+    @State private var editingStampId: UUID? = nil
+
+    // Tracing background (shown on canvas for reference; never included in export)
+    @State private var tracingImage: UIImage? = nil
+    @State private var tracingPickerItem: PhotosPickerItem? = nil
+
+    // UI
+    @State private var showThicknessPicker: Bool = false
+    @State private var showClearSheet: Bool = false
+
+    // Extraction
+    @State private var isExtracting: Bool = false
+    @State private var preProcessedSegmentation: PreProcessedSegmentation? = nil
+
+    @ObservedObject private var customManager = CustomStampManager.shared
+
+    private var currentColor: Color { paletteColors[selectedColorIndex] }
+    private var canvasIsEmpty: Bool { lines.isEmpty && placedStamps.isEmpty }
+
+    // MARK: - Color circle (matches DrawScreen)
+    @ViewBuilder
+    func colorCircle(_ color: Color) -> some View {
+        let idx = paletteColors.firstIndex(where: { $0 == color })
+        let isSelected = idx == selectedColorIndex && !isEraser
+        Circle()
+            .fill(color)
+            .frame(width: 30, height: 30)
+            .overlay(Group {
+                if isSelected {
+                    ZStack {
+                        Circle().stroke(Color.white, lineWidth: 3).padding(-3)
+                        Circle().stroke(Color.blue, lineWidth: 3).padding(-6)
+                    }
+                } else if color == Color.white {
+                    Circle().stroke(Color.black.opacity(0.3), lineWidth: 1)
+                }
+            })
+            .onTapGesture {
+                if let i = idx { selectedColorIndex = i }
+                isEraser = false
+                selectedStampId = nil
+            }
+    }
+
+    // MARK: - Auto-place stamp at canvas center
+    func autoPlaceStamp() {
+        let center = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
+        undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: nil, backgroundOffset: .zero))
+        redoStack = []
+        if isCustomStampMode, let customId = UUID(uuidString: lastCustomStampIdString) {
+            var stamp = PlacedStamp(emoji: "📷", position: center, size: 158)
+            stamp.customImageId = customId
+            placedStamps.append(stamp)
+            selectedStampId = stamp.id
+        } else {
+            let stamp = PlacedStamp(emoji: selectedStamp, position: center, size: 126)
+            placedStamps.append(stamp)
+            selectedStampId = stamp.id
+        }
+        showStampMagicMenu = true
+    }
+
+    // MARK: - Place text stamp
+    func placeTextStamp(text: String, fontId: String, fontStyle: String, alignment: String, color: Color, bgColor: Color) {
+        let center = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
+        undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: nil, backgroundOffset: .zero))
+        redoStack = []
+        let (natW, natH, fontSize) = naturalTextStampSize(text: text, fontId: fontId, fontStyle: fontStyle, maxWidth: canvasSize.width * 0.7)
+        var stamp = PlacedStamp(emoji: "✏️", position: center, size: fontSize)
+        stamp.stampText = text
+        stamp.fontName = fontId
+        stamp.fontStyle = fontStyle
+        stamp.textAlignment = alignment
+        stamp.textColor = color
+        stamp.textBgColor = bgColor
+        stamp.stampWidth = natW
+        stamp.stampHeight = natH
+        placedStamps.append(stamp)
+        selectedStampId = stamp.id
+        showStampMagicMenu = true
+    }
+
+    // MARK: - Measure text stamp natural size
+    func naturalTextStampSize(text: String, fontId: String, fontStyle: String, maxWidth: CGFloat) -> (CGFloat, CGFloat, CGFloat) {
+        let baseFontSize: CGFloat = 48
+        let hPadding: CGFloat = 10
+        let vPadding: CGFloat = 5
+        let font = TextStampFont.font(forId: fontId, style: fontStyle).withSize(baseFontSize)
+        let attrs: [NSAttributedString.Key: Any] = [.font: font]
+        let textLines = text.components(separatedBy: "\n")
+        var maxLineW: CGFloat = 0
+        var totalH: CGFloat = 0
+        for line in textLines {
+            let str = (line.isEmpty ? " " : line) as NSString
+            let br = str.boundingRect(
+                with: CGSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: attrs, context: nil)
+            maxLineW = max(maxLineW, ceil(br.width))
+            totalH += ceil(br.height)
+        }
+        let w = min(maxLineW + hPadding * 2, maxWidth)
+        let h = totalH + vPadding * 2
+        return (w, h, baseFontSize)
+    }
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                VStack(spacing: 0) {
+
+                    // ── Canvas ──────────────────────────────────────────────
+                    GeometryReader { geo in
+                        Color.white
+                        // Tracing reference layer — faint B&W, never composited into export
+                        if let tracing = tracingImage {
+                            Image(uiImage: tracing)
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: geo.size.width, height: geo.size.height)
+                                .clipped()
+                                .grayscale(1.0)
+                                .opacity(0.25)
+                                .allowsHitTesting(false)
+                        }
+                        DrawingCanvas(
+                            lines: $lines,
+                            undoStack: $undoStack,
+                            redoStack: $redoStack,
+                            currentColor: isEraser ? (tracingImage != nil ? .clear : .white) : currentColor,
+                            lineWidth: $lineWidth,
+                            isEraser: $isEraser,
+                            canvasColor: tracingImage != nil ? .clear : .white,
+                            penType: currentPenType,
+                            colorB: dualToneColorB,
+                            currentStamps: placedStamps,
+                            isLongPressing: isLongPressing,
+                            stampResizeTargetId: stampResizeTargetId
+                        )
+                        .contentShape(Rectangle())
+                        .allowsHitTesting(!isLongPressing)
+                        .simultaneousGesture(TapGesture().onEnded {
+                            selectedStampId = nil
+                            showStampMagicMenu = false
+                        })
+                        .background(GeometryReader { geo2 in
+                            Color.clear
+                                .onAppear {
+                                    let frame = geo2.frame(in: .global)
+                                    canvasOriginInWindow = CGPoint(x: frame.minX, y: frame.minY)
+                                }
+                                .onChange(of: geo2.frame(in: .global)) { _, frame in
+                                    canvasOriginInWindow = CGPoint(x: frame.minX, y: frame.minY)
+                                }
+                        })
+                        .onAppear { canvasSize = geo.size }
+                        .onChange(of: geo.size) { _, newSize in canvasSize = newSize }
+
+                        ZStack {
+                            StampCanvasView(
+                                stamps: $placedStamps,
+                                selectedStampId: $selectedStampId,
+                                showStampMagicMenu: $showStampMagicMenu,
+                                undoStack: $undoStack,
+                                redoStack: $redoStack,
+                                lines: $lines,
+                                backgroundImage: .constant(nil),
+                                backgroundOffset: .constant(.zero),
+                                canvasSize: canvasSize,
+                                rotatingId: $stampRotatingId
+                            )
+                            .frame(width: canvasSize.width, height: canvasSize.height)
+                            .allowsHitTesting(true)
+
+                            if let selId = selectedStampId, showStampMagicMenu,
+                               let selStamp = placedStamps.first(where: { $0.id == selId }) {
+                                PulsingCrosshair()
+                                    .allowsHitTesting(false)
+                                    .position(selStamp.position)
+                            }
+
+                            if showStampMagicMenu, let id = selectedStampId,
+                               let stamp = placedStamps.first(where: { $0.id == id }) {
+                                StampMagicMenu(
+                                    stamp: stamp,
+                                    canvasSize: canvasSize,
+                                    onDismiss: {
+                                        showStampMagicMenu = false
+                                        selectedStampId = nil
+                                    },
+                                    onTransform: { transform in
+                                        undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: nil, backgroundOffset: .zero))
+                                        redoStack = []
+                                        if let idx = placedStamps.firstIndex(where: { $0.id == id }) {
+                                            switch transform {
+                                            case .flipH: placedStamps[idx].flipX.toggle()
+                                            case .flipV: placedStamps[idx].flipY.toggle()
+                                            case .rotate90: placedStamps[idx].rotation = (placedStamps[idx].rotation + 90).truncatingRemainder(dividingBy: 360)
+                                            }
+                                        }
+                                        showStampMagicMenu = false
+                                    },
+                                    onDelete: {
+                                        undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: nil, backgroundOffset: .zero))
+                                        redoStack = []
+                                        placedStamps.removeAll { $0.id == id }
+                                        showStampMagicMenu = false
+                                        selectedStampId = nil
+                                    },
+                                    onDupe: {
+                                        undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: nil, backgroundOffset: .zero))
+                                        redoStack = []
+                                        if let idx = placedStamps.firstIndex(where: { $0.id == id }) {
+                                            var dupe = placedStamps[idx]
+                                            dupe = PlacedStamp(
+                                                emoji: dupe.emoji,
+                                                position: CGPoint(
+                                                    x: min(dupe.position.x + dupe.size * 0.6, canvasSize.width - dupe.size / 2),
+                                                    y: min(dupe.position.y + dupe.size * 0.6, canvasSize.height - dupe.size / 2)
+                                                ),
+                                                size: dupe.size,
+                                                rotation: dupe.rotation,
+                                                opacity: dupe.opacity,
+                                                flipX: dupe.flipX,
+                                                flipY: dupe.flipY,
+                                                flipStep: dupe.flipStep,
+                                                customImageId: dupe.customImageId,
+                                                stampText: dupe.stampText,
+                                                fontName: dupe.fontName,
+                                                textColor: dupe.textColor,
+                                                textBgColor: dupe.textBgColor,
+                                                stampWidth: dupe.stampWidth,
+                                                stampHeight: dupe.stampHeight
+                                            )
+                                            placedStamps.append(dupe)
+                                            selectedStampId = dupe.id
+                                        }
+                                        showStampMagicMenu = true
+                                    },
+                                    onEdit: {
+                                        editingStampId = id
+                                        showStampMagicMenu = false
+                                        showTextComposer = true
+                                    }
+                                )
+                                .position(x: canvasSize.width / 2, y: canvasSize.height - 70)
+                                .zIndex(1000)
+                            }
+
+                            WindowPinchView(
+                                placedStamps: $placedStamps,
+                                stampResizeStartSize: $stampResizeStartSize,
+                                stampResizeTargetId: $stampResizeTargetId,
+                                stampRotatingId: $stampRotatingId,
+                                canvasOrigin: canvasOriginInWindow,
+                                canvasSize: canvasSize,
+                                selectedStamp: selectedStamp,
+                                onLongPress: { loc in
+                                    let hits = placedStamps.filter { s in
+                                        let dx = loc.x - s.position.x
+                                        let dy = loc.y - s.position.y
+                                        return sqrt(dx*dx + dy*dy) <= s.size * 0.5 * 0.75
+                                    }
+                                    if hits.isEmpty {
+                                        undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: nil, backgroundOffset: .zero))
+                                        redoStack = []
+                                        if isCustomStampMode, let customId = UUID(uuidString: lastCustomStampIdString) {
+                                            var stamp = PlacedStamp(emoji: "📷", position: loc, size: 158)
+                                            stamp.customImageId = customId
+                                            placedStamps.append(stamp)
+                                        } else {
+                                            placedStamps.append(PlacedStamp(emoji: selectedStamp, position: loc, size: 126))
+                                        }
+                                    }
+                                },
+                                isLongPressing: $isLongPressing,
+                                onBackgroundPanBegan: nil,
+                                onBackgroundPan: nil
+                            )
+                        }
+                        .coordinateSpace(name: "stampCanvas")
+                        .frame(width: canvasSize.width, height: canvasSize.height, alignment: .topLeading)
+                        .fixedSize()
+                        .clipped()
+                    }
+                    .cornerRadius(12)
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.gray.opacity(0.25), lineWidth: 1))
+                    .padding(.horizontal, 16)
+                    .padding(.top, 12)
+
+                    // ── Toolbar ─────────────────────────────────────────────
+                    VStack(spacing: 10) {
+
+                        // Row 1: tracing bg + eraser + color palette
+                        HStack(spacing: 8) {
+                            // Tracing background picker
+                            ZStack(alignment: .topTrailing) {
+                                PhotosPicker(selection: $tracingPickerItem, matching: .images) {
+                                    ZStack {
+                                        Circle()
+                                            .fill(tracingImage != nil ? Color.blue.opacity(0.15) : Color(white: 0.95))
+                                            .frame(width: 38, height: 38)
+                                            .overlay(Circle().stroke(tracingImage != nil ? Color.blue : Color.gray.opacity(0.4),
+                                                                     lineWidth: tracingImage != nil ? 2.5 : 1))
+                                        Image(systemName: tracingImage != nil ? "photo.fill" : "photo")
+                                            .font(.system(size: 18))
+                                            .foregroundColor(tracingImage != nil ? .blue : .gray)
+                                    }
+                                }
+                                .onChange(of: tracingPickerItem) { _, item in
+                                    Task {
+                                        if let item,
+                                           let data = try? await item.loadTransferable(type: Data.self),
+                                           let img = UIImage(data: data) {
+                                            await MainActor.run { tracingImage = img }
+                                        }
+                                        await MainActor.run { tracingPickerItem = nil }
+                                    }
+                                }
+                                if tracingImage != nil {
+                                    Button { tracingImage = nil } label: {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .font(.system(size: 14))
+                                            .foregroundColor(.red)
+                                            .background(Color.white.clipShape(Circle()))
+                                    }
+                                    .offset(x: 4, y: -4)
+                                }
+                            }
+                            .padding(.leading, 16)
+
+                            ZStack {
+                                Circle()
+                                    .fill(isEraser ? Color.blue.opacity(0.15) : Color(white: 0.95))
+                                    .frame(width: 38, height: 38)
+                                    .overlay(Circle().stroke(isEraser ? Color.blue : Color.gray.opacity(0.4),
+                                                             lineWidth: isEraser ? 2.5 : 1))
+                                Image(systemName: "eraser.fill")
+                                    .font(.system(size: 20))
+                                    .foregroundColor(isEraser ? .blue : .gray)
+                            }
+                            .onTapGesture {
+                                selectedStampId = nil
+                                isEraser = true
+                            }
+
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 10) {
+                                    ForEach(paletteColors, id: \.self) { color in
+                                        colorCircle(color)
+                                    }
+                                }
+                                .padding(.leading, 9)
+                                .padding(.trailing, 16)
+                                .padding(.vertical, 8)
+                            }
+                            .padding(.trailing, 4)
+                        }
+
+                        // Row 2: T | stamp | pen | thickness | undo | redo | clear
+                        HStack(spacing: 12) {
+                            Button {
+                                showTextComposer = true
+                            } label: {
+                                ZStack {
+                                    Circle()
+                                        .fill(Color(UIColor.secondarySystemBackground))
+                                        .frame(width: 38, height: 38)
+                                        .overlay(Circle().stroke(Color.gray.opacity(0.3), lineWidth: 1))
+                                    Text("T")
+                                        .font(.system(size: 20, weight: .bold, design: .serif))
+                                        .foregroundColor(.primary)
+                                }
+                            }
+
+                            StampToolButton(
+                                selectedStamp: $selectedStamp,
+                                placedStamps: $placedStamps,
+                                stampUndoStack: $stampUndoStack,
+                                selectedCustomStampId: $lastCustomStampIdString,
+                                isCustomStampMode: $isCustomStampMode,
+                                canvasSize: canvasSize,
+                                allowDoodleCreation: false
+                            )
+                            .onChange(of: selectedStamp) { _, _ in
+                                guard !isCustomStampMode else { return }
+                                autoPlaceStamp()
+                            }
+                            .onChange(of: lastCustomStampIdString) { _, newId in
+                                guard isCustomStampMode, !newId.isEmpty else { return }
+                                autoPlaceStamp()
+                            }
+
+                            Button(action: {
+                                selectedStampId = nil
+                                showPenStudio = true
+                            }) {
+                                ZStack {
+                                    Circle()
+                                        .fill(Color(UIColor.secondarySystemBackground))
+                                        .frame(width: 34, height: 34)
+                                        .overlay(Circle().stroke(Color.gray.opacity(0.3), lineWidth: 1))
+                                    Image(systemName: currentPenType.icon)
+                                        .font(.system(size: 20))
+                                        .foregroundColor(.primary)
+                                }
+                            }
+                            .sheet(isPresented: $showPenStudio) {
+                                PenStudioSheet(penType: $currentPenType, colorB: $dualToneColorB)
+                                    .presentationDragIndicator(.visible)
+                            }
+                            .sheet(isPresented: $showTextComposer, onDismiss: {
+                                editingStampId = nil
+                            }) {
+                                TextComposerSheet(
+                                    initialText: editingStampId.flatMap { id in
+                                        placedStamps.first(where: { $0.id == id })?.stampText
+                                    },
+                                    initialFontStyle: editingStampId.flatMap { id in
+                                        placedStamps.first(where: { $0.id == id })?.fontStyle
+                                    },
+                                    initialAlignment: editingStampId.flatMap { id in
+                                        placedStamps.first(where: { $0.id == id })?.textAlignment
+                                    },
+                                    onPlace: { text, fontId, fontStyle, alignment, color, bgColor in
+                                        if let editId = editingStampId,
+                                           let idx = placedStamps.firstIndex(where: { $0.id == editId }) {
+                                            undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: nil, backgroundOffset: .zero))
+                                            redoStack = []
+                                            let (natW, natH, fontSize) = naturalTextStampSize(text: text, fontId: fontId, fontStyle: fontStyle, maxWidth: canvasSize.width * 0.7)
+                                            placedStamps[idx].stampText = text
+                                            placedStamps[idx].fontName = fontId
+                                            placedStamps[idx].fontStyle = fontStyle
+                                            placedStamps[idx].textAlignment = alignment
+                                            placedStamps[idx].textColor = color
+                                            placedStamps[idx].textBgColor = bgColor
+                                            placedStamps[idx].size = fontSize
+                                            placedStamps[idx].stampWidth = natW
+                                            placedStamps[idx].stampHeight = natH
+                                            selectedStampId = editId
+                                            showStampMagicMenu = true
+                                        } else {
+                                            placeTextStamp(text: text, fontId: fontId, fontStyle: fontStyle, alignment: alignment, color: color, bgColor: bgColor)
+                                        }
+                                        showTextComposer = false
+                                        editingStampId = nil
+                                    }
+                                )
+                            }
+
+                            Button {
+                                showThicknessPicker.toggle()
+                            } label: {
+                                ZStack {
+                                    Circle()
+                                        .fill(Color(UIColor.secondarySystemBackground))
+                                        .frame(width: 34, height: 34)
+                                    Circle()
+                                        .fill(Color.primary)
+                                        .frame(width: min(lineWidth, 24), height: min(lineWidth, 24))
+                                }
+                            }
+
+                            Button(action: {
+                                guard !undoStack.isEmpty else { return }
+                                let snapshot = CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: nil, backgroundOffset: .zero)
+                                redoStack.append(snapshot)
+                                let last = undoStack.removeLast()
+                                lines = last.lines
+                                placedStamps = last.stamps
+                            }) {
+                                Image(systemName: "arrow.uturn.backward")
+                                    .font(.system(size: 18, weight: .medium))
+                                    .foregroundColor(undoStack.isEmpty ? .gray.opacity(0.4) : .blue)
+                            }
+                            .disabled(undoStack.isEmpty)
+
+                            Button(action: {
+                                guard !redoStack.isEmpty else { return }
+                                let snapshot = CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: nil, backgroundOffset: .zero)
+                                undoStack.append(snapshot)
+                                let last = redoStack.removeLast()
+                                lines = last.lines
+                                placedStamps = last.stamps
+                            }) {
+                                Image(systemName: "arrow.uturn.forward")
+                                    .font(.system(size: 18, weight: .medium))
+                                    .foregroundColor(redoStack.isEmpty ? .gray.opacity(0.4) : .blue)
+                            }
+                            .disabled(redoStack.isEmpty)
+
+                            Button("Clear") {
+                                let thingCount = (lines.isEmpty ? 0 : 1) + (placedStamps.isEmpty ? 0 : 1)
+                                if thingCount == 1 {
+                                    undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: nil, backgroundOffset: .zero))
+                                    redoStack = []
+                                    if !lines.isEmpty { lines = [] }
+                                    else { placedStamps = []; stampUndoStack = []; stampRedoStack = [] }
+                                } else {
+                                    showClearSheet = true
+                                }
+                            }
+                            .foregroundColor(canvasIsEmpty ? .gray.opacity(0.4) : .red)
+                            .font(.system(size: 16, weight: .medium))
+                            .disabled(canvasIsEmpty)
+                            .confirmationDialog("Clear Canvas", isPresented: $showClearSheet, titleVisibility: .visible) {
+                                Button("Clear All", role: .destructive) {
+                                    undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: nil, backgroundOffset: .zero))
+                                    redoStack = []
+                                    lines = []
+                                    placedStamps = []
+                                    stampUndoStack = []
+                                    stampRedoStack = []
+                                }
+                                if !lines.isEmpty {
+                                    Button("Clear Drawing", role: .destructive) {
+                                        undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: nil, backgroundOffset: .zero))
+                                        redoStack = []
+                                        lines = []
+                                    }
+                                }
+                                if !placedStamps.isEmpty {
+                                    Button("Clear Stamps", role: .destructive) {
+                                        undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: nil, backgroundOffset: .zero))
+                                        redoStack = []
+                                        placedStamps = []
+                                        stampUndoStack = []
+                                        stampRedoStack = []
+                                    }
+                                }
+                                Button("Cancel", role: .cancel) {}
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 10)
+                    }
+                    .padding(.top, 10)
+                }
+
+                // ThicknessPanel — last in ZStack so it renders above everything
+                if showThicknessPicker {
+                    Color.black.opacity(0.001)
+                        .ignoresSafeArea()
+                        .onTapGesture { showThicknessPicker = false }
+                    VStack {
+                        Spacer()
+                        HStack {
+                            Spacer()
+                            ThicknessPanel(lineWidth: $lineWidth, onSelect: { showThicknessPicker = false })
+                                .frame(width: 160)
+                            Spacer()
+                        }
+                        .padding(.bottom, 175)
+                    }
+                }
+            }
+            .navigationTitle("Draw a Stamp")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Cancel") { onDone(false) }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        isExtracting = true
+                        let img = renderCanvasWithStamps(
+                            lines: lines, stamps: placedStamps, size: canvasSize, canvasColor: .white
+                        )
+                        Task {
+                            let model = ObjectSegmentationModel()
+                            await model.processAll(images: [img])
+                            await MainActor.run {
+                                isExtracting = false
+                                if model.objects.count == 1 {
+                                    // Single object — place immediately, no sheet
+                                    _ = customManager.addStamp(image: model.objects[0].image, source: .doodle)
+                                    onDone(true)
+                                } else if !model.objects.isEmpty {
+                                    // Multiple objects — show picker with pre-processed results
+                                    preProcessedSegmentation = PreProcessedSegmentation(objects: model.objects)
+                                }
+                                // 0 objects: model.error set; user stays on canvas to try again
+                            }
+                        }
+                    } label: {
+                        if isExtracting {
+                            ProgressView().tint(.accentColor)
+                        } else {
+                            HStack(spacing: 4) {
+                                Image(systemName: "scissors")
+                                Text("Extract")
+                            }
+                            .fontWeight(.semibold)
+                        }
+                    }
+                    .disabled(canvasIsEmpty || isExtracting)
+                }
+            }
+        }
+        .sheet(item: $preProcessedSegmentation) { item in
+            ObjectSegmentationSheet(preProcessedObjects: item.objects) { cutouts in
+                preProcessedSegmentation = nil
+                for cutout in cutouts {
+                    _ = customManager.addStamp(image: cutout, source: .doodle)
+                }
+                onDone(true)
             }
         }
     }

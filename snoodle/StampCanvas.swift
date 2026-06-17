@@ -98,9 +98,17 @@ class StampItemUIView: UIView, UIGestureRecognizerDelegate {
             emojiLabel.frame = bounds
         }
 
-        if let customId = stamp.customImageId,
+        if let img = stamp.inlineImage {
+            imageView.image = img
+            imageView.contentMode = .scaleAspectFill
+            imageView.clipsToBounds = true
+            imageView.isHidden = false
+            emojiLabel.isHidden = true
+        } else if let customId = stamp.customImageId,
            let customStamp = CustomStampManager.shared.stamps.first(where: { $0.id == customId }),
            let img = customStamp.image {
+            imageView.contentMode = .scaleAspectFit
+            imageView.clipsToBounds = false
             imageView.image = img
             imageView.isHidden = false
             emojiLabel.isHidden = true
@@ -392,6 +400,7 @@ struct StampCanvasView: UIViewRepresentable {
             draggingId: context.coordinator.draggingId,
             rotatingId: rotatingId
         ) { stamp in
+            if let img = stamp.inlineImage { return img }
             if let customId = stamp.customImageId {
                 return CustomStampManager.shared.stamps.first(where: { $0.id == customId })?.image
             }
@@ -531,7 +540,7 @@ struct StampCanvasView: UIViewRepresentable {
             parent.undoStack.append(CanvasSnapshot(lines: parent.lines, stamps: parent.stamps, backgroundImage: parent.backgroundImage, backgroundOffset: parent.backgroundOffset))
             parent.redoStack = []
             let src = parent.stamps[idx]
-            let dupe = PlacedStamp(
+            var dupe = PlacedStamp(
                 emoji: src.emoji,
                 position: CGPoint(
                     x: min(src.position.x + src.size * 0.4, parent.canvasSize.width - src.size / 2),
@@ -551,6 +560,7 @@ struct StampCanvasView: UIViewRepresentable {
                 stampWidth: src.stampWidth,
                 stampHeight: src.stampHeight
             )
+            dupe.inlineImage = src.inlineImage
             parent.stamps.append(dupe)
             parent.selectedStampId = dupe.id
             parent.showStampMagicMenu = true

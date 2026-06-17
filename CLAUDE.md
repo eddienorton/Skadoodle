@@ -12,8 +12,8 @@ Eddie Brayman, 72, independent iOS developer, East Village NYC. 50+ years coding
 **App Store URL:** https://apps.apple.com/us/app/skadoodle/id6771497563  
 **Bundle ID:** maxsdad.skadoodle  
 **Firebase project:** snoodle-68bfc  
-**Current version at last session:** 2.1 build 3 (June 2026)
-**Last released to App Store:** 2.0 build 3 (June 2026)
+**Current version at last session:** 2.1 build 4 (June 2026)
+**Last released to App Store:** 2.1 build 4 (June 2026)
 
 ---
 
@@ -189,6 +189,27 @@ New submissions now write `searchIndex` to Firestore for future scalable text se
 
 ## Scaling / Render Bug — Resolved (v2.1 b2)
 Investigated and tested extensively. Pen lines and stamp positions are geometrically consistent between live canvas and the flattened export. Could not reproduce the previously observed offset. Likely resolved as a side effect of the background feature work (coordinate space cleanup). Closed.
+
+---
+
+## New in v2.1 b4
+
+### New Features
+- **Doodle Stamps** (`CustomStampViews.swift`, `CustomStampManager.swift`) — `DoodleStampCreatorView` lets users draw on a transparent canvas using all pen types, colors, thickness, text stamps, and emoji stamps, then extract the drawing as a reusable stamp via Vision instance segmentation. Single-object extractions place immediately; multi-object extractions show a picker sheet. Doodle stamps appear in their own "Doodles" tab in the stamp picker (`StampToolButton`). `CustomStamp.source: StampSource` (.photo / .doodle) distinguishes the two types; `photoStamps` and `doodleStamps` are computed filters on `CustomStampManager.stamps`.
+- **Tracing Background in Doodle Canvas** — Photo picker button (left of eraser in `DoodleStampCreatorView` toolbar) loads any photo as a faint B&W reference layer (25% opacity, full grayscale) behind the drawing canvas. Canvas color switches to `.clear` when active so the layer shows through. The tracing image is never passed to `renderCanvasWithStamps` or Vision — the export path remains white + drawing only. Tap the photo icon to pick or swap; red ✕ badge to clear.
+- **Extracted Subject → Stamp** — Background photo subjects extracted via `BackgroundEditorView` now land on the main canvas as moveable, resizable `PlacedStamp` entries instead of being locked into the background layer. Uses `croppedToContentWithOrigin()` to find the subject's bounding box and project it to canvas coordinates. `inlineImage` (in-memory fast path) + `customImageId` (disk-backed dupe/undo fallback) dual render path.
+- **Precision Tweak panel** (`StampTools.swift`, `StampMagicMenu`) — "Precision Tweak" button in the stamp magic menu opens a side-by-side panel: left column = SIZE (−/+) + ROTATE (↺/↻); right column = MOVE cross D-pad (↑←↓→). All 8 buttons use `TweakRepeatButton` — fires immediately on press, then repeats every 0.12s via `Timer` + `DragGesture(minimumDistance:0)` until release. `onNudge`, `onResizeBy`, `onRotateBy` callbacks wired in `DrawScreen.stampMagicMenuView(id:stamp:)`.
+
+### Fixes (b4)
+- **Artist strip showing only a small number of artists** — `appendNextPage()` was overwriting `topArtistEntries` with the narrow paginated window. Removed that line; `topArtistEntries` is exclusively owned by `fetchTopArtistEntries()`.
+- **Profile → detail view showed entire world gallery** — `WorldSnoodleDetailView` was ignoring the artist filter when opened from a profile. Fixed.
+- **Artist name missing in detail view** — Fixed display when navigating from profile grid.
+- **Background picker redesign** — Color swatches at top; recent backgrounds in uniform 3-column grid; long-press to remove.
+- **Effects screen** — Extract Objects auto-activates on re-entry (`.task(id: backgroundImage != nil)`); effect slider values persist via `@AppStorage`; Reset button added; improved iPad layout.
+- **Multi-line text stamp clipped in export** — `naturalTextStampSize` switched to `boundingRect` with matching options; draw rect uses full available height.
+- **Stamp sizes increased** — Custom stamps: 158pt, emoji stamps: 126pt (both auto-place and tap-to-place paths in `DrawScreen` and `DoodleStampCreatorView`).
+- **Magic menu raised** — `.position(y: canvasSize.height - 100)` clears the color palette row.
+- **Precision Tweak panel height** — Replaced `Spacer()` in d-pad HStacks with `Color.clear` (fixed size, no vertical expansion); added `.fixedSize(horizontal: false, vertical: true)`.
 
 ---
 

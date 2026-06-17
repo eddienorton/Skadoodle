@@ -907,8 +907,7 @@ struct DrawScreen: View {
     // Saved state for cancel in background editor
     @State private var savedBgImage: UIImage? = nil
     @State private var savedBgOffset: CGSize = .zero
-    @State private var extractedBgSubject: UIImage? = nil
-    @State private var savedExtractedBgSubject: UIImage? = nil
+    @State private var pendingExtractedSubject: UIImage? = nil
     @State private var pendingBgHistoryIndex: Int? = nil
     @State private var savedBgOpacity: Double = 1.0
     @State private var savedBgBlur: Double = 0.0
@@ -970,7 +969,6 @@ struct DrawScreen: View {
         savedBgBlur = bgBlur
         savedBgBrightness = bgBrightness
         savedBgSaturation = bgSaturation
-        savedExtractedBgSubject = extractedBgSubject
     }
 
     func restoreSavedBgState() {
@@ -980,12 +978,11 @@ struct DrawScreen: View {
         bgBlur = savedBgBlur
         bgBrightness = savedBgBrightness
         bgSaturation = savedBgSaturation
-        extractedBgSubject = savedExtractedBgSubject
     }
 
     // stampView replaced by StampItemView struct below
     func handleDone() {
-        let img = renderCanvasWithStamps(lines: lines, stamps: placedStamps, size: canvasSize, canvasColor: UIColor(canvasColor), backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation, extractedSubject: extractedBgSubject)
+        let img = renderCanvasWithStamps(lines: lines, stamps: placedStamps, size: canvasSize, canvasColor: UIColor(canvasColor), backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation)
         resultImage = img
         isGeneratingCaption = true
         Task {
@@ -1076,18 +1073,95 @@ struct DrawScreen: View {
             }
     }
 
+    // Extracted into its own function so the compiler can type-check the callbacks independently
+    @ViewBuilder
+    func stampMagicMenuView(id: UUID, stamp: PlacedStamp) -> some View {
+        StampMagicMenu(
+            stamp: stamp,
+            canvasSize: canvasSize,
+            onDismiss: {
+                showStampMagicMenu = false
+                selectedStampId = nil
+            },
+            onTransform: { transform in
+                undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset))
+                redoStack = []
+                if let idx = placedStamps.firstIndex(where: { $0.id == id }) {
+                    switch transform {
+                    case .flipH:    placedStamps[idx].flipX.toggle()
+                    case .flipV:    placedStamps[idx].flipY.toggle()
+                    case .rotate90: placedStamps[idx].rotation = (placedStamps[idx].rotation + 90).truncatingRemainder(dividingBy: 360)
+                    }
+                }
+                showStampMagicMenu = false
+            },
+            onDelete: {
+                undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset))
+                redoStack = []
+                placedStamps.removeAll { $0.id == id }
+                showStampMagicMenu = false
+                selectedStampId = nil
+            },
+            onDupe: {
+                undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset))
+                redoStack = []
+                if let idx = placedStamps.firstIndex(where: { $0.id == id }) {
+                    let src = placedStamps[idx]
+                    let dupePosX: CGFloat = min(src.position.x + src.size * 0.6, canvasSize.width  - src.size / 2)
+                    let dupePosY: CGFloat = min(src.position.y + src.size * 0.6, canvasSize.height - src.size / 2)
+                    var dupe = PlacedStamp(emoji: src.emoji, position: CGPoint(x: dupePosX, y: dupePosY), size: src.size,
+                                          rotation: src.rotation, opacity: src.opacity,
+                                          flipX: src.flipX, flipY: src.flipY, flipStep: src.flipStep,
+                                          customImageId: src.customImageId,
+                                          stampText: src.stampText, fontName: src.fontName,
+                                          textColor: src.textColor, textBgColor: src.textBgColor,
+                                          stampWidth: src.stampWidth, stampHeight: src.stampHeight)
+                    dupe.inlineImage = src.inlineImage
+                    placedStamps.append(dupe)
+                    selectedStampId = dupe.id
+                }
+                showStampMagicMenu = true
+            },
+            onEdit: {
+                editingStampId = id
+                showStampMagicMenu = false
+                showTextComposer = true
+            },
+            onNudge: { delta in
+                guard let idx = placedStamps.firstIndex(where: { $0.id == id }) else { return }
+                placedStamps[idx].position.x = max(0, min(canvasSize.width,  placedStamps[idx].position.x + delta.width))
+                placedStamps[idx].position.y = max(0, min(canvasSize.height, placedStamps[idx].position.y + delta.height))
+            },
+            onResizeBy: { delta in
+                guard let idx = placedStamps.firstIndex(where: { $0.id == id }) else { return }
+                let oldSize = max(placedStamps[idx].size, 1)
+                placedStamps[idx].size = max(20, placedStamps[idx].size + delta)
+                let ratio = placedStamps[idx].size / oldSize
+                if placedStamps[idx].stampWidth  > 0 { placedStamps[idx].stampWidth  *= ratio }
+                if placedStamps[idx].stampHeight > 0 { placedStamps[idx].stampHeight *= ratio }
+            },
+            onRotateBy: { degrees in
+                guard let idx = placedStamps.firstIndex(where: { $0.id == id }) else { return }
+                placedStamps[idx].rotation = (placedStamps[idx].rotation + degrees)
+                    .truncatingRemainder(dividingBy: 360)
+            }
+        )
+        .position(x: canvasSize.width / 2, y: canvasSize.height - 100)
+        .zIndex(1000)
+    }
+
     // Auto-place the current stamp centered on the canvas when selected from picker
     func autoPlaceStamp() {
         let center = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
         undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset))
         redoStack = []
         if isCustomStampMode, let customId = UUID(uuidString: lastCustomStampIdString) {
-            var stamp = PlacedStamp(emoji: "📷", position: center, size: 120)
+            var stamp = PlacedStamp(emoji: "📷", position: center, size: 158)
             stamp.customImageId = customId
             placedStamps.append(stamp)
             selectedStampId = stamp.id
         } else {
-            let stamp = PlacedStamp(emoji: selectedStamp, position: center, size: 96)
+            let stamp = PlacedStamp(emoji: selectedStamp, position: center, size: 126)
             placedStamps.append(stamp)
             selectedStampId = stamp.id
         }
@@ -1215,7 +1289,6 @@ struct DrawScreen: View {
                 canvasBackgroundImage = image
                 backgroundOffset = .zero
                 resetBgEffects()
-                extractedBgSubject = nil
                 // Go straight to effects screen, same as tapping a thumbnail
                 pendingBgHistoryIndex = 0
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
@@ -1239,14 +1312,12 @@ struct DrawScreen: View {
                         canvasBackgroundImage = nil
                         backgroundOffset = .zero
                         resetBgEffects()
-                        extractedBgSubject = nil
                     }, onPickPhoto: {
                         showCanvasImagePicker = true
                     }, onPreviewPhoto: { img in
                         canvasBackgroundImage = img
                         backgroundOffset = .zero
                         resetBgEffects()
-                        extractedBgSubject = nil
                     }, onGoToEffects: { idx in
                         pendingBgHistoryIndex = idx
                         bgNavPath.append(0)
@@ -1281,20 +1352,49 @@ struct DrawScreen: View {
                             stamps: placedStamps,
                             canvasSize: canvasSize,
                             onExtractionResult: { subject in
-                                extractedBgSubject = subject
+                                pendingExtractedSubject = subject
                             },
                             onCancel: {
                                 restoreSavedBgState()
                                 pendingBgHistoryIndex = nil
+                                pendingExtractedSubject = nil
                                 showCanvasBgSheet = false
                             },
                             onDone: {
                                 bgPickerWasApplied = true
-                                if let idx = pendingBgHistoryIndex {
+                                let hasBgChange = pendingBgHistoryIndex != nil
+                                let hasStamp = pendingExtractedSubject != nil
+                                if hasBgChange || hasStamp {
                                     undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: savedBgImage, backgroundOffset: savedBgOffset))
                                     redoStack = []
+                                }
+                                if let idx = pendingBgHistoryIndex {
                                     BackgroundPhotoHistory.shared.moveToTop(at: idx)
                                     pendingBgHistoryIndex = nil
+                                }
+                                if let subject = pendingExtractedSubject {
+                                    let result = subject.croppedToContentWithOrigin()
+                                    let cropped = result?.image ?? subject
+                                    let cropOrigin = result?.origin ?? .zero
+                                    let savedStamp = CustomStampManager.shared.addStamp(image: cropped, source: .photo)
+                                    // Same fill scale as embedded overlay
+                                    let fillScale = subject.size.width > 0 && subject.size.height > 0
+                                        ? max(canvasSize.width / subject.size.width, canvasSize.height / subject.size.height)
+                                        : 1.0
+                                    let displayW = cropped.size.width * fillScale
+                                    let displayH = cropped.size.height * fillScale
+                                    // Project crop center from full-image space to canvas space
+                                    let imgOriginX = (canvasSize.width  - subject.size.width  * fillScale) / 2
+                                    let imgOriginY = (canvasSize.height - subject.size.height * fillScale) / 2
+                                    let stampX = imgOriginX + (cropOrigin.x + cropped.size.width  / 2) * fillScale
+                                    let stampY = imgOriginY + (cropOrigin.y + cropped.size.height / 2) * fillScale
+                                    var stamp = PlacedStamp(emoji: "📷", position: CGPoint(x: stampX, y: stampY), size: max(displayW, displayH))
+                                    stamp.inlineImage = cropped
+                                    stamp.customImageId = savedStamp?.id  // disk fallback for dupe
+                                    stamp.stampWidth = displayW
+                                    stamp.stampHeight = displayH
+                                    placedStamps.append(stamp)
+                                    pendingExtractedSubject = nil
                                 }
                                 showCanvasBgSheet = false
                             }
@@ -1332,13 +1432,42 @@ struct DrawScreen: View {
                     stamps: placedStamps,
                     canvasSize: canvasSize,
                     onExtractionResult: { subject in
-                        extractedBgSubject = subject
+                        pendingExtractedSubject = subject
                     },
                     onCancel: {
                         restoreSavedBgState()
+                        pendingExtractedSubject = nil
                         showBgEditor = false
                     },
-                    onDone: { showBgEditor = false }
+                    onDone: {
+                        if let subject = pendingExtractedSubject {
+                            undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: savedBgImage, backgroundOffset: savedBgOffset))
+                            redoStack = []
+                            let result = subject.croppedToContentWithOrigin()
+                            let cropped = result?.image ?? subject
+                            let cropOrigin = result?.origin ?? .zero
+                            let savedStamp = CustomStampManager.shared.addStamp(image: cropped, source: .photo)
+                            // Same fill scale as embedded overlay
+                            let fillScale = subject.size.width > 0 && subject.size.height > 0
+                                ? max(canvasSize.width / subject.size.width, canvasSize.height / subject.size.height)
+                                : 1.0
+                            let displayW = cropped.size.width * fillScale
+                            let displayH = cropped.size.height * fillScale
+                            // Project crop center from full-image space to canvas space
+                            let imgOriginX = (canvasSize.width  - subject.size.width  * fillScale) / 2
+                            let imgOriginY = (canvasSize.height - subject.size.height * fillScale) / 2
+                            let stampX = imgOriginX + (cropOrigin.x + cropped.size.width  / 2) * fillScale
+                            let stampY = imgOriginY + (cropOrigin.y + cropped.size.height / 2) * fillScale
+                            var stamp = PlacedStamp(emoji: "📷", position: CGPoint(x: stampX, y: stampY), size: max(displayW, displayH))
+                            stamp.inlineImage = cropped
+                            stamp.customImageId = savedStamp?.id  // disk fallback for dupe
+                            stamp.stampWidth = displayW
+                            stamp.stampHeight = displayH
+                            placedStamps.append(stamp)
+                            pendingExtractedSubject = nil
+                        }
+                        showBgEditor = false
+                    }
                 )
             }
             .presentationDetents([.large])
@@ -1367,17 +1496,6 @@ struct DrawScreen: View {
                                 .brightness(bgBrightness)
                                 .saturation(bgSaturation)
                                 .opacity(bgOpacity)
-                                .allowsHitTesting(false)
-                        }
-                        // Extracted subject layer — above bg effects, unaffected by sliders
-                        if let subject = extractedBgSubject {
-                            let imgW = subject.size.width, imgH = subject.size.height
-                            let scale = imgW > 0 && imgH > 0 ? max(geo.size.width / imgW, geo.size.height / imgH) : 1
-                            Image(uiImage: subject)
-                                .resizable()
-                                .frame(width: imgW * scale, height: imgH * scale)
-                                .frame(width: geo.size.width, height: geo.size.height, alignment: .center)
-                                .clipped()
                                 .allowsHitTesting(false)
                         }
                         DrawingCanvas(lines: $lines, undoStack: $undoStack, redoStack: $redoStack, currentColor: currentColor,
@@ -1435,72 +1553,7 @@ struct DrawScreen: View {
                         // Magic menu renders on top of all stamps
                         if showStampMagicMenu, let id = selectedStampId,
                            let stamp = placedStamps.first(where: { $0.id == id }) {
-                            // Menu pinned to bottom center of canvas
-                            StampMagicMenu(
-                                stamp: stamp,
-                                canvasSize: canvasSize,
-                                onDismiss: {
-                                    showStampMagicMenu = false
-                                    selectedStampId = nil
-                                },
-                                onTransform: { transform in
-                                    undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset))
-                                    redoStack = []
-                                    if let idx = placedStamps.firstIndex(where: { $0.id == id }) {
-                                        switch transform {
-                                        case .flipH: placedStamps[idx].flipX.toggle()
-                                        case .flipV: placedStamps[idx].flipY.toggle()
-                                        case .rotate90: placedStamps[idx].rotation = (placedStamps[idx].rotation + 90).truncatingRemainder(dividingBy: 360)
-                                        }
-                                    }
-                                    showStampMagicMenu = false
-                                },
-                                onDelete: {
-                                    undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset))
-                                    redoStack = []
-                                    placedStamps.removeAll { $0.id == id }
-                                    showStampMagicMenu = false
-                                    selectedStampId = nil
-                                },
-                                onDupe: {
-                                    undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset))
-                                    redoStack = []
-                                    if let idx = placedStamps.firstIndex(where: { $0.id == id }) {
-                                        var dupe = placedStamps[idx]
-                                        dupe = PlacedStamp(
-                                            emoji: dupe.emoji,
-                                            position: CGPoint(
-                                                x: min(dupe.position.x + dupe.size * 0.6, canvasSize.width - dupe.size / 2),
-                                                y: min(dupe.position.y + dupe.size * 0.6, canvasSize.height - dupe.size / 2)
-                                            ),
-                                            size: dupe.size,
-                                            rotation: dupe.rotation,
-                                            opacity: dupe.opacity,
-                                            flipX: dupe.flipX,
-                                            flipY: dupe.flipY,
-                                            flipStep: dupe.flipStep,
-                                            customImageId: dupe.customImageId,
-                                            stampText: dupe.stampText,
-                                            fontName: dupe.fontName,
-                                            textColor: dupe.textColor,
-                                            textBgColor: dupe.textBgColor,
-                                            stampWidth: dupe.stampWidth,
-                                            stampHeight: dupe.stampHeight
-                                        )
-                                        placedStamps.append(dupe)
-                                        selectedStampId = dupe.id
-                                    }
-                                    // Keep tray open on the duped stamp so user can keep duping
-                                    showStampMagicMenu = true
-                                },
-                                onEdit: {
-                                    editingStampId = id
-                                    showStampMagicMenu = false
-                                    showTextComposer = true
-                                }
-                            )
-                            .position(x: canvasSize.width / 2, y: canvasSize.height - 70)
-                            .zIndex(1000)
+                            stampMagicMenuView(id: id, stamp: stamp)
                         }
                         // Window-level pinch + long press
                         WindowPinchView(
@@ -1521,11 +1574,11 @@ struct DrawScreen: View {
                                     undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset))
                                     redoStack = []
                                     if isCustomStampMode, let customId = UUID(uuidString: lastCustomStampIdString) {
-                                        var stamp = PlacedStamp(emoji: "📷", position: loc, size: 120)
+                                        var stamp = PlacedStamp(emoji: "📷", position: loc, size: 158)
                                         stamp.customImageId = customId
                                         placedStamps.append(stamp)
                                     } else {
-                                        placedStamps.append(PlacedStamp(emoji: selectedStamp, position: loc, size: 96))
+                                        placedStamps.append(PlacedStamp(emoji: selectedStamp, position: loc, size: 126))
                                     }
                                 }
                             },
