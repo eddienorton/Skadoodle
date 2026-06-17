@@ -1129,15 +1129,19 @@ struct DrawScreen: View {
         let font = TextStampFont.font(forId: fontId, style: fontStyle).withSize(baseFontSize)
         let attrs: [NSAttributedString.Key: Any] = [.font: font]
 
-        // Measure each explicit line with unlimited width — no word wrap
+        // Measure each explicit line using same options as the render call
+        // (boundingRect with .usesLineFragmentOrigin/.usesFontLeading) so sizes agree.
         let lines = text.components(separatedBy: "\n")
         var maxLineW: CGFloat = 0
         var totalH: CGFloat = 0
         for line in lines {
             let str = (line.isEmpty ? " " : line) as NSString
-            let sz = str.size(withAttributes: attrs)
-            maxLineW = max(maxLineW, sz.width)
-            totalH += sz.height
+            let br = str.boundingRect(
+                with: CGSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: attrs, context: nil)
+            maxLineW = max(maxLineW, ceil(br.width))
+            totalH += ceil(br.height)
         }
 
         // Add line spacing between lines

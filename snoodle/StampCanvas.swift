@@ -447,8 +447,11 @@ struct StampCanvasView: UIViewRepresentable {
                         with: CGSize(width: dw - hPad * 2, height: dh - vPad * 2),
                         options: [.usesLineFragmentOrigin, .usesFontLeading],
                         attributes: attrs, context: nil)
-                    str.draw(with: CGRect(x: hPad, y: (dh - br.height) / 2,
-                                          width: dw - hPad * 2, height: br.height),
+                    // Use full available height for draw rect — boundingRect underreports
+                    // text height by a few pts, causing bottom-line clipping.
+                    // Center based on measured br.height but give the draw call room.
+                    str.draw(with: CGRect(x: hPad, y: (dh - ceil(br.height)) / 2,
+                                          width: dw - hPad * 2, height: dh - vPad * 2),
                              options: [.usesLineFragmentOrigin, .usesFontLeading],
                              attributes: attrs, context: nil)
                 }

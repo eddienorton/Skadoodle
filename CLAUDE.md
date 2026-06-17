@@ -180,6 +180,11 @@ New submissions now write `searchIndex` to Firestore for future scalable text se
 - iPhone layout is completely unchanged.
 - Note: SwiftUI `.sheet` on iPad is locked to a "form sheet" container with a fixed max height (~715pt). `.presentationDetents` with `.fraction()` measures against that container, not the screen — `.large` and `.fraction(0.99)` are equivalent. Sheet stays at `.large` on both devices; the iPad layout redesign works within the fixed container.
 
+### Fix: Multi-line text stamp clipped in flattened export
+- **Root cause:** `naturalTextStampSize` measured each line with `str.size(withAttributes:)`, but the render call used `boundingRect` with `.usesLineFragmentOrigin | .usesFontLeading` — these APIs report different heights. For multi-line text (explicit CR), the stamp rect was sized too short, clipping the first line at the top and last line at the bottom.
+- **Fix (DrawScreen.swift):** Switched `naturalTextStampSize` to use `boundingRect` with the same options as the render call, plus `ceil()` on each measurement, so the stamp rect is always sized correctly.
+- **Fix (StampCanvas.swift):** Draw rect now uses full available height (`dh - vPad * 2`) instead of `br.height`, so any remaining fractional discrepancy can't clip the bottom line.
+
 ---
 
 ## Scaling / Render Bug — Resolved (v2.1 b2)
