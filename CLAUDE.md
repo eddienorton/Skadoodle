@@ -12,7 +12,7 @@ Eddie Brayman, 72, independent iOS developer, East Village NYC. 50+ years coding
 **App Store URL:** https://apps.apple.com/us/app/skadoodle/id6771497563  
 **Bundle ID:** maxsdad.skadoodle  
 **Firebase project:** snoodle-68bfc  
-**Current version at last session:** 2.1 build 7 (June 2026)
+**Current version at last session:** 2.1 build 10 (June 2026)
 **Last released to App Store:** 2.1 build 4 (June 2026)
 
 ---
@@ -236,6 +236,20 @@ Investigated and tested extensively. Pen lines and stamp positions are geometric
 - **Multi-extract placing wrong number of stamps** — Completion handler called `onPlace?()` regardless of object count. Fixed to call `onPlaceMultipleStamps?` when multiple objects extracted.
 - **Import mode alert was bottom sheet** — Was using `.confirmationDialog` (always bottom). Replaced with `.alert` (centered). Title removed; button labels are singular/plural based on photo count.
 - **Pulsing crosshair removed** — Selection now shown via snug bounding rect only. `PulsingCrosshair` struct is dead code (can be deleted).
+
+---
+
+## New in v2.1 b8–b10
+
+### New Feature: Autograph Stamp
+- **Autograph button** — leftmost button in the second toolbar row (before "T"). Shows the user's circular profile photo; falls back to a purple `person.circle` icon with first initial if no photo set. Disabled/dimmed if no username is set.
+- **Badge generation** — `generateAutographBadge()` in `DrawScreen` renders a pill-shaped `UIImage`: circular profile photo (or purple initial fallback) + username text on a flat white rounded-rect background. Reads directly from `UserDefaults` (`snoodleUsername`, `snoodleProfilePhoto`) — no network call.
+- **Placement** — `placeAutographStamp()` drops the badge quietly into the bottom-right corner of the canvas (16pt margin). No selection highlight, no magic menu — it just appears. Behaves as a normal `PlacedStamp` with `inlineImage` set: drag, resize, rotate, delete, precision tweak all work for free.
+- **Hit testing fix** — `stampHit()` in `WindowPinchView.Coordinator` now checks `stamp.inlineImage` first before falling back to emoji rendering. Previously, autograph stamps (and extracted-subject stamps) used the emoji glyph for pixel hit testing, making them nearly impossible to pinch. Fix applies to all `inlineImage`-backed stamps.
+- **Pencil fix (b8)** — Window-level gesture recognizers (`shouldReceive`) now reject all pencil/stylus touches, not just long press. Prevents pinch/rotation recognizers from intercepting Apple Pencil input before it reaches `DrawingCanvas`.
+
+### Low priority / style (added)
+- `PulsingCrosshair` struct in `DrawScreen.swift` — dead code since b7. Safe to delete.
 
 ---
 

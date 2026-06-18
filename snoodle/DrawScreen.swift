@@ -1195,7 +1195,7 @@ struct DrawScreen: View {
             // Pill background
             let pillPath = UIBezierPath(roundedRect: CGRect(x: 0, y: 0, width: width, height: height),
                                         cornerRadius: height / 2)
-            UIColor.white.withAlphaComponent(0.88).setFill()
+            UIColor.white.setFill()
             pillPath.fill()
 
             // Circular photo clip
@@ -2491,7 +2491,10 @@ struct WindowPinchView: UIViewRepresentable {
 
             // Get hit image
             let hitImage: UIImage?
-            if let customId = stamp.customImageId,
+            if let inline = stamp.inlineImage {
+                // Inline image (e.g. autograph badge, extracted subject) — use directly
+                hitImage = inline
+            } else if let customId = stamp.customImageId,
                let customStamp = CustomStampManager.shared.stamps.first(where: { $0.id == customId }) {
                 hitImage = customStamp.image
             } else if let text = stamp.stampText {
