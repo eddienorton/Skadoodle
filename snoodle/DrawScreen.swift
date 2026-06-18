@@ -1165,6 +1165,90 @@ struct DrawScreen: View {
     // Auto-place the current stamp centered on the canvas when selected from picker
     /// Runs alpha-channel scan on a background thread and stores cached snug ratios
     /// back into the PlacedStamp identified by `stampId`.
+    // MARK: - Autograph
+
+    /// Renders a pill badge: circular profile photo + username on a white semi-transparent background.
+    func generateAutographBadge() -> UIImage? {
+        let username = UserDefaults.standard.string(forKey: "snoodleUsername") ?? ""
+        guard !username.isEmpty else { return nil }
+
+        let profilePhoto: UIImage? = {
+            if let data = UserDefaults.standard.data(forKey: "snoodleProfilePhoto") {
+                return UIImage(data: data)
+            }
+            return nil
+        }()
+
+        let height: CGFloat = 44
+        let photoSize: CGFloat = 34
+        let font = UIFont.systemFont(ofSize: 13, weight: .semibold)
+        let textAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor.black.withAlphaComponent(0.85)]
+        let textSize = (username as NSString).size(withAttributes: textAttrs)
+        let leftPad: CGFloat = 5
+        let gap: CGFloat = 7
+        let rightPad: CGFloat = 12
+        let width = leftPad + photoSize + gap + textSize.width + rightPad
+
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: width, height: height))
+        return renderer.image { ctx in
+            let cgCtx = ctx.cgContext
+            // Pill background
+            let pillPath = UIBezierPath(roundedRect: CGRect(x: 0, y: 0, width: width, height: height),
+                                        cornerRadius: height / 2)
+            UIColor.white.withAlphaComponent(0.88).setFill()
+            pillPath.fill()
+
+            // Circular photo clip
+            let photoRect = CGRect(x: leftPad, y: (height - photoSize) / 2, width: photoSize, height: photoSize)
+            cgCtx.saveGState()
+            UIBezierPath(ovalIn: photoRect).addClip()
+            if let photo = profilePhoto {
+                photo.draw(in: photoRect)
+            } else {
+                // Fallback: purple circle with initial
+                UIColor.purple.setFill()
+                UIRectFill(photoRect)
+                let initial = String(username.prefix(1)).uppercased()
+                let initAttrs: [NSAttributedString.Key: Any] = [
+                    .font: UIFont.systemFont(ofSize: 17, weight: .bold),
+                    .foregroundColor: UIColor.white
+                ]
+                let initSize = (initial as NSString).size(withAttributes: initAttrs)
+                (initial as NSString).draw(
+                    at: CGPoint(x: photoRect.midX - initSize.width / 2,
+                                y: photoRect.midY - initSize.height / 2),
+                    withAttributes: initAttrs)
+            }
+            cgCtx.restoreGState()
+
+            // Username text
+            let textY = (height - textSize.height) / 2
+            (username as NSString).draw(
+                at: CGPoint(x: leftPad + photoSize + gap, y: textY),
+                withAttributes: textAttrs)
+        }
+    }
+
+    func placeAutographStamp() {
+        guard let badge = generateAutographBadge() else { return }
+        undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps,
+                                        backgroundImage: canvasBackgroundImage,
+                                        backgroundOffset: backgroundOffset))
+        redoStack = []
+        let stampSize = max(badge.size.width, badge.size.height)
+        let margin: CGFloat = 16
+        let pos = CGPoint(
+            x: canvasSize.width  - badge.size.width  / 2 - margin,
+            y: canvasSize.height - badge.size.height / 2 - margin
+        )
+        var stamp = PlacedStamp(emoji: "✍️", position: pos, size: stampSize)
+        stamp.inlineImage = badge
+        stamp.stampWidth  = badge.size.width
+        stamp.stampHeight = badge.size.height
+        placedStamps.append(stamp)
+        scheduleSnugScan(for: stamp.id, image: badge)
+    }
+
     func scheduleSnugScan(for stampId: UUID, image: UIImage) {
         DispatchQueue.global(qos: .utility).async {
             guard let (wr, hr) = PlacedStamp.computeSnugRatios(from: image) else { return }
@@ -1720,6 +1804,32 @@ struct DrawScreen: View {
                         }
 
                         HStack(spacing: 12) {
+                            // Autograph button — profile pic pill stamp
+                            Button {
+                                placeAutographStamp()
+                            } label: {
+                                ZStack {
+                                    Circle()
+                                        .fill(Color(UIColor.secondarySystemBackground))
+                                        .frame(width: 38, height: 38)
+                                        .overlay(Circle().stroke(Color.gray.opacity(0.3), lineWidth: 1))
+                                    if let data = UserDefaults.standard.data(forKey: "snoodleProfilePhoto"),
+                                       let img = UIImage(data: data) {
+                                        Image(uiImage: img)
+                                            .resizable()
+                                            .scaledToFill()
+                                            .frame(width: 30, height: 30)
+                                            .clipShape(Circle())
+                                    } else {
+                                        Image(systemName: "person.circle.fill")
+                                            .font(.system(size: 22))
+                                            .foregroundColor(.purple)
+                                    }
+                                }
+                            }
+                            .opacity(UserDefaults.standard.string(forKey: "snoodleUsername")?.isEmpty == false ? 1 : 0.3)
+                            .disabled(UserDefaults.standard.string(forKey: "snoodleUsername")?.isEmpty != false)
+
                             // Text stamp button — "T"
                             Button {
                                 showTextComposer = true
@@ -2174,12 +2284,10 @@ struct WindowPinchView: UIViewRepresentable {
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { return true }
 
-        // Pencil never triggers long press stamp placement — finger only
+        // Pencil touches go straight to DrawingCanvas — never intercepted at window level.
+        // Window-level recognizers (pinch, rotation, pan, long press) are finger-only.
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-            if gestureRecognizer is UILongPressGestureRecognizer {
-                return touch.type != .pencil && touch.type != .stylus
-            }
-            return true
+            return touch.type != .pencil && touch.type != .stylus
         }
 
         @objc func handleBackgroundPan(_ g: UIPanGestureRecognizer) {
