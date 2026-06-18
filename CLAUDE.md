@@ -12,7 +12,7 @@ Eddie Brayman, 72, independent iOS developer, East Village NYC. 50+ years coding
 **App Store URL:** https://apps.apple.com/us/app/skadoodle/id6771497563  
 **Bundle ID:** maxsdad.skadoodle  
 **Firebase project:** snoodle-68bfc  
-**Current version at last session:** 2.1 build 4 (June 2026)
+**Current version at last session:** 2.1 build 7 (June 2026)
 **Last released to App Store:** 2.1 build 4 (June 2026)
 
 ---
@@ -213,6 +213,32 @@ Investigated and tested extensively. Pen lines and stamp positions are geometric
 
 ---
 
+## New in v2.1 b5–b7
+
+### New Features
+- **Full Photo Import** — After selecting photos from camera or library, an `.alert` (centered, not action sheet) asks "Extract Objects" or "Use Full Photo". Multi-select supported for both paths. Full photos skip extraction and land directly on canvas as `PlacedStamp` entries staggered from center (20pt diagonal cascade). Singular/plural button labels based on count.
+- **Snug Rect selection indicator** (`PlacedStamp.snugSize`, `PlacedStamp.computeSnugRatios`) — When a stamp is selected and the magic menu is open, a tight bounding rectangle is drawn around it (black 3pt outer + white 1pt inner, always legible on any canvas color). Replaces the old pulsing crosshair.
+  - **Text stamps**: snug rect = `stampWidth - 2×hPadding` by `stampHeight - 2×vPadding` (immediate, no scan needed).
+  - **Custom/doodle stamps**: alpha-channel pixel scan (`computeSnugRatios`) runs on `DispatchQueue.global(.utility)`, finds first/last non-transparent column and row (threshold alpha > 8), stores result as `snugWidthRatio`/`snugHeightRatio` (relative to `size`, so ratios survive resize). Falls back to aspect-fit from image pixel dims until scan completes.
+  - Scan is scheduled via `scheduleSnugScan(for:image:)` in `DrawScreen` after every stamp placement path: `autoPlaceStamp()`, `placeFullPhotoStamps()`, both extracted-subject-to-canvas paths.
+- **Multi-select in Stamp Picker** (`StampToolButton`) — All 3 tabs (Emoji, Photos, Doodles) have a "Select" toggle button in the upper-right of the picker. In multi-select mode: cells show purple checkmark badges, tapping toggles selection. "Done (N)" button places all selected stamps staggered on canvas. Trash icon (left side, photos/doodles only) deletes all selected stamps. "Select" button re-tap cancels multi-select without placing.
+  - Per-tab select mode persists via `@AppStorage` (`stampPickerMultiSelect_0/1/2`) — emoji, photos, and doodles each remember their own Select state independently across sessions.
+  - Active tab persists via `@AppStorage("stampPickerTab")`.
+  - In-progress selections (`multiSelectedEmojis`, `multiSelectedCustomIds`) clear on tab switch and on Done/cancel, but Select mode itself stays on.
+  - New callback `onPlaceMultipleEmojis: ([String]) -> Void` wired to `placeMultipleEmojis()` in DrawScreen (mirrors `placeFullPhotoStamps` for emoji).
+- **Precision Tweak increments** — Move: 4pt, Size: ±3pt, Rotate: ±3° per tick.
+
+### Fixes (b5–b7)
+- **Camera emoji in StampMagicMenu header** — Custom stamps (photo/doodle) showed "📷" as panel header. Fixed to render actual stamp thumbnail for custom stamps, falling back to emoji text only for built-in emoji stamps.
+- **Panel 2 reverted to panel 1 on stamp switch** — `.onChange(of: selectedStampId) { showMenuTweak = false }` in both `DrawScreen` and `DoodleStampCreatorView` was resetting the tweak panel. Removed from both.
+- **First drag after panel open was frozen** — Inherited SwiftUI animation context from tap gesture caused `liveDrag` updates to animate (deferred positions). Fixed with `withAnimation(.none)` in `.onAppear` and both gesture callbacks in `StampMagicMenu`.
+- **Doodle extraction not auto-placing on main canvas** — `onPlace?()` was missing from doodle and photo segmentation completion handlers in `StampToolButton`. Added to both.
+- **Multi-extract placing wrong number of stamps** — Completion handler called `onPlace?()` regardless of object count. Fixed to call `onPlaceMultipleStamps?` when multiple objects extracted.
+- **Import mode alert was bottom sheet** — Was using `.confirmationDialog` (always bottom). Replaced with `.alert` (centered). Title removed; button labels are singular/plural based on photo count.
+- **Pulsing crosshair removed** — Selection now shown via snug bounding rect only. `PulsingCrosshair` struct is dead code (can be deleted).
+
+---
+
 ## Outstanding Items (for next version)
 
 ### Recommended fixes
@@ -225,6 +251,7 @@ Investigated and tested extensively. Pen lines and stamp positions are geometric
 - `ProfileView.swift:409-410` — `.presentationDetents` / `.presentationDragIndicator` after `.fullScreenCover` are dead code.
 - `fetchPublicDoodles` does redundant client-side sort after ordered Firebase query.
 - APNs watchdog timer in `snoodleApp.swift` captures `self` without `[weak self]` (benign since AppDelegate has app lifetime).
+- `PulsingCrosshair` struct in `DrawScreen.swift` — dead code since b7 (replaced by snug rect). Safe to delete.
 
 ---
 

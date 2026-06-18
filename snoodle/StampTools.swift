@@ -121,6 +121,80 @@ struct PlacedStamp: Identifiable {
     var displayWidth: CGFloat { stampWidth > 0 ? stampWidth : size }
     var displayHeight: CGFloat { stampHeight > 0 ? stampHeight : size }
 
+    // Cached snug-rect ratios relative to `size`.
+    // snugWidthRatio  = tightPixelW / max(imgW, imgH)
+    // snugHeightRatio = tightPixelH / max(imgW, imgH)
+    // Both are 0 until the background alpha-scan completes.
+    var snugWidthRatio: CGFloat = 0
+    var snugHeightRatio: CGFloat = 0
+
+    // Text-stamp padding constants (must match rendering in StampCanvas / export).
+    static let hPadding: CGFloat = 10
+    static let vPadding: CGFloat = 5
+
+    /// Tight bounding rect in canvas points at the stamp's current size.
+    /// • Text stamps:   stampW/H minus padding (constant, no scan needed)
+    /// • Custom/doodle: cached alpha-scan result; falls back to aspect-fit until scan done
+    /// • Emoji:         square (emoji glyphs fill their frame)
+    var snugSize: CGSize {
+        // Text stamp: snug = content area inside the padding border
+        if isTextStamp, stampWidth > 0, stampHeight > 0 {
+            return CGSize(
+                width:  max(1, stampWidth  - PlacedStamp.hPadding * 2),
+                height: max(1, stampHeight - PlacedStamp.vPadding * 2)
+            )
+        }
+        // Custom / doodle stamp with completed alpha scan
+        if snugWidthRatio > 0 {
+            return CGSize(width: snugWidthRatio * size, height: snugHeightRatio * size)
+        }
+        // Fallback: aspect-fit from image dimensions (available immediately)
+        let img: UIImage? = inlineImage
+            ?? customImageId.flatMap { id in
+                CustomStampManager.shared.stamps.first(where: { $0.id == id })?.image
+            }
+        if let img, img.size.width > 0, img.size.height > 0 {
+            let scale = min(size / img.size.width, size / img.size.height)
+            return CGSize(width: img.size.width * scale, height: img.size.height * scale)
+        }
+        return CGSize(width: size, height: size)
+    }
+
+    /// Scans alpha channel of `image` and returns (widthRatio, heightRatio) suitable
+    /// for storing in snugWidthRatio / snugHeightRatio.  Runs on any thread.
+    static func computeSnugRatios(from image: UIImage) -> (CGFloat, CGFloat)? {
+        guard let cg = image.cgImage else { return nil }
+        let w = cg.width, h = cg.height
+        guard w > 0, h > 0 else { return nil }
+
+        var pixels = [UInt8](repeating: 0, count: w * h * 4)
+        guard let ctx = CGContext(
+            data: &pixels, width: w, height: h,
+            bitsPerComponent: 8, bytesPerRow: w * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: CGFloat(w), height: CGFloat(h)))
+
+        var minX = w, maxX = 0, minY = h, maxY = 0
+        let threshold: UInt8 = 8   // ignore near-transparent fringe pixels
+        for y in 0 ..< h {
+            for x in 0 ..< w {
+                if pixels[(y * w + x) * 4 + 3] > threshold {
+                    if x < minX { minX = x }
+                    if x > maxX { maxX = x }
+                    if y < minY { minY = y }
+                    if y > maxY { maxY = y }
+                }
+            }
+        }
+        guard maxX >= minX, maxY >= minY else { return nil }
+
+        let maxDim = CGFloat(max(w, h))
+        return (CGFloat(maxX - minX + 1) / maxDim,
+                CGFloat(maxY - minY + 1) / maxDim)
+    }
+
     mutating func cycleFlip() {
         flipStep = (flipStep + 1) % 4
         rotation = Double(flipStep) * 90.0
@@ -312,7 +386,27 @@ struct StampToolButton: View {
     @Binding var isCustomStampMode: Bool
     let canvasSize: CGSize
     var allowDoodleCreation: Bool = true   // false inside DoodleStampCreatorView to prevent nesting
+    /// Called every time a stamp is selected — fires even if the same stamp is tapped again.
+    var onPlace: (() -> Void)? = nil
+    /// Called when multiple full photos are imported at once — parent places them staggered.
+    var onPlaceMultipleStamps: (([UUID]) -> Void)? = nil
+    /// Called when multiple emojis are selected in multi-select mode.
+    var onPlaceMultipleEmojis: (([String]) -> Void)? = nil
     @State private var showPicker = false
+    @AppStorage("stampPickerMultiSelect_0") private var multiSelectEmoji  = false
+    @AppStorage("stampPickerMultiSelect_1") private var multiSelectPhotos = false
+    @AppStorage("stampPickerMultiSelect_2") private var multiSelectDoodle = false
+    @State private var multiSelectedEmojis: Set<String> = []
+    @State private var multiSelectedCustomIds: Set<String> = []
+
+    var isMultiSelectMode: Bool {
+        get {
+            switch pickerTab { case 0: return multiSelectEmoji; case 1: return multiSelectPhotos; default: return multiSelectDoodle }
+        }
+        nonmutating set {
+            switch pickerTab { case 0: multiSelectEmoji = newValue; case 1: multiSelectPhotos = newValue; default: multiSelectDoodle = newValue }
+        }
+    }
     @State private var segmentationItem: SegmentationItem? = nil  // drives sheet(item:) atomically
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
     @State private var showSourcePicker = false
@@ -320,9 +414,11 @@ struct StampToolButton: View {
     @State private var showCamera = false
     @State private var showPhotoPicker = false
     @State private var isLoadingPhotos = false
-    @State private var pickerTab = 0  // 0 = emoji, 1 = photos, 2 = doodle
+    @AppStorage("stampPickerTab") private var pickerTab = 0  // 0 = emoji, 1 = photos, 2 = doodle
     @State private var catProxy: ScrollViewProxy? = nil
     @State private var showDoodleCreator = false
+    @State private var pendingPhotos: [UIImage] = []   // held between picker and import-mode dialog
+    @State private var showPhotoImportMode = false     // "Extract Objects" vs "Use Full Photo"
 
     @ObservedObject var customManager = CustomStampManager.shared
 
@@ -373,7 +469,71 @@ struct StampToolButton: View {
                 .pickerStyle(.segmented)
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
-                .padding(.bottom, 8)
+                .padding(.bottom, 4)
+                .onChange(of: pickerTab) { _, _ in
+                    // Each tab keeps its own Select mode; just clear in-progress selections
+                    multiSelectedEmojis = []
+                    multiSelectedCustomIds = []
+                }
+
+                // Select / Done bar
+                HStack(spacing: 10) {
+                    if isMultiSelectMode && pickerTab != 0 && !multiSelectedCustomIds.isEmpty {
+                        Button {
+                            let toDelete = multiSelectedCustomIds
+                            multiSelectedCustomIds = []
+                            for idStr in toDelete {
+                                if let stamp = customManager.stamps.first(where: { $0.id.uuidString == idStr }) {
+                                    customManager.delete(stamp)
+                                    if selectedCustomStampId == idStr {
+                                        selectedCustomStampId = ""
+                                        isCustomStampMode = false
+                                    }
+                                }
+                            }
+                        } label: {
+                            Image(systemName: "trash")
+                                .font(.system(size: 15))
+                                .foregroundColor(.red)
+                                .padding(8)
+                                .background(Color.red.opacity(0.1))
+                                .cornerRadius(8)
+                        }
+                    }
+                    Spacer()
+                    if isMultiSelectMode {
+                        let selCount = pickerTab == 0 ? multiSelectedEmojis.count : multiSelectedCustomIds.count
+                        Button("Done\(selCount > 0 ? " (\(selCount))" : "")") {
+                            handleMultiSelectDone()
+                        }
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 5)
+                        .background(selCount > 0 ? Color.purple : Color.gray)
+                        .cornerRadius(8)
+                        .disabled(selCount == 0)
+                    }
+                    Button(isMultiSelectMode ? "Select" : "Select") {
+                        if isMultiSelectMode {
+                            isMultiSelectMode = false
+                            multiSelectedEmojis = []
+                            multiSelectedCustomIds = []
+                        } else {
+                            isMultiSelectMode = true
+                        }
+                    }
+                    .font(.system(size: 14, weight: isMultiSelectMode ? .semibold : .regular))
+                    .foregroundColor(isMultiSelectMode ? .purple : .purple)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 5)
+                    .background(isMultiSelectMode ? Color.purple.opacity(0.15) : Color.clear)
+                    .cornerRadius(8)
+                    .overlay(RoundedRectangle(cornerRadius: 8)
+                        .stroke(isMultiSelectMode ? Color.purple.opacity(0.5) : Color.clear, lineWidth: 1))
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 4)
 
                 Divider()
 
@@ -412,19 +572,35 @@ struct StampToolButton: View {
                             let stampCols = isIPad ? 10 : 6
                             LazyVGrid(columns: Array(repeating: GridItem(.fixed(44)), count: stampCols), spacing: 6) {
                                 ForEach(stampEmojis, id: \.self) { emoji in
+                                    let isSelected = multiSelectedEmojis.contains(emoji)
+                                    let isActive = !isCustomStampMode && selectedStamp == emoji
                                     Button {
-                                        selectedStamp = emoji
-                                        isCustomStampMode = false
-                                        selectedCustomStampId = ""
-                                        showPicker = false
+                                        if isMultiSelectMode {
+                                            if isSelected { multiSelectedEmojis.remove(emoji) }
+                                            else { multiSelectedEmojis.insert(emoji) }
+                                        } else {
+                                            selectedStamp = emoji
+                                            isCustomStampMode = false
+                                            selectedCustomStampId = ""
+                                            onPlace?()
+                                            showPicker = false
+                                        }
                                     } label: {
-                                        Text(emoji)
-                                            .font(.system(size: 28))
-                                            .frame(width: 44, height: 44)
-                                            .background(!isCustomStampMode && selectedStamp == emoji ? Color.purple.opacity(0.15) : Color.gray.opacity(0.08))
-                                            .cornerRadius(8)
-                                            .overlay(RoundedRectangle(cornerRadius: 8)
-                                                .stroke(!isCustomStampMode && selectedStamp == emoji ? Color.purple : Color.clear, lineWidth: 2.5))
+                                        ZStack(alignment: .topTrailing) {
+                                            Text(emoji)
+                                                .font(.system(size: 28))
+                                                .frame(width: 44, height: 44)
+                                                .background((isMultiSelectMode ? isSelected : isActive) ? Color.purple.opacity(0.15) : Color.gray.opacity(0.08))
+                                                .cornerRadius(8)
+                                                .overlay(RoundedRectangle(cornerRadius: 8)
+                                                    .stroke((isMultiSelectMode ? isSelected : isActive) ? Color.purple : Color.clear, lineWidth: 2.5))
+                                            if isMultiSelectMode && isSelected {
+                                                Image(systemName: "checkmark.circle.fill")
+                                                    .font(.system(size: 14))
+                                                    .foregroundColor(.purple)
+                                                    .offset(x: 4, y: -4)
+                                            }
+                                        }
                                     }
                                     .id(emoji)
                                 }
@@ -474,20 +650,36 @@ struct StampToolButton: View {
                                     }
                                     ForEach(customManager.photoStamps) { stamp in
                                         if let img = stamp.image {
+                                            let isSelected = multiSelectedCustomIds.contains(stamp.id.uuidString)
+                                            let isActive = isCustomStampMode && selectedCustomStampId == stamp.id.uuidString
                                             Button {
-                                                selectedCustomStampId = stamp.id.uuidString
-                                                isCustomStampMode = true
-                                                showPicker = false
+                                                if isMultiSelectMode {
+                                                    if isSelected { multiSelectedCustomIds.remove(stamp.id.uuidString) }
+                                                    else { multiSelectedCustomIds.insert(stamp.id.uuidString) }
+                                                } else {
+                                                    selectedCustomStampId = stamp.id.uuidString
+                                                    isCustomStampMode = true
+                                                    onPlace?()
+                                                    showPicker = false
+                                                }
                                             } label: {
-                                                Image(uiImage: img)
-                                                    .resizable()
-                                                    .scaledToFit()
-                                                    .frame(width: 70, height: 70)
-                                                    .background(Color.gray.opacity(0.05))
-                                                    .cornerRadius(10)
-                                                    .overlay(RoundedRectangle(cornerRadius: 10)
-                                                        .stroke(isCustomStampMode && selectedCustomStampId == stamp.id.uuidString ? Color.purple : Color.gray.opacity(0.2),
-                                                                lineWidth: isCustomStampMode && selectedCustomStampId == stamp.id.uuidString ? 2.5 : 1))
+                                                ZStack(alignment: .topTrailing) {
+                                                    Image(uiImage: img)
+                                                        .resizable()
+                                                        .scaledToFit()
+                                                        .frame(width: 70, height: 70)
+                                                        .background(Color.gray.opacity(0.05))
+                                                        .cornerRadius(10)
+                                                        .overlay(RoundedRectangle(cornerRadius: 10)
+                                                            .stroke((isMultiSelectMode ? isSelected : isActive) ? Color.purple : Color.gray.opacity(0.2),
+                                                                    lineWidth: (isMultiSelectMode ? isSelected : isActive) ? 2.5 : 1))
+                                                    if isMultiSelectMode && isSelected {
+                                                        Image(systemName: "checkmark.circle.fill")
+                                                            .font(.system(size: 16))
+                                                            .foregroundColor(.purple)
+                                                            .offset(x: 4, y: -4)
+                                                    }
+                                                }
                                             }
                                             .contextMenu {
                                                 Button(role: .destructive) {
@@ -570,24 +762,40 @@ struct StampToolButton: View {
                                     }
                                     ForEach(customManager.doodleStamps) { stamp in
                                         if let img = stamp.image {
+                                            let isSelected = multiSelectedCustomIds.contains(stamp.id.uuidString)
+                                            let isActive = isCustomStampMode && selectedCustomStampId == stamp.id.uuidString
                                             Button {
-                                                selectedCustomStampId = stamp.id.uuidString
-                                                isCustomStampMode = true
-                                                showPicker = false
-                                            } label: {
-                                                ZStack {
-                                                    CheckerboardView()
-                                                        .frame(width: 70, height: 70)
-                                                        .cornerRadius(10)
-                                                    Image(uiImage: img)
-                                                        .resizable()
-                                                        .scaledToFit()
-                                                        .frame(width: 66, height: 66)
+                                                if isMultiSelectMode {
+                                                    if isSelected { multiSelectedCustomIds.remove(stamp.id.uuidString) }
+                                                    else { multiSelectedCustomIds.insert(stamp.id.uuidString) }
+                                                } else {
+                                                    selectedCustomStampId = stamp.id.uuidString
+                                                    isCustomStampMode = true
+                                                    onPlace?()
+                                                    showPicker = false
                                                 }
-                                                .cornerRadius(10)
-                                                .overlay(RoundedRectangle(cornerRadius: 10)
-                                                    .stroke(isCustomStampMode && selectedCustomStampId == stamp.id.uuidString ? Color.purple : Color.gray.opacity(0.2),
-                                                            lineWidth: isCustomStampMode && selectedCustomStampId == stamp.id.uuidString ? 2.5 : 1))
+                                            } label: {
+                                                ZStack(alignment: .topTrailing) {
+                                                    ZStack {
+                                                        CheckerboardView()
+                                                            .frame(width: 70, height: 70)
+                                                            .cornerRadius(10)
+                                                        Image(uiImage: img)
+                                                            .resizable()
+                                                            .scaledToFit()
+                                                            .frame(width: 66, height: 66)
+                                                    }
+                                                    .cornerRadius(10)
+                                                    .overlay(RoundedRectangle(cornerRadius: 10)
+                                                        .stroke((isMultiSelectMode ? isSelected : isActive) ? Color.purple : Color.gray.opacity(0.2),
+                                                                lineWidth: (isMultiSelectMode ? isSelected : isActive) ? 2.5 : 1))
+                                                    if isMultiSelectMode && isSelected {
+                                                        Image(systemName: "checkmark.circle.fill")
+                                                            .font(.system(size: 16))
+                                                            .foregroundColor(.purple)
+                                                            .offset(x: 4, y: -4)
+                                                    }
+                                                }
                                             }
                                             .contextMenu {
                                                 Button(role: .destructive) {
@@ -648,12 +856,11 @@ struct StampToolButton: View {
                 print("📷 StampTools: onCapture fired — image=\(image != nil ? "YES" : "NIL")")
                 showCamera = false
                 if let img = image {
-                    // Use sheet(item:) — data and presentation trigger arrive atomically,
-                    // no race between segmentationImages state and showPhotoSegmentation bool.
-                    // Small delay lets the fullScreenCover binding fully unwind first.
+                    // Small delay lets the fullScreenCover binding fully unwind before
+                    // the import-mode dialog appears.
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                        print("📷 StampTools: setting segmentationItem to trigger sheet")
-                        segmentationItem = SegmentationItem(images: [img])
+                        pendingPhotos = [img]
+                        showPhotoImportMode = true
                     }
                 }
             }
@@ -673,7 +880,8 @@ struct StampToolButton: View {
                 await MainActor.run {
                     isLoadingPhotos = false
                     if !loaded.isEmpty {
-                        segmentationItem = SegmentationItem(images: loaded)
+                        pendingPhotos = loaded
+                        showPhotoImportMode = true
                     }
                     selectedPhotoItems = []
                 }
@@ -682,16 +890,20 @@ struct StampToolButton: View {
         .sheet(item: $segmentationItem) { item in
             ObjectSegmentationSheet(images: item.images) { cutouts in
                 segmentationItem = nil
-                var lastStamp: CustomStamp? = nil
+                var addedIds: [UUID] = []
                 for cutout in cutouts {
                     if let stamp = customManager.addStamp(image: cutout, source: .photo) {
-                        lastStamp = stamp
+                        addedIds.append(stamp.id)
                     }
                 }
-                if let stamp = lastStamp {
-                    selectedCustomStampId = stamp.id.uuidString
-                    isCustomStampMode = true
-                    showPicker = false
+                guard !addedIds.isEmpty else { return }
+                selectedCustomStampId = addedIds.last!.uuidString
+                isCustomStampMode = true
+                showPicker = false
+                if addedIds.count == 1 {
+                    onPlace?()
+                } else {
+                    onPlaceMultipleStamps?(addedIds)
                 }
             }
         }
@@ -701,8 +913,64 @@ struct StampToolButton: View {
                 if stampAdded, let newest = customManager.doodleStamps.first {
                     selectedCustomStampId = newest.id.uuidString
                     isCustomStampMode = true
+                    onPlace?()
                 }
             }
+        }
+        // Import-mode choice — centered alert (not action sheet) after photo selection.
+        .alert("", isPresented: $showPhotoImportMode) {
+            Button(pendingPhotos.count == 1 ? "Extract Objects from Photo" : "Extract Objects from Photos") {
+                segmentationItem = SegmentationItem(images: pendingPhotos)
+                pendingPhotos = []
+            }
+            Button(pendingPhotos.count == 1 ? "Use Full Photo" : "Use Full Photos") {
+                var addedIds: [UUID] = []
+                for img in pendingPhotos {
+                    if let stamp = customManager.addStamp(image: img, source: .photo) {
+                        addedIds.append(stamp.id)
+                    }
+                }
+                pendingPhotos = []
+                guard !addedIds.isEmpty else { return }
+                showPicker = false
+                if addedIds.count == 1 {
+                    selectedCustomStampId = addedIds[0].uuidString
+                    isCustomStampMode = true
+                    onPlace?()
+                } else {
+                    selectedCustomStampId = addedIds.last!.uuidString
+                    isCustomStampMode = true
+                    onPlaceMultipleStamps?(addedIds)
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                pendingPhotos = []
+            }
+        }
+    }
+
+    func handleMultiSelectDone() {
+        defer {
+            // Leave isMultiSelectMode as-is — user stays in select mode for next open
+            multiSelectedEmojis = []
+            multiSelectedCustomIds = []
+            showPicker = false
+        }
+        if pickerTab == 0 {
+            let emojis = Array(multiSelectedEmojis)
+            guard !emojis.isEmpty else { return }
+            selectedStamp = emojis.last!
+            isCustomStampMode = false
+            selectedCustomStampId = ""
+            if emojis.count == 1 { onPlace?() }
+            else { onPlaceMultipleEmojis?(emojis) }
+        } else {
+            let ids = Array(multiSelectedCustomIds).compactMap { UUID(uuidString: $0) }
+            guard !ids.isEmpty else { return }
+            selectedCustomStampId = ids.last!.uuidString
+            isCustomStampMode = true
+            if ids.count == 1 { onPlace?() }
+            else { onPlaceMultipleStamps?(ids) }
         }
     }
 
@@ -971,7 +1239,17 @@ struct StampMagicMenu: View {
     var onResizeBy: ((CGFloat) -> Void)? = nil
     var onRotateBy: ((CGFloat) -> Void)? = nil
 
-    @State private var showTweak = false
+    /// Toggled by the Precision Tweak / back-chevron buttons; owned by the parent so
+    /// the parent can pick the correct base-Y for each mode.
+    @Binding var showTweak: Bool
+    /// Saved offset to restore when the panel appears (loaded from parent's @AppStorage).
+    var initialOffset: CGSize = .zero
+    /// Called on gesture end so the parent can persist the new position.
+    var onOffsetSaved: ((CGSize) -> Void)? = nil
+    /// Total committed drag from previous gesture endings.
+    @State private var accDrag: CGSize = .zero
+    /// In-flight translation for the current gesture only (resets to .zero at gesture end).
+    @State private var liveDrag: CGSize = .zero
 
     var body: some View {
         VStack(spacing: 0) {
@@ -996,6 +1274,18 @@ struct StampMagicMenu: View {
                     Text("✏️ Text")
                         .font(.system(size: 14, weight: .medium))
                         .foregroundColor(.white.opacity(0.85))
+                } else if let img = stamp.inlineImage {
+                    Image(uiImage: img)
+                        .resizable().scaledToFit()
+                        .frame(width: 28, height: 28)
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                } else if let customId = stamp.customImageId,
+                          let cs = CustomStampManager.shared.stamps.first(where: { $0.id == customId }),
+                          let img = cs.image {
+                    Image(uiImage: img)
+                        .resizable().scaledToFit()
+                        .frame(width: 28, height: 28)
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
                 } else {
                     Text(stamp.emoji).font(.system(size: 20))
                 }
@@ -1050,6 +1340,32 @@ struct StampMagicMenu: View {
         .background(Color.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 16))
         .shadow(color: .black.opacity(0.2), radius: 12, x: 0, y: 4)
         .frame(width: 300)
+        // Apply the drag offset with .offset() — purely local @State, no binding writes
+        // during the gesture, so no parent re-render occurs mid-drag (which was the flicker cause).
+        .offset(x: accDrag.width + liveDrag.width, y: accDrag.height + liveDrag.height)
+        // Restore saved position when the panel appears.
+        // withAnimation(.none) prevents any inherited animation context (e.g. from the
+        // tap that opened the panel) from animating the initial offset into place.
+        .onAppear { withAnimation(.none) { accDrag = initialOffset } }
+        // Drag anywhere on the panel that isn't a button (buttons consume their own taps).
+        // Both the normal menu and precision tweak share the same accDrag so switching
+        // between them keeps the panel in place.
+        // withAnimation(.none) in gesture callbacks ensures live drag updates are
+        // always instant regardless of any parent animation context — prevents the
+        // "first drag frozen, jumps on release" bug caused by animation inheritance.
+        .gesture(
+            DragGesture(minimumDistance: 4)
+                .onChanged { value in withAnimation(.none) { liveDrag = value.translation } }
+                .onEnded { value in
+                    withAnimation(.none) {
+                        accDrag.width  += value.translation.width
+                        accDrag.height += value.translation.height
+                        liveDrag = .zero
+                    }
+                    onOffsetSaved?(accDrag)
+                }
+        )
+        // Base position is applied by the parent via .position() — no .position() here.
     }
 
     // MARK: — Precision tweak panel
@@ -1068,8 +1384,8 @@ struct StampMagicMenu: View {
                     .frame(maxWidth: .infinity)
 
                 HStack(spacing: 8) {
-                    TweakRepeatButton("−") { onResizeBy?(-5) }
-                    TweakRepeatButton("+") { onResizeBy?(5)  }
+                    TweakRepeatButton("−") { onResizeBy?(-3) }
+                    TweakRepeatButton("+") { onResizeBy?(3)  }
                 }
 
                 Divider().padding(.top, 4)
@@ -1081,8 +1397,8 @@ struct StampMagicMenu: View {
                     .padding(.top, 2)
 
                 HStack(spacing: 8) {
-                    TweakRepeatButton("↺") { onRotateBy?(-5) }
-                    TweakRepeatButton("↻") { onRotateBy?(5)  }
+                    TweakRepeatButton("↺") { onRotateBy?(-3) }
+                    TweakRepeatButton("↻") { onRotateBy?(3)  }
                 }
             }
             .frame(width: 100)
@@ -1106,22 +1422,22 @@ struct StampMagicMenu: View {
                 // Row 0: up arrow centered
                 HStack(spacing: 0) {
                     Color.clear.frame(width: dpadCell, height: dpadCellH)
-                    TweakRepeatButton("↑") { onNudge?(CGSize(width: 0, height: -8)) }
+                    TweakRepeatButton("↑") { onNudge?(CGSize(width: 0, height: -4)) }
                         .frame(width: dpadCell, height: dpadCellH)
                     Color.clear.frame(width: dpadCell, height: dpadCellH)
                 }
                 // Row 1: left, (gap), right
                 HStack(spacing: 0) {
-                    TweakRepeatButton("←") { onNudge?(CGSize(width: -8, height: 0)) }
+                    TweakRepeatButton("←") { onNudge?(CGSize(width: -4, height: 0)) }
                         .frame(width: dpadCell, height: dpadCellH)
                     Color.clear.frame(width: dpadCell, height: dpadCellH)
-                    TweakRepeatButton("→") { onNudge?(CGSize(width: 8, height: 0)) }
+                    TweakRepeatButton("→") { onNudge?(CGSize(width: 4, height: 0)) }
                         .frame(width: dpadCell, height: dpadCellH)
                 }
                 // Row 2: down arrow centered
                 HStack(spacing: 0) {
                     Color.clear.frame(width: dpadCell, height: dpadCellH)
-                    TweakRepeatButton("↓") { onNudge?(CGSize(width: 0, height: 8)) }
+                    TweakRepeatButton("↓") { onNudge?(CGSize(width: 0, height: 4)) }
                         .frame(width: dpadCell, height: dpadCellH)
                     Color.clear.frame(width: dpadCell, height: dpadCellH)
                 }

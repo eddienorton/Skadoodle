@@ -231,32 +231,52 @@ struct DoodleStampCreatorView: View {
 
     // Drawing state
     @State private var lines: [DrawingLine] = []
+    @AppStorage("doodleLineWidth") private var savedLineWidth: Double = 4
     @State private var lineWidth: CGFloat = 4
-    @State private var isEraser: Bool = false
+    @AppStorage("doodleIsEraser") private var isEraser: Bool = false
     @State private var canvasSize: CGSize = CGSize(width: 300, height: 300)
     @State private var undoStack: [CanvasSnapshot] = []
     @State private var redoStack: [CanvasSnapshot] = []
 
     // Pen
-    @State private var currentPenType: PenType = .pencil
+    @State private var currentPenType: PenType = {
+        let name = UserDefaults.standard.string(forKey: "doodleLastPenTypeName") ?? "pencil"
+        let styleName = UserDefaults.standard.string(forKey: "doodleLastDualToneStyle") ?? "Gradient"
+        let style = DualToneStyle.allCases.first { $0.rawValue == styleName } ?? .gradient
+        switch name {
+        case "ink":        return .ink
+        case "brush":      return .brush
+        case "marker":     return .marker
+        case "chalk":      return .chalk
+        case "neon":       return .neon
+        case "spray":      return .spray
+        case "watercolor": return .watercolor
+        case "dotted":     return .dotted
+        case "dualtone":   return .dualTone(style)
+        default:           return .pencil
+        }
+    }()
     @State private var dualToneColorB: Color = .orange
     @State private var showPenStudio: Bool = false
     @AppStorage("doodleStampColorIndex") private var selectedColorIndex: Int = 0
 
     // Stamps
     @AppStorage("doodleStampLastEmoji") private var selectedStamp: String = "⭐️"
+    @AppStorage("doodleLastCustomStampId") private var lastCustomStampIdString: String = ""
+    @AppStorage("doodleIsCustomStampMode") private var isCustomStampMode: Bool = false
     @State private var placedStamps: [PlacedStamp] = []
     @State private var stampUndoStack: [[PlacedStamp]] = []
     @State private var stampRedoStack: [[PlacedStamp]] = []
     @State private var stampResizeStartSize: CGFloat = 0
     @State private var showStampMagicMenu: Bool = false
+    @State private var showMenuTweak: Bool = false
+    @AppStorage("doodleMenuOffsetX") private var savedMenuOffsetX: Double = 0
+    @AppStorage("doodleMenuOffsetY") private var savedMenuOffsetY: Double = 0
     @State private var selectedStampId: UUID? = nil
     @State private var stampResizeTargetId: UUID? = nil
     @State private var stampRotatingId: UUID? = nil
     @State private var canvasOriginInWindow: CGPoint = .zero
     @State private var isLongPressing: Bool = false
-    @State private var lastCustomStampIdString: String = ""
-    @State private var isCustomStampMode: Bool = false
 
     // Text stamps
     @State private var showTextComposer: Bool = false
@@ -415,8 +435,12 @@ struct DoodleStampCreatorView: View {
                                     canvasOriginInWindow = CGPoint(x: frame.minX, y: frame.minY)
                                 }
                         })
-                        .onAppear { canvasSize = geo.size }
+                        .onAppear {
+                            canvasSize = geo.size
+                            lineWidth = CGFloat(savedLineWidth)
+                        }
                         .onChange(of: geo.size) { _, newSize in canvasSize = newSize }
+                        .onChange(of: lineWidth) { _, new in savedLineWidth = Double(new) }
 
                         ZStack {
                             StampCanvasView(
@@ -503,9 +527,35 @@ struct DoodleStampCreatorView: View {
                                         editingStampId = id
                                         showStampMagicMenu = false
                                         showTextComposer = true
+                                    },
+                                    onNudge: { delta in
+                                        guard let idx = placedStamps.firstIndex(where: { $0.id == id }) else { return }
+                                        placedStamps[idx].position.x = max(0, min(canvasSize.width,  placedStamps[idx].position.x + delta.width))
+                                        placedStamps[idx].position.y = max(0, min(canvasSize.height, placedStamps[idx].position.y + delta.height))
+                                    },
+                                    onResizeBy: { delta in
+                                        guard let idx = placedStamps.firstIndex(where: { $0.id == id }) else { return }
+                                        let oldSize = max(placedStamps[idx].size, 1)
+                                        placedStamps[idx].size = max(20, placedStamps[idx].size + delta)
+                                        let ratio = placedStamps[idx].size / oldSize
+                                        if placedStamps[idx].stampWidth  > 0 { placedStamps[idx].stampWidth  *= ratio }
+                                        if placedStamps[idx].stampHeight > 0 { placedStamps[idx].stampHeight *= ratio }
+                                    },
+                                    onRotateBy: { degrees in
+                                        guard let idx = placedStamps.firstIndex(where: { $0.id == id }) else { return }
+                                        placedStamps[idx].rotation = (placedStamps[idx].rotation + degrees).truncatingRemainder(dividingBy: 360)
+                                    },
+                                    showTweak: $showMenuTweak,
+                                    initialOffset: CGSize(width: savedMenuOffsetX, height: savedMenuOffsetY),
+                                    onOffsetSaved: { offset in
+                                        savedMenuOffsetX = offset.width
+                                        savedMenuOffsetY = offset.height
                                     }
                                 )
-                                .position(x: canvasSize.width / 2, y: canvasSize.height - 70)
+                                .position(
+                                    x: canvasSize.width / 2,
+                                    y: showMenuTweak ? canvasSize.height - 96 : canvasSize.height - 84
+                                )
                                 .zIndex(1000)
                             }
 
@@ -642,16 +692,9 @@ struct DoodleStampCreatorView: View {
                                 selectedCustomStampId: $lastCustomStampIdString,
                                 isCustomStampMode: $isCustomStampMode,
                                 canvasSize: canvasSize,
-                                allowDoodleCreation: false
+                                allowDoodleCreation: false,
+                                onPlace: { autoPlaceStamp() }
                             )
-                            .onChange(of: selectedStamp) { _, _ in
-                                guard !isCustomStampMode else { return }
-                                autoPlaceStamp()
-                            }
-                            .onChange(of: lastCustomStampIdString) { _, newId in
-                                guard isCustomStampMode, !newId.isEmpty else { return }
-                                autoPlaceStamp()
-                            }
 
                             Button(action: {
                                 selectedStampId = nil
@@ -667,7 +710,14 @@ struct DoodleStampCreatorView: View {
                                         .foregroundColor(.primary)
                                 }
                             }
-                            .sheet(isPresented: $showPenStudio) {
+                            .sheet(isPresented: $showPenStudio, onDismiss: {
+                                if currentPenType.isDualTone {
+                                    UserDefaults.standard.set("dualtone", forKey: "doodleLastPenTypeName")
+                                    UserDefaults.standard.set(currentPenType.dualToneStyle.rawValue, forKey: "doodleLastDualToneStyle")
+                                } else {
+                                    UserDefaults.standard.set(currentPenType.displayName.lowercased(), forKey: "doodleLastPenTypeName")
+                                }
+                            }) {
                                 PenStudioSheet(penType: $currentPenType, colorB: $dualToneColorB)
                                     .presentationDragIndicator(.visible)
                             }

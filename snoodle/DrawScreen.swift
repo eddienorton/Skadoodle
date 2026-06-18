@@ -949,6 +949,9 @@ struct DrawScreen: View {
     @State private var stampRedoStack: [[PlacedStamp]] = [] // unused - kept for DrawingCanvas binding
     @State private var stampResizeStartSize: CGFloat = 0
     @State private var showStampMagicMenu: Bool = false
+    @State private var showMenuTweak: Bool = false
+    @AppStorage("stampPanelOffsetX") private var savedMenuOffsetX: Double = 0
+    @AppStorage("stampPanelOffsetY") private var savedMenuOffsetY: Double = 0
     @State private var showTextComposer: Bool = false
     @State private var editingStampId: UUID? = nil
     @State private var selectedStampId: UUID? = nil
@@ -1144,13 +1147,36 @@ struct DrawScreen: View {
                 guard let idx = placedStamps.firstIndex(where: { $0.id == id }) else { return }
                 placedStamps[idx].rotation = (placedStamps[idx].rotation + degrees)
                     .truncatingRemainder(dividingBy: 360)
+            },
+            showTweak: $showMenuTweak,
+            initialOffset: CGSize(width: savedMenuOffsetX, height: savedMenuOffsetY),
+            onOffsetSaved: { offset in
+                savedMenuOffsetX = offset.width
+                savedMenuOffsetY = offset.height
             }
         )
-        .position(x: canvasSize.width / 2, y: canvasSize.height - 100)
+        .position(
+            x: canvasSize.width / 2,
+            y: showMenuTweak ? canvasSize.height - 114 : canvasSize.height - 96
+        )
         .zIndex(1000)
     }
 
     // Auto-place the current stamp centered on the canvas when selected from picker
+    /// Runs alpha-channel scan on a background thread and stores cached snug ratios
+    /// back into the PlacedStamp identified by `stampId`.
+    func scheduleSnugScan(for stampId: UUID, image: UIImage) {
+        DispatchQueue.global(qos: .utility).async {
+            guard let (wr, hr) = PlacedStamp.computeSnugRatios(from: image) else { return }
+            DispatchQueue.main.async {
+                if let idx = placedStamps.firstIndex(where: { $0.id == stampId }) {
+                    placedStamps[idx].snugWidthRatio  = wr
+                    placedStamps[idx].snugHeightRatio = hr
+                }
+            }
+        }
+    }
+
     func autoPlaceStamp() {
         let center = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
         undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset))
@@ -1160,8 +1186,54 @@ struct DrawScreen: View {
             stamp.customImageId = customId
             placedStamps.append(stamp)
             selectedStampId = stamp.id
+            // Kick off alpha scan
+            if let img = CustomStampManager.shared.stamps.first(where: { $0.id == customId })?.image {
+                scheduleSnugScan(for: stamp.id, image: img)
+            }
         } else {
             let stamp = PlacedStamp(emoji: selectedStamp, position: center, size: 126)
+            placedStamps.append(stamp)
+            selectedStampId = stamp.id
+        }
+        showStampMagicMenu = true
+    }
+
+    // Places multiple full-photo stamps staggered from canvas center (20pt cascade per stamp).
+    func placeFullPhotoStamps(_ ids: [UUID]) {
+        guard !ids.isEmpty else { return }
+        undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset))
+        redoStack = []
+        let center = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
+        let stagger: CGFloat = 20
+        // Center the cascade so the group is visually centered on the canvas
+        let offset = -CGFloat(ids.count - 1) * stagger / 2
+        for (i, customId) in ids.enumerated() {
+            let pos = CGPoint(x: center.x + offset + CGFloat(i) * stagger,
+                              y: center.y + offset + CGFloat(i) * stagger)
+            var stamp = PlacedStamp(emoji: "📷", position: pos, size: 158)
+            stamp.customImageId = customId
+            placedStamps.append(stamp)
+            selectedStampId = stamp.id  // last one ends up selected
+            // Alpha scan for each placed photo
+            if let img = CustomStampManager.shared.stamps.first(where: { $0.id == customId })?.image {
+                scheduleSnugScan(for: stamp.id, image: img)
+            }
+        }
+        showStampMagicMenu = true
+    }
+
+    // Places multiple emoji stamps staggered from canvas center.
+    func placeMultipleEmojis(_ emojis: [String]) {
+        guard !emojis.isEmpty else { return }
+        undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset))
+        redoStack = []
+        let center = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
+        let stagger: CGFloat = 20
+        let offset = -CGFloat(emojis.count - 1) * stagger / 2
+        for (i, emoji) in emojis.enumerated() {
+            let pos = CGPoint(x: center.x + offset + CGFloat(i) * stagger,
+                              y: center.y + offset + CGFloat(i) * stagger)
+            let stamp = PlacedStamp(emoji: emoji, position: pos, size: 126)
             placedStamps.append(stamp)
             selectedStampId = stamp.id
         }
@@ -1394,6 +1466,7 @@ struct DrawScreen: View {
                                     stamp.stampWidth = displayW
                                     stamp.stampHeight = displayH
                                     placedStamps.append(stamp)
+                                    scheduleSnugScan(for: stamp.id, image: cropped)
                                     pendingExtractedSubject = nil
                                 }
                                 showCanvasBgSheet = false
@@ -1464,6 +1537,7 @@ struct DrawScreen: View {
                             stamp.stampWidth = displayW
                             stamp.stampHeight = displayH
                             placedStamps.append(stamp)
+                            scheduleSnugScan(for: stamp.id, image: cropped)
                             pendingExtractedSubject = nil
                         }
                         showBgEditor = false
@@ -1543,12 +1617,16 @@ struct DrawScreen: View {
                         )
                         .frame(width: canvasSize.width, height: canvasSize.height)
                         .allowsHitTesting(true)
-                        // Selection indicator — pulsing crosshair at stamp center
+                        // Selection indicator — snug bounding rect
                         if let selId = selectedStampId, showStampMagicMenu,
                            let selStamp = placedStamps.first(where: { $0.id == selId }) {
-                            PulsingCrosshair()
-                                .allowsHitTesting(false)
+                            Rectangle()
+                                .stroke(Color.black, lineWidth: 3)
+                                .overlay(Rectangle().stroke(Color.white, lineWidth: 1))
+                                .frame(width: selStamp.snugSize.width, height: selStamp.snugSize.height)
+                                .rotationEffect(.degrees(selStamp.rotation))
                                 .position(selStamp.position)
+                                .allowsHitTesting(false)
                         }
                         // Magic menu renders on top of all stamps
                         if showStampMagicMenu, let id = selectedStampId,
@@ -1664,16 +1742,11 @@ struct DrawScreen: View {
                                 stampUndoStack: $stampUndoStack,
                                 selectedCustomStampId: $lastCustomStampIdString,
                                 isCustomStampMode: $isCustomStampMode,
-                                canvasSize: canvasSize
+                                canvasSize: canvasSize,
+                                onPlace: { autoPlaceStamp() },
+                                onPlaceMultipleStamps: { ids in placeFullPhotoStamps(ids) },
+                                onPlaceMultipleEmojis: { emojis in placeMultipleEmojis(emojis) }
                             )
-                            .onChange(of: selectedStamp) { _, _ in
-                                guard !isCustomStampMode else { return }
-                                autoPlaceStamp()
-                            }
-                            .onChange(of: lastCustomStampIdString) { _, newId in
-                                guard isCustomStampMode, !newId.isEmpty else { return }
-                                autoPlaceStamp()
-                            }
 
                             // Pen Studio button — always just opens pen studio
                             Button(action: {
