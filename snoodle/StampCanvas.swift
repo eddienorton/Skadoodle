@@ -87,57 +87,18 @@ class StampItemUIView: UIView, UIGestureRecognizerDelegate {
         let s = stamp.size
         guard s.isFinite, s > 0 else { return }
 
-        // Only update bounds/frames when size actually changes.
-        // Setting bounds while a rotation transform is active shifts center on large stamps.
+        // Update bounds for gesture hit-testing area only.
+        // Visual rendering is handled by StampRenderView (SwiftUI layer).
         let dw = stamp.displayWidth
         let dh = stamp.displayHeight
         if abs(bounds.size.width - dw) > 0.5 || abs(bounds.size.height - dh) > 0.5 {
             transform = .identity
             bounds = CGRect(origin: .zero, size: CGSize(width: dw, height: dh))
-            imageView.frame = bounds
-            emojiLabel.frame = bounds
         }
-
-        if let img = stamp.inlineImage {
-            imageView.image = img
-            imageView.contentMode = .scaleAspectFill
-            imageView.clipsToBounds = true
-            imageView.isHidden = false
-            emojiLabel.isHidden = true
-        } else if let customId = stamp.customImageId,
-           let customStamp = CustomStampManager.shared.stamps.first(where: { $0.id == customId }),
-           let img = customStamp.image {
-            imageView.contentMode = .scaleAspectFit
-            imageView.clipsToBounds = false
-            imageView.image = img
-            imageView.isHidden = false
-            emojiLabel.isHidden = true
-        } else if let text = stamp.stampText {
-            emojiLabel.text = text
-            // stamp.size stores the base font size for content-sized text stamps
-            let fontSize = stamp.stampWidth > 0 ? stamp.size : fitTextFontSize(text: text, stampSize: s, baseFontId: stamp.fontName)
-            emojiLabel.font = TextStampFont.font(forId: stamp.fontName, style: stamp.fontStyle).withSize(fontSize)
-            emojiLabel.textColor = UIColor(stamp.textColor)
-            emojiLabel.numberOfLines = 0
-            emojiLabel.lineBreakMode = .byClipping  // no word wrap — only explicit CRs
-            emojiLabel.textAlignment = stamp.textAlignment == "left" ? .left : stamp.textAlignment == "right" ? .right : .center
-            emojiLabel.adjustsFontSizeToFitWidth = false
-            emojiLabel.isHidden = false
-            imageView.isHidden = true
-            // Background color
-            let bg = UIColor(stamp.textBgColor)
-            backgroundColor = bg == .clear ? .clear : bg
-            layer.cornerRadius = bg == .clear ? 0 : 8
-        } else {
-            emojiLabel.text = stamp.emoji
-            emojiLabel.font = .systemFont(ofSize: s * 0.80)
-            emojiLabel.textColor = .label
-            emojiLabel.numberOfLines = 1
-            emojiLabel.isHidden = false
-            imageView.isHidden = true
-            backgroundColor = .clear
-            layer.cornerRadius = 0
-        }
+        imageView.isHidden = true
+        emojiLabel.isHidden = true
+        backgroundColor = .clear
+        layer.cornerRadius = 0
 
         let flipTransform = CGAffineTransform(scaleX: stamp.flipX ? -1 : 1, y: stamp.flipY ? -1 : 1)
         let rotateTransform = CGAffineTransform(rotationAngle: stamp.rotation * .pi / 180)
@@ -370,13 +331,16 @@ struct StampCanvasView: UIViewRepresentable {
     @Binding var stamps: [PlacedStamp]
     @Binding var selectedStampId: UUID?
     @Binding var showStampMagicMenu: Bool
-    @Binding var undoStack: [CanvasSnapshot]
-    @Binding var redoStack: [CanvasSnapshot]
-    @Binding var lines: [DrawingLine]
-    @Binding var backgroundImage: UIImage?
-    @Binding var backgroundOffset: CGSize
     let canvasSize: CGSize
     @Binding var rotatingId: UUID?
+    /// Stamp z-order from DrawScreen's layerOrder; empty = fall back to stamps array order.
+    var layerOrder: [LayerEntry] = []
+    /// Called before any stamp mutation; caller should push an undo snapshot.
+    var onBeforeStampChange: (() -> Void)? = nil
+    /// Called when a stamp dupe is created; caller appends it to its own collection and updates layerOrder.
+    var onStampDuped: ((PlacedStamp) -> Void)? = nil
+    /// Called after a stamp is deleted (double-tap); caller should remove it from layerOrder.
+    var onStampDeleted: ((UUID) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -395,8 +359,19 @@ struct StampCanvasView: UIViewRepresentable {
     func updateUIView(_ uiView: StampContainerView, context: Context) {
         context.coordinator.parent = self
         uiView.frame = CGRect(origin: .zero, size: canvasSize)
+        // Order UIKit gesture views by layerOrder so touch priority matches visual z-order.
+        // Falls back to stamps array order when layerOrder is empty (e.g. DoodleStampCreatorView).
+        let orderedStamps: [PlacedStamp]
+        if layerOrder.isEmpty {
+            orderedStamps = stamps
+        } else {
+            orderedStamps = layerOrder.compactMap { entry -> PlacedStamp? in
+                guard case .stamp(let id) = entry else { return nil }
+                return stamps.first(where: { $0.id == id })
+            }
+        }
         uiView.syncStamps(
-            stamps,
+            orderedStamps,
             draggingId: context.coordinator.draggingId,
             rotatingId: rotatingId
         ) { stamp in
@@ -486,8 +461,7 @@ struct StampCanvasView: UIViewRepresentable {
         func handleDrag(id: UUID, pos: CGPoint) {
             if draggingId == nil {
                 // First event of this drag — snapshot before any position change
-                parent.undoStack.append(CanvasSnapshot(lines: parent.lines, stamps: parent.stamps, backgroundImage: parent.backgroundImage, backgroundOffset: parent.backgroundOffset))
-                parent.redoStack = []
+                parent.onBeforeStampChange?()
             }
             draggingId = id
             guard let idx = parent.stamps.firstIndex(where: { $0.id == id }) else { return }
@@ -526,19 +500,18 @@ struct StampCanvasView: UIViewRepresentable {
         }
 
         func handleDoubleTap(id: UUID) {
-            parent.undoStack.append(CanvasSnapshot(lines: parent.lines, stamps: parent.stamps, backgroundImage: parent.backgroundImage, backgroundOffset: parent.backgroundOffset))
-            parent.redoStack = []
+            parent.onBeforeStampChange?()
             parent.stamps.removeAll { $0.id == id }
             if parent.selectedStampId == id {
                 parent.selectedStampId = nil
                 parent.showStampMagicMenu = false
             }
+            parent.onStampDeleted?(id)
         }
 
         func handleDupe(id: UUID) {
             guard let idx = parent.stamps.firstIndex(where: { $0.id == id }) else { return }
-            parent.undoStack.append(CanvasSnapshot(lines: parent.lines, stamps: parent.stamps, backgroundImage: parent.backgroundImage, backgroundOffset: parent.backgroundOffset))
-            parent.redoStack = []
+            parent.onBeforeStampChange?()
             let src = parent.stamps[idx]
             var dupe = PlacedStamp(
                 emoji: src.emoji,
@@ -561,21 +534,94 @@ struct StampCanvasView: UIViewRepresentable {
                 stampHeight: src.stampHeight
             )
             dupe.inlineImage = src.inlineImage
-            parent.stamps.append(dupe)
+            if let onDuped = parent.onStampDuped {
+                // Caller handles append + layerOrder update
+                onDuped(dupe)
+            } else {
+                parent.stamps.append(dupe)
+            }
             parent.selectedStampId = dupe.id
             parent.showStampMagicMenu = true
         }
 
         func handleBringToFront(id: UUID) {
-            guard let idx = parent.stamps.firstIndex(where: { $0.id == id }),
-                  idx != parent.stamps.count - 1 else { return }
-            let s = parent.stamps.remove(at: idx)
-            parent.stamps.append(s)
+            // Z-order is determined by layerOrder in DrawScreen; no reordering needed.
         }
 
         func handleCanvasTap() {
             parent.selectedStampId = nil
             parent.showStampMagicMenu = false
         }
+    }
+}
+
+// MARK: - SwiftUI stamp renderer (one per layerOrder .stamp entry)
+
+struct StampRenderView: View {
+    let stamp: PlacedStamp
+
+    var body: some View {
+        stampContent
+            .frame(width: stamp.displayWidth, height: stamp.displayHeight)
+            .scaleEffect(x: stamp.flipX ? -1 : 1, y: stamp.flipY ? -1 : 1)
+            .rotationEffect(.degrees(stamp.rotation))
+            .opacity(stamp.opacity)
+            .position(stamp.position)
+            .allowsHitTesting(false)
+    }
+
+    @ViewBuilder
+    private var stampContent: some View {
+        if let img = stamp.inlineImage {
+            Image(uiImage: img)
+                .resizable()
+                .scaledToFill()
+                .clipped()
+        } else if let customId = stamp.customImageId,
+                  let cs = CustomStampManager.shared.stamps.first(where: { $0.id == customId }),
+                  let img = cs.image {
+            Image(uiImage: img)
+                .resizable()
+                .scaledToFit()
+        } else if stamp.stampText != nil {
+            StampTextRenderView(stamp: stamp)
+        } else {
+            Text(stamp.emoji)
+                .font(.system(size: stamp.size * 0.80))
+                .frame(width: stamp.size, height: stamp.size)
+        }
+    }
+}
+
+/// UIViewRepresentable label for text stamps — mirrors the UIKit rendering path exactly.
+struct StampTextRenderView: UIViewRepresentable {
+    let stamp: PlacedStamp
+
+    func makeUIView(context: Context) -> UIView {
+        let container = UIView()
+        container.backgroundColor = .clear
+        let label = UILabel()
+        label.tag = 1
+        label.numberOfLines = 0
+        label.lineBreakMode = .byClipping
+        label.adjustsFontSizeToFitWidth = false
+        label.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        container.addSubview(label)
+        return container
+    }
+
+    func updateUIView(_ container: UIView, context: Context) {
+        guard let text = stamp.stampText,
+              let label = container.viewWithTag(1) as? UILabel else { return }
+        let s = stamp.size
+        let fontSize = stamp.stampWidth > 0 ? s : fitTextFontSize(text: text, stampSize: s, baseFontId: stamp.fontName)
+        label.text = text
+        label.font = TextStampFont.font(forId: stamp.fontName, style: stamp.fontStyle).withSize(fontSize)
+        label.textColor = UIColor(stamp.textColor)
+        label.textAlignment = stamp.textAlignment == "left" ? .left : stamp.textAlignment == "right" ? .right : .center
+        let bg = UIColor(stamp.textBgColor)
+        container.backgroundColor = bg == .clear ? .clear : bg
+        container.layer.cornerRadius = bg == .clear ? 0 : 8
+        container.layer.masksToBounds = bg != .clear
     }
 }

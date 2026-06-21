@@ -237,6 +237,8 @@ struct DoodleStampCreatorView: View {
     @State private var canvasSize: CGSize = CGSize(width: 300, height: 300)
     @State private var undoStack: [CanvasSnapshot] = []
     @State private var redoStack: [CanvasSnapshot] = []
+    @State private var doodleLayerId: UUID = UUID()
+    @State private var doodleCurrentLine: DrawingLine? = nil
 
     // Pen
     @State private var currentPenType: PenType = {
@@ -324,10 +326,19 @@ struct DoodleStampCreatorView: View {
             }
     }
 
+    // MARK: - Snapshot helper (wraps flat lines into the new layer format)
+    func makeDoodleSnapshot() -> CanvasSnapshot {
+        CanvasSnapshot(
+            drawingLayers: [DrawingLayer(id: doodleLayerId, lines: lines)],
+            stamps: placedStamps,
+            layerOrder: [.drawing(doodleLayerId)] + placedStamps.map { .stamp($0.id) }
+        )
+    }
+
     // MARK: - Auto-place stamp at canvas center
     func autoPlaceStamp() {
         let center = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
-        undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: nil, backgroundOffset: .zero))
+        undoStack.append(makeDoodleSnapshot())
         redoStack = []
         if isCustomStampMode, let customId = UUID(uuidString: lastCustomStampIdString) {
             var stamp = PlacedStamp(emoji: "📷", position: center, size: 158)
@@ -345,7 +356,7 @@ struct DoodleStampCreatorView: View {
     // MARK: - Place text stamp
     func placeTextStamp(text: String, fontId: String, fontStyle: String, alignment: String, color: Color, bgColor: Color) {
         let center = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
-        undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: nil, backgroundOffset: .zero))
+        undoStack.append(makeDoodleSnapshot())
         redoStack = []
         let (natW, natH, fontSize) = naturalTextStampSize(text: text, fontId: fontId, fontStyle: fontStyle, maxWidth: canvasSize.width * 0.7)
         var stamp = PlacedStamp(emoji: "✏️", position: center, size: fontSize)
@@ -407,8 +418,6 @@ struct DoodleStampCreatorView: View {
                         }
                         DrawingCanvas(
                             lines: $lines,
-                            undoStack: $undoStack,
-                            redoStack: $redoStack,
                             currentColor: isEraser ? (tracingImage != nil ? .clear : .white) : currentColor,
                             lineWidth: $lineWidth,
                             isEraser: $isEraser,
@@ -417,7 +426,10 @@ struct DoodleStampCreatorView: View {
                             colorB: dualToneColorB,
                             currentStamps: placedStamps,
                             isLongPressing: isLongPressing,
-                            stampResizeTargetId: stampResizeTargetId
+                            stampResizeTargetId: stampResizeTargetId,
+                            renderLines: true,
+                            onBeforeDraw: { undoStack.append(makeDoodleSnapshot()); redoStack = [] },
+                            currentLine: $doodleCurrentLine
                         )
                         .contentShape(Rectangle())
                         .allowsHitTesting(!isLongPressing)
@@ -447,13 +459,10 @@ struct DoodleStampCreatorView: View {
                                 stamps: $placedStamps,
                                 selectedStampId: $selectedStampId,
                                 showStampMagicMenu: $showStampMagicMenu,
-                                undoStack: $undoStack,
-                                redoStack: $redoStack,
-                                lines: $lines,
-                                backgroundImage: .constant(nil),
-                                backgroundOffset: .constant(.zero),
                                 canvasSize: canvasSize,
-                                rotatingId: $stampRotatingId
+                                rotatingId: $stampRotatingId,
+                                onBeforeStampChange: { undoStack.append(makeDoodleSnapshot()); redoStack = [] },
+                                onStampDuped: { dupe in placedStamps.append(dupe) }
                             )
                             .frame(width: canvasSize.width, height: canvasSize.height)
                             .allowsHitTesting(true)
@@ -475,7 +484,7 @@ struct DoodleStampCreatorView: View {
                                         selectedStampId = nil
                                     },
                                     onTransform: { transform in
-                                        undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: nil, backgroundOffset: .zero))
+                                        undoStack.append(makeDoodleSnapshot())
                                         redoStack = []
                                         if let idx = placedStamps.firstIndex(where: { $0.id == id }) {
                                             switch transform {
@@ -487,14 +496,14 @@ struct DoodleStampCreatorView: View {
                                         showStampMagicMenu = false
                                     },
                                     onDelete: {
-                                        undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: nil, backgroundOffset: .zero))
+                                        undoStack.append(makeDoodleSnapshot())
                                         redoStack = []
                                         placedStamps.removeAll { $0.id == id }
                                         showStampMagicMenu = false
                                         selectedStampId = nil
                                     },
                                     onDupe: {
-                                        undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: nil, backgroundOffset: .zero))
+                                        undoStack.append(makeDoodleSnapshot())
                                         redoStack = []
                                         if let idx = placedStamps.firstIndex(where: { $0.id == id }) {
                                             var dupe = placedStamps[idx]
@@ -574,7 +583,7 @@ struct DoodleStampCreatorView: View {
                                         return sqrt(dx*dx + dy*dy) <= s.size * 0.5 * 0.75
                                     }
                                     if hits.isEmpty {
-                                        undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: nil, backgroundOffset: .zero))
+                                        undoStack.append(makeDoodleSnapshot())
                                         redoStack = []
                                         if isCustomStampMode, let customId = UUID(uuidString: lastCustomStampIdString) {
                                             var stamp = PlacedStamp(emoji: "📷", position: loc, size: 158)
@@ -737,7 +746,7 @@ struct DoodleStampCreatorView: View {
                                     onPlace: { text, fontId, fontStyle, alignment, color, bgColor in
                                         if let editId = editingStampId,
                                            let idx = placedStamps.firstIndex(where: { $0.id == editId }) {
-                                            undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: nil, backgroundOffset: .zero))
+                                            undoStack.append(makeDoodleSnapshot())
                                             redoStack = []
                                             let (natW, natH, fontSize) = naturalTextStampSize(text: text, fontId: fontId, fontStyle: fontStyle, maxWidth: canvasSize.width * 0.7)
                                             placedStamps[idx].stampText = text
@@ -775,10 +784,10 @@ struct DoodleStampCreatorView: View {
 
                             Button(action: {
                                 guard !undoStack.isEmpty else { return }
-                                let snapshot = CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: nil, backgroundOffset: .zero)
+                                let snapshot = makeDoodleSnapshot()
                                 redoStack.append(snapshot)
                                 let last = undoStack.removeLast()
-                                lines = last.lines
+                                lines = last.drawingLayers.first?.lines ?? []
                                 placedStamps = last.stamps
                             }) {
                                 Image(systemName: "arrow.uturn.backward")
@@ -789,10 +798,10 @@ struct DoodleStampCreatorView: View {
 
                             Button(action: {
                                 guard !redoStack.isEmpty else { return }
-                                let snapshot = CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: nil, backgroundOffset: .zero)
+                                let snapshot = makeDoodleSnapshot()
                                 undoStack.append(snapshot)
                                 let last = redoStack.removeLast()
-                                lines = last.lines
+                                lines = last.drawingLayers.first?.lines ?? []
                                 placedStamps = last.stamps
                             }) {
                                 Image(systemName: "arrow.uturn.forward")
@@ -804,7 +813,7 @@ struct DoodleStampCreatorView: View {
                             Button("Clear") {
                                 let thingCount = (lines.isEmpty ? 0 : 1) + (placedStamps.isEmpty ? 0 : 1)
                                 if thingCount == 1 {
-                                    undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: nil, backgroundOffset: .zero))
+                                    undoStack.append(makeDoodleSnapshot())
                                     redoStack = []
                                     if !lines.isEmpty { lines = [] }
                                     else { placedStamps = []; stampUndoStack = []; stampRedoStack = [] }
@@ -817,7 +826,7 @@ struct DoodleStampCreatorView: View {
                             .disabled(canvasIsEmpty)
                             .confirmationDialog("Clear Canvas", isPresented: $showClearSheet, titleVisibility: .visible) {
                                 Button("Clear All", role: .destructive) {
-                                    undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: nil, backgroundOffset: .zero))
+                                    undoStack.append(makeDoodleSnapshot())
                                     redoStack = []
                                     lines = []
                                     placedStamps = []
@@ -826,14 +835,14 @@ struct DoodleStampCreatorView: View {
                                 }
                                 if !lines.isEmpty {
                                     Button("Clear Drawing", role: .destructive) {
-                                        undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: nil, backgroundOffset: .zero))
+                                        undoStack.append(makeDoodleSnapshot())
                                         redoStack = []
                                         lines = []
                                     }
                                 }
                                 if !placedStamps.isEmpty {
                                     Button("Clear Stamps", role: .destructive) {
-                                        undoStack.append(CanvasSnapshot(lines: lines, stamps: placedStamps, backgroundImage: nil, backgroundOffset: .zero))
+                                        undoStack.append(makeDoodleSnapshot())
                                         redoStack = []
                                         placedStamps = []
                                         stampUndoStack = []

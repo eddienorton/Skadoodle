@@ -1056,15 +1056,16 @@ func applyBgEffectsForExport(to image: UIImage, bgOpacity: Double, bgBlur: Doubl
     return processed
 }
 
-func renderCanvasWithStamps(lines: [DrawingLine], stamps: [PlacedStamp], size: CGSize, canvasColor: UIColor = .white, backgroundImage: UIImage? = nil, backgroundOffset: CGSize = .zero, bgOpacity: Double = 1.0, bgBlur: Double = 0.0, bgBrightness: Double = 0.0, bgSaturation: Double = 1.0) -> UIImage {
+/// Full layer-aware export: renders drawing layers and stamps in their correct z-order.
+func renderCanvasWithStamps(drawingLayers: [DrawingLayer], stamps: [PlacedStamp], layerOrder: [LayerEntry], size: CGSize, canvasColor: UIColor = .white, backgroundImage: UIImage? = nil, backgroundOffset: CGSize = .zero, bgOpacity: Double = 1.0, bgBlur: Double = 0.0, bgBrightness: Double = 0.0, bgSaturation: Double = 1.0) -> UIImage {
     let canvasSwiftUI = Color(canvasColor)
     let effectiveBgImage: UIImage? = backgroundImage.map { img in
         let needsProcessing = bgOpacity < 1.0 || bgBlur > 0 || bgBrightness != 0 || bgSaturation != 1.0
         return needsProcessing ? applyBgEffectsForExport(to: img, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation) : img
     }
     let view = ZStack {
+        // Canvas background color + background image
         Canvas { context, canvasSize in
-            // Fill canvas color explicitly so bg image opacity composites correctly
             context.fill(Path(CGRect(origin: .zero, size: canvasSize)), with: .color(canvasSwiftUI))
             if let bgImg = effectiveBgImage {
                 let imgW = bgImg.size.width, imgH = bgImg.size.height
@@ -1073,49 +1074,59 @@ func renderCanvasWithStamps(lines: [DrawingLine], stamps: [PlacedStamp], size: C
                 let drawW = imgW * scale, drawH = imgH * scale
                 let x = (canvasSize.width - drawW) / 2 + backgroundOffset.width
                 let y = (canvasSize.height - drawH) / 2 + backgroundOffset.height
-                let uiImg = Image(uiImage: bgImg)
-                context.draw(uiImg, in: CGRect(x: x, y: y, width: drawW, height: drawH))
-            }
-            for line in lines {
-                renderLine(line, in: &context, canvasColor: canvasSwiftUI)
+                context.draw(Image(uiImage: bgImg), in: CGRect(x: x, y: y, width: drawW, height: drawH))
             }
         }
-        ForEach(stamps) { stamp in
-            Group {
-                if let img = stamp.inlineImage {
-                    Image(uiImage: img)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: stamp.displayWidth, height: stamp.displayHeight)
-                        .clipped()
-                } else if let customId = stamp.customImageId,
-                   let customStamp = CustomStampManager.shared.stamps.first(where: { $0.id == customId }),
-                   let img = customStamp.image {
-                    Image(uiImage: img)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: stamp.displayWidth, height: stamp.displayHeight)
-                } else if let text = stamp.stampText {
-                    Text(text)
-                        .font(renderFontFor(stamp: stamp))
-                        .foregroundColor(stamp.textColor)
-                        .multilineTextAlignment(stamp.textAlignment == "left" ? .leading : stamp.textAlignment == "right" ? .trailing : .center)
-                        .lineLimit(nil)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(width: stamp.displayWidth)
-                        .frame(height: stamp.displayHeight)
-                        .clipped()
-                        .background(stamp.textBgColor == .clear ? Color.clear : stamp.textBgColor)
-                        .cornerRadius(stamp.textBgColor == .clear ? 0 : 8)
-                } else {
-                    Text(stamp.emoji)
-                        .font(.system(size: stamp.size))
+        // Render entries in layer order
+        ForEach(layerOrder) { entry in
+            switch entry {
+            case .drawing(let layerId):
+                if let layer = drawingLayers.first(where: { $0.id == layerId }) {
+                    Canvas { context, _ in
+                        for line in layer.lines {
+                            renderLine(line, in: &context, canvasColor: canvasSwiftUI)
+                        }
+                    }
+                }
+            case .stamp(let stampId):
+                if let stamp = stamps.first(where: { $0.id == stampId }) {
+                    Group {
+                        if let img = stamp.inlineImage {
+                            Image(uiImage: img)
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: stamp.displayWidth, height: stamp.displayHeight)
+                                .clipped()
+                        } else if let customId = stamp.customImageId,
+                           let customStamp = CustomStampManager.shared.stamps.first(where: { $0.id == customId }),
+                           let img = customStamp.image {
+                            Image(uiImage: img)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: stamp.displayWidth, height: stamp.displayHeight)
+                        } else if let text = stamp.stampText {
+                            Text(text)
+                                .font(renderFontFor(stamp: stamp))
+                                .foregroundColor(stamp.textColor)
+                                .multilineTextAlignment(stamp.textAlignment == "left" ? .leading : stamp.textAlignment == "right" ? .trailing : .center)
+                                .lineLimit(nil)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(width: stamp.displayWidth)
+                                .frame(height: stamp.displayHeight)
+                                .clipped()
+                                .background(stamp.textBgColor == .clear ? Color.clear : stamp.textBgColor)
+                                .cornerRadius(stamp.textBgColor == .clear ? 0 : 8)
+                        } else {
+                            Text(stamp.emoji)
+                                .font(.system(size: stamp.size))
+                        }
+                    }
+                    .scaleEffect(x: stamp.flipX ? -1 : 1, y: stamp.flipY ? -1 : 1)
+                    .rotationEffect(.degrees(stamp.rotation))
+                    .opacity(stamp.opacity)
+                    .position(stamp.position)
                 }
             }
-            .scaleEffect(x: stamp.flipX ? -1 : 1, y: stamp.flipY ? -1 : 1)
-            .rotationEffect(.degrees(stamp.rotation))
-            .opacity(stamp.opacity)
-            .position(stamp.position)
         }
     }
     .frame(width: size.width, height: size.height)
@@ -1125,7 +1136,18 @@ func renderCanvasWithStamps(lines: [DrawingLine], stamps: [PlacedStamp], size: C
     renderer.scale = UITraitCollection.current.displayScale
     renderer.proposedSize = ProposedViewSize(width: size.width, height: size.height)
     if let uiImage = renderer.uiImage { return uiImage }
-    return renderCanvas(lines: lines, size: size, canvasColor: canvasColor)
+    // Fallback: render just the first drawing layer's lines
+    let allLines = drawingLayers.flatMap { $0.lines }
+    return renderCanvas(lines: allLines, size: size, canvasColor: canvasColor)
+}
+
+/// Convenience overload: flat lines + stamps (used by DoodleStampCreatorView and BackgroundEditorView preview).
+/// All drawing lines render below all stamps.
+func renderCanvasWithStamps(lines: [DrawingLine], stamps: [PlacedStamp], size: CGSize, canvasColor: UIColor = .white, backgroundImage: UIImage? = nil, backgroundOffset: CGSize = .zero, bgOpacity: Double = 1.0, bgBlur: Double = 0.0, bgBrightness: Double = 0.0, bgSaturation: Double = 1.0) -> UIImage {
+    let layer = DrawingLayer(lines: lines)
+    var order: [LayerEntry] = [.drawing(layer.id)]
+    for stamp in stamps { order.append(.stamp(stamp.id)) }
+    return renderCanvasWithStamps(drawingLayers: [layer], stamps: stamps, layerOrder: order, size: size, canvasColor: canvasColor, backgroundImage: backgroundImage, backgroundOffset: backgroundOffset, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation)
 }
 
 // MARK: - Thickness Picker

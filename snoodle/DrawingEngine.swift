@@ -71,9 +71,32 @@ enum PenType: Equatable {
     }
 }
 
-struct CanvasSnapshot {
+// MARK: - Layer Model
+
+struct DrawingLayer: Identifiable {
+    var id: UUID
     var lines: [DrawingLine]
+    init(id: UUID = UUID(), lines: [DrawingLine] = []) {
+        self.id = id
+        self.lines = lines
+    }
+}
+
+enum LayerEntry: Identifiable {
+    case drawing(UUID)
+    case stamp(UUID)
+    var id: UUID {
+        switch self {
+        case .drawing(let id): return id
+        case .stamp(let id): return id
+        }
+    }
+}
+
+struct CanvasSnapshot {
+    var drawingLayers: [DrawingLayer]
     var stamps: [PlacedStamp]
+    var layerOrder: [LayerEntry]
     var backgroundImage: UIImage? = nil
     var backgroundOffset: CGSize = .zero
 }
@@ -86,13 +109,10 @@ struct DrawingLine {
     var isEraser: Bool
     var penType: PenType = .pencil
     var colorB: Color = .blue   // second color for dualTone pens
-
 }
 
 struct DrawingCanvas: View {
-    @Binding var lines: [DrawingLine]
-    @Binding var undoStack: [CanvasSnapshot]
-    @Binding var redoStack: [CanvasSnapshot]
+    @Binding var lines: [DrawingLine]           // active layer's lines; DrawingCanvas appends here
     var currentColor: Color
     @Binding var lineWidth: CGFloat
     @Binding var isEraser: Bool
@@ -105,8 +125,11 @@ struct DrawingCanvas: View {
     var currentStamps: [PlacedStamp] = []
     var isLongPressing: Bool = false
     var stampResizeTargetId: UUID? = nil
+    var renderLines: Bool = false              // true = self-renders (DoodleStampCreatorView); false = external layer canvases render
+    var onBeforeDraw: (() -> Void)? = nil      // called once at stroke start; caller should push undo snapshot
+    var onEraserCommitted: ((DrawingLine) -> Void)? = nil  // called when an eraser stroke lands; caller may redirect to another layer
+    @Binding var currentLine: DrawingLine?     // live preview; updated during stroke, nil when idle
 
-    @State private var currentLine: DrawingLine? = nil
     @State private var lastPoint: CGPoint? = nil
     @State private var lastTime: Date? = nil
     @State private var lastSpeed: CGFloat? = nil
@@ -116,10 +139,11 @@ struct DrawingCanvas: View {
         let isIPad = UIDevice.current.userInterfaceIdiom == .pad
         return Canvas { context, size in
             let _ = redrawTrigger
-            // Background photo is rendered as a SwiftUI layer in DrawScreen (behind this Canvas)
-            // so effects (blur, brightness, opacity, saturation) can be applied via SwiftUI modifiers.
-            for line in lines { drawLine(line, in: &context) }
-            if let current = currentLine { drawLine(current, in: &context) }
+            // DoodleStampCreatorView uses renderLines=true; DrawScreen uses external layer canvases.
+            if renderLines {
+                for line in lines { drawLine(line, in: &context) }
+                if let current = currentLine { drawLine(current, in: &context) }
+            }
         }
         .allowsHitTesting(false)
         .background(canvasColor)
@@ -134,8 +158,7 @@ struct DrawingCanvas: View {
                 let moved = hypot(value.translation.width, value.translation.height)
                 if currentLine == nil {
                     if moved < 3 { return }
-                    undoStack.append(CanvasSnapshot(lines: lines, stamps: currentStamps, backgroundImage: backgroundImage, backgroundOffset: backgroundOffset))
-                    redoStack = []
+                    onBeforeDraw?()
                     currentLine = DrawingLine(
                         points: [point],
                         widths: [lineWidth],
@@ -143,7 +166,7 @@ struct DrawingCanvas: View {
                         lineWidth: lineWidth,
                         isEraser: isEraser,
                         penType: isEraser ? .pencil : penType,
-                        colorB: colorB,
+                        colorB: colorB
                     )
                 } else {
                     currentLine?.points.append(point)
@@ -155,10 +178,9 @@ struct DrawingCanvas: View {
             .onEnded { _ in
                 if let line = currentLine, line.points.count > 1 {
                     lines.append(line)
-                    currentLine = nil; lastPoint = nil; lastTime = nil; lastSpeed = nil
-                } else {
-                    currentLine = nil; lastPoint = nil; lastTime = nil; lastSpeed = nil
+                    if line.isEraser { onEraserCommitted?(line) }
                 }
+                currentLine = nil; lastPoint = nil; lastTime = nil; lastSpeed = nil
             }
         )
 
@@ -169,6 +191,8 @@ struct DrawingCanvas: View {
                     guard !isLongPressing && stampResizeTargetId == nil else { return }
                     lastPoint = point
                     lastTime = Date()
+                    // Snapshot before first touch — so onMoved never blocks the first frame
+                    onBeforeDraw?()
                 },
                 onMoved: { point, pressure, isPencil in
                     guard !isLongPressing && stampResizeTargetId == nil else {
@@ -176,26 +200,20 @@ struct DrawingCanvas: View {
                         return
                     }
                     let pointCount = currentLine?.points.count ?? 0
-                    // Ramp over first 8 points to prevent blotch — start thin regardless of pressure
+                    // Ramp over first 8 points to prevent initial blotch
                     let ramp = pointCount < 8 ? CGFloat(pointCount) / 8.0 : 1.0
-                    // Pencil: pressure-sensitive. Finger: exact lineWidth, no pressure.
+                    // Pencil: pressure-sensitive width. Eraser/finger: exact lineWidth.
                     let targetW: CGFloat
                     if isEraser {
                         targetW = lineWidth
                     } else if isPencil {
-                        // Pressure range 0.0-1.0, mapped to 0.3x-1.3x lineWidth
-                        // No spike multiplier — pressure is already 0-1
                         let clampedPressure = min(pressure, 0.6 + ramp * 0.4)
-                        let pressureScale = 0.3 + clampedPressure * 1.0  // 0.3 to 1.3
+                        let pressureScale = 0.3 + clampedPressure * 1.0  // 0.3x–1.3x
                         targetW = max(1.0, lineWidth * pressureScale * ramp)
                     } else {
                         targetW = lineWidth * ramp + 1.0 * (1.0 - ramp)
                     }
                     if currentLine == nil, let start = lastPoint {
-                        // Push undo now that we know a stroke is starting
-                        undoStack.append(CanvasSnapshot(lines: lines, stamps: currentStamps, backgroundImage: backgroundImage, backgroundOffset: backgroundOffset))
-                        redoStack = []
-                        // Create line on first move — avoids pen-down blotch entirely
                         currentLine = DrawingLine(
                             points: [start, point],
                             widths: [1.0, 1.0],
@@ -203,8 +221,8 @@ struct DrawingCanvas: View {
                             lineWidth: lineWidth,
                             isEraser: isEraser,
                             penType: isEraser ? .pencil : penType,
-                            colorB: colorB,
-                            )
+                            colorB: colorB
+                        )
                     } else {
                         currentLine?.points.append(point)
                         currentLine?.widths.append(targetW)
@@ -220,9 +238,14 @@ struct DrawingCanvas: View {
                             updated.append(finalLine)
                             lines = updated
                             redrawTrigger += 1
+                            if finalLine.isEraser { onEraserCommitted?(finalLine) }
+                            // Clear live preview AFTER committed stroke lands in lines — prevents flicker
+                            currentLine = nil
                         }
+                    } else {
+                        currentLine = nil
                     }
-                    currentLine = nil; lastPoint = nil; lastTime = nil; lastSpeed = nil
+                    lastPoint = nil; lastTime = nil; lastSpeed = nil
                 },
                 onTwoFingerPan: backgroundImage != nil ? onBackgroundPan : nil
             )) : nil
@@ -231,6 +254,21 @@ struct DrawingCanvas: View {
 
     private func drawLine(_ line: DrawingLine, in context: inout GraphicsContext) {
         renderLine(line, in: &context, canvasColor: canvasColor)
+    }
+}
+
+// MARK: - Drawing Layer Canvas
+// Renders one drawing layer's committed lines plus the optional live-preview stroke.
+struct DrawingLayerCanvas: View {
+    let lines: [DrawingLine]
+    let currentLine: DrawingLine?
+    let canvasColor: Color
+    var body: some View {
+        Canvas { context, size in
+            for line in lines { renderLine(line, in: &context, canvasColor: canvasColor) }
+            if let c = currentLine { renderLine(c, in: &context, canvasColor: canvasColor) }
+        }
+        .allowsHitTesting(false)
     }
 }
 
@@ -335,7 +373,7 @@ struct PencilInputView: UIViewRepresentable {
         view.onMoved = onMoved
         view.onEnded = onEnded
         view.onTwoFingerPan = onTwoFingerPan
-        // Add two-finger pan recognizer directly here
+        // Two-finger pan
         let pan = UIPanGestureRecognizer(target: view, action: #selector(PencilTouchView.handleTwoFingerPan(_:)))
         pan.minimumNumberOfTouches = 2
         pan.maximumNumberOfTouches = 2
@@ -478,19 +516,22 @@ private func strokeTaper(i: Int, count: Int, taperFraction: CGFloat) -> CGFloat 
 private func drawEraserLine(_ line: DrawingLine, in context: inout GraphicsContext, canvasColor: Color) {
     let baseW = line.lineWidth
     let count = line.points.count
+    // Use .clear blend mode — punches transparent holes revealing background/photo below
+    context.blendMode = .clear
     if count == 1 {
         let pt = line.points[0]
         let rect = CGRect(x: pt.x - baseW/2, y: pt.y - baseW/2, width: baseW, height: baseW)
-        context.fill(Path(ellipseIn: rect), with: .color(canvasColor))
-        return
+        context.fill(Path(ellipseIn: rect), with: .color(.white))
+    } else {
+        for i in 1..<count {
+            var seg = Path()
+            seg.move(to: line.points[i-1])
+            seg.addLine(to: line.points[i])
+            context.stroke(seg, with: .color(.white),
+                           style: StrokeStyle(lineWidth: baseW, lineCap: .round, lineJoin: .round))
+        }
     }
-    for i in 1..<count {
-        var seg = Path()
-        seg.move(to: line.points[i-1])
-        seg.addLine(to: line.points[i])
-        context.stroke(seg, with: .color(canvasColor),
-                       style: StrokeStyle(lineWidth: baseW, lineCap: .round, lineJoin: .round))
-    }
+    context.blendMode = .normal
 }
 
 private func drawTaperedLine(_ line: DrawingLine, color: Color, in context: inout GraphicsContext,
@@ -1456,13 +1497,12 @@ func callSnoodleAI(for image: UIImage) async -> (caption: String, keywords: [Str
 // MARK: - Palette
 
 let paletteColors: [Color] = [
-    // Original colors — indices unchanged
-    .black, .red, .orange, .yellow, .green, .blue, .purple,
+    // Original colors — indices unchanged (white moved to index 1, others shift by 1)
+    .black, .white, .red, .orange, .yellow, .green, .blue, .purple,
     Color(red: 0.53, green: 0.81, blue: 0.98),          // light blue
     .brown, Color(red: 0.96, green: 0.76, blue: 0.63),  // flesh/skin
     Color(white: 0.5),                                   // gray
     // Extended palette
-    .white,
     Color(red: 1.0,  green: 0.41, blue: 0.71),          // hot pink
     Color(red: 0.85, green: 0.44, blue: 0.84),          // orchid/violet
     Color(red: 0.0,  green: 0.75, blue: 0.75),          // teal

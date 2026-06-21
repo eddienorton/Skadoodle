@@ -399,12 +399,12 @@ struct PublicProfileView: View {
             .presentationDetents([.height(380)])
             .presentationDragIndicator(.visible)
         }
-        // View a doodle — pass full array so left/right swipe works
+        // View a doodle — pass filtered array so index always matches grid
         .fullScreenCover(item: Binding(
             get: { selectedDoodleIndex.map { IdentifiableInt(value: $0) } },
             set: { selectedDoodleIndex = $0?.value }
         )) { idx in
-            WorldSnoodleDetailView(initialEntries: doodles, startIndex: idx.value, lockToInitial: true)
+            WorldSnoodleDetailView(initialEntries: displayableDoodles, startIndex: idx.value, lockToInitial: true)
         }
     }
 
@@ -631,30 +631,32 @@ struct PublicProfileView: View {
 
     // MARK: - Doodles Grid
 
+    var displayableDoodles: [WorldSnoodle] {
+        doodles.filter { $0.imageStorageURL != nil }
+    }
+
     var doodlesSection: some View {
         Group {
             if isLoading {
                 ProgressView().padding(40)
-            } else if doodles.isEmpty {
+            } else if displayableDoodles.isEmpty {
                 VStack(spacing: 12) {
                     Image(systemName: "scribble").font(.system(size: 44)).foregroundColor(.secondary.opacity(0.3))
                     Text("No community doodles yet").foregroundColor(.secondary)
                 }.padding(40)
             } else {
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 3) {
-                    ForEach(Array(doodles.enumerated()), id: \.element.id) { index, doodle in
-                        if doodle.imageStorageURL != nil {
-                            RetryAsyncImage(url: doodle.imageStorageURL, contentMode: .fill)
-                                .aspectRatio(3/4, contentMode: .fill)
-                                .clipped()
-                                .onTapGesture {
-                                    if isOwnProfile {
-                                        actionDoodle = doodle
-                                    } else {
-                                        selectedDoodleIndex = index
-                                    }
-                                }
-                        }
+                    ForEach(Array(displayableDoodles.enumerated()), id: \.element.id) { index, doodle in
+                        Color.clear
+                            .aspectRatio(3/4, contentMode: .fit)
+                            .overlay(
+                                RetryAsyncImage(url: doodle.imageStorageURL, contentMode: .fill)
+                                    .clipped()
+                            )
+                            .clipped()
+                            .onTapGesture {
+                                if isOwnProfile { actionDoodle = doodle } else { selectedDoodleIndex = index }
+                            }
                     }
                 }
             }

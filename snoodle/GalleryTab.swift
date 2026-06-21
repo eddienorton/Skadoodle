@@ -914,7 +914,7 @@ struct WorldSnoodleTile: View {
 struct LikeButton: View {
     let snoodleId: String
     @ObservedObject private var worldManager = WorldGalleryManager.shared
-    @StateObject private var auth = SnoodleAuthManager.shared
+    @ObservedObject private var auth = SnoodleAuthManager.shared
     @State private var showSignIn = false
     @State private var showLikesList = false
 
@@ -976,7 +976,7 @@ extension SwiftUI.Image {
 }
 
 struct WorldSnoodleDetailView: View {
-    @StateObject private var auth = SnoodleAuthManager.shared
+    @ObservedObject private var auth = SnoodleAuthManager.shared
     @EnvironmentObject var store: SnoodleStore
     @Environment(\.dismiss) var dismiss
     @ObservedObject private var worldManager = WorldGalleryManager.shared
@@ -1483,7 +1483,7 @@ struct CommentSheetView: View {
     let doodleId: String
     let doodleCaption: String
     @ObservedObject private var manager = CommentManager.shared
-    @StateObject private var auth = SnoodleAuthManager.shared
+    @ObservedObject private var auth = SnoodleAuthManager.shared
     @State private var commentText: String = ""
     @State private var replyingTo: SnoodleComment? = nil
     @State private var showSignIn = false
@@ -1645,9 +1645,16 @@ struct CommentRowView: View {
     let doodleId: String
     let replies: [SnoodleComment]
     var onReply: () -> Void
-    @StateObject private var auth = SnoodleAuthManager.shared
+    @ObservedObject private var auth = SnoodleAuthManager.shared
     @State private var showDeleteConfirm = false
     @State private var showReplies = false
+
+    var isOwner: Bool {
+        guard auth.isSignedIn else { return false }
+        if let uid = auth.userId, uid == comment.userId { return true }
+        // Fallback: username match (handles uid mismatch edge cases)
+        return !auth.username.isEmpty && auth.username != "Anonymous" && auth.username == comment.username
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -1679,11 +1686,11 @@ struct CommentRowView: View {
                             .font(.system(size: 11))
                             .foregroundColor(.secondary)
                         Spacer()
-                        if auth.userId == comment.userId {
+                        if isOwner {
                             Button(action: { showDeleteConfirm = true }) {
                                 Image(systemName: "trash")
-                                    .font(.system(size: 12))
-                                    .foregroundColor(.secondary.opacity(0.6))
+                                    .font(.system(size: 13))
+                                    .foregroundColor(.red.opacity(0.5))
                             }
                         }
                     }
@@ -1717,6 +1724,13 @@ struct CommentRowView: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
+            .contextMenu {
+                if isOwner {
+                    Button(role: .destructive, action: { showDeleteConfirm = true }) {
+                        Label("Delete Comment", systemImage: "trash")
+                    }
+                }
+            }
             .confirmationDialog("Delete comment?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
                 Button("Delete", role: .destructive) {
                     CommentManager.shared.deleteComment(doodleId: doodleId, commentId: comment.id) { _ in }
@@ -1747,8 +1761,14 @@ struct CommentRowView: View {
 struct ReplyRowView: View {
     let reply: SnoodleComment
     let doodleId: String
-    @StateObject private var auth = SnoodleAuthManager.shared
+    @ObservedObject private var auth = SnoodleAuthManager.shared
     @State private var showDeleteConfirm = false
+
+    var isOwner: Bool {
+        guard auth.isSignedIn else { return false }
+        if let uid = auth.userId, uid == reply.userId { return true }
+        return !auth.username.isEmpty && auth.username != "Anonymous" && auth.username == reply.username
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -1776,11 +1796,11 @@ struct ReplyRowView: View {
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
                     Spacer()
-                    if auth.userId == reply.userId {
+                    if isOwner {
                         Button(action: { showDeleteConfirm = true }) {
                             Image(systemName: "trash")
-                                .font(.system(size: 11))
-                                .foregroundColor(.secondary.opacity(0.6))
+                                .font(.system(size: 12))
+                                .foregroundColor(.red.opacity(0.5))
                         }
                     }
                 }
@@ -1791,6 +1811,13 @@ struct ReplyRowView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
+        .contextMenu {
+            if isOwner {
+                Button(role: .destructive, action: { showDeleteConfirm = true }) {
+                    Label("Delete Reply", systemImage: "trash")
+                }
+            }
+        }
         .confirmationDialog("Delete reply?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
             Button("Delete", role: .destructive) {
                 CommentManager.shared.deleteComment(doodleId: doodleId, commentId: reply.id) { _ in }

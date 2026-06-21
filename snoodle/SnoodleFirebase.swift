@@ -50,9 +50,9 @@ enum ProfileBackgroundStyle: String {
 }
 
 enum ProfileLayoutStyle: String {
-    case grid  = "grid"
-    case large = "large"
-    case mixed = "mixed"
+    case grid      = "grid"
+    case scattered = "scattered"
+    case chaos     = "chaos"
 }
 
 struct UserProfile {
@@ -75,6 +75,7 @@ struct UserProfile {
     var headerDoodleId: String = ""              // pinned featured doodle
     var pinnedDoodleIds: [String] = []
     var layoutStyle: ProfileLayoutStyle = .grid
+    var gridSize: Int = 1                       // 0=small(4col) 1=medium(3col) 2=large(2col)
     var bannerHeight: CGFloat = 0               // 0 = use default; stored as Double in Firestore
 
     // Stats
@@ -138,6 +139,7 @@ class UserProfileManager: ObservableObject {
             data["headerDoodleId"]   = p.headerDoodleId
             data["pinnedDoodleIds"]  = p.pinnedDoodleIds
             data["layoutStyle"]      = p.layoutStyle.rawValue
+            data["gridSize"]         = p.gridSize
             data["bannerHeight"]     = Double(p.bannerHeight)
             data["isPublic"]         = p.isPublic
             // Encode links as array of dicts
@@ -164,6 +166,7 @@ class UserProfileManager: ObservableObject {
                               headerDoodleId: extended?.headerDoodleId ?? "",
                               pinnedDoodleIds: extended?.pinnedDoodleIds ?? [],
                               layoutStyle: extended?.layoutStyle ?? .grid,
+                              gridSize: extended?.gridSize ?? 1,
                               bannerHeight: extended?.bannerHeight ?? 0,
                               followerCount: extended?.followerCount ?? 0,
                               followingCount: extended?.followingCount ?? 0,
@@ -198,6 +201,7 @@ class UserProfileManager: ObservableObject {
             headerDoodleId: data["headerDoodleId"] as? String ?? "",
             pinnedDoodleIds: data["pinnedDoodleIds"] as? [String] ?? [],
             layoutStyle: ProfileLayoutStyle(rawValue: data["layoutStyle"] as? String ?? "") ?? .grid,
+            gridSize: data["gridSize"] as? Int ?? 1,
             bannerHeight: CGFloat(data["bannerHeight"] as? Double ?? 0),
             followerCount: data["followerCount"] as? Int ?? 0,
             followingCount: data["followingCount"] as? Int ?? 0,
@@ -411,6 +415,19 @@ class UserProfileManager: ObservableObject {
                 self.saveProfile(userId: userId, username: username, avatar: avatar,
                                  photoURL: downloadURL.absoluteString)
             }
+        }
+    }
+
+    /// Saves just the layout/gridSize preferences — used when artist changes their profile display.
+    func saveLayoutPreferences(userId: String, layout: ProfileLayoutStyle, gridSize: Int) {
+        db.collection(collection).document(userId).updateData([
+            "layoutStyle": layout.rawValue,
+            "gridSize": gridSize
+        ])
+        if var cached = cache[userId] {
+            cached.layoutStyle = layout
+            cached.gridSize = gridSize
+            cache[userId] = cached
         }
     }
 
