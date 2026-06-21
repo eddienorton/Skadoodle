@@ -153,10 +153,12 @@ class StampItemUIView: UIView, UIGestureRecognizerDelegate {
     // MARK: - Gestures
 
     private func setupGestures() {
+        // Pan gesture — only fires when hitTest returns this view (i.e. stamp is selected).
+        // Non-selected stamps return nil from hitTest so touches pass through to drawing canvas.
         let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
         pan.delegate = self
         pan.minimumNumberOfTouches = 1
-        pan.maximumNumberOfTouches = 1  // single finger only — two-finger handled by window-level pinch
+        pan.maximumNumberOfTouches = 1
         addGestureRecognizer(pan)
 
         let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap(_:)))
@@ -225,6 +227,7 @@ class StampItemUIView: UIView, UIGestureRecognizerDelegate {
 
 class StampContainerView: UIView {
 
+    var selectedStampId: UUID? = nil
     private var itemViews: [UUID: StampItemUIView] = [:]
     var onStampDrag: (UUID, CGPoint) -> Void = { _, _ in }
     var onStampDragEnd: (UUID, CGPoint, CGVector) -> Void = { _, _, _ in }
@@ -260,24 +263,14 @@ class StampContainerView: UIView {
         }
     }
 
-    // Drawing must pass through this view — only stamp subviews intercept finger touches
+    // Only the selected (highlighted) stamp captures touches — so it can be dragged.
+    // All other touches pass through to the drawing canvas.
+    // When selected, the full bounding box is solid hit area (ignores alpha).
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        // Always let pencil touches through to the drawing canvas
-        if let touch = event?.allTouches?.first,
-           touch.type == .pencil || touch.type == .stylus {
-            return nil
-        }
-        // Walk stamp subviews top→bottom (reversed = topmost first)
-        // point(inside:) now correctly handles scaleAspectFit letterboxing
-        for view in subviews.reversed() {
-            guard let stampView = view as? StampItemUIView else { continue }
-            let localPt = stampView.convert(point, from: self)
-            if stampView.point(inside: localPt, with: event) {
-                return stampView
-            }
-        }
-        // No stamp hit — return nil so drawing canvas gets the touch
-        return nil
+        guard let selId = selectedStampId,
+              let stampView = itemViews[selId] else { return nil }
+        let localPt = stampView.convert(point, from: self)
+        return stampView.bounds.contains(localPt) ? stampView : nil
     }
 
     func syncStamps(_ stamps: [PlacedStamp], draggingId: UUID?, rotatingId: UUID?, imageProvider: (PlacedStamp) -> UIImage?) {
@@ -359,6 +352,7 @@ struct StampCanvasView: UIViewRepresentable {
     func updateUIView(_ uiView: StampContainerView, context: Context) {
         context.coordinator.parent = self
         uiView.frame = CGRect(origin: .zero, size: canvasSize)
+        uiView.selectedStampId = selectedStampId
         // Order UIKit gesture views by layerOrder so touch priority matches visual z-order.
         // Falls back to stamps array order when layerOrder is empty (e.g. DoodleStampCreatorView).
         let orderedStamps: [PlacedStamp]

@@ -862,6 +862,108 @@ struct ImagePickerCallback: UIViewControllerRepresentable {
     }
 }
 
+// MARK: - Module-level stamp hit test (shared by canvas tap gesture and WindowPinchView)
+private var _stampHitImageCache: [String: UIImage] = [:]
+
+func stampHitTest(stamp: PlacedStamp, canvasPt: CGPoint) -> Bool {
+    let halfDiag = hypot(stamp.displayWidth, stamp.displayHeight) / 2
+    let dist = hypot(stamp.position.x - canvasPt.x, stamp.position.y - canvasPt.y)
+    guard dist <= halfDiag else { return false }
+
+    if stamp.isTextStamp && stamp.textBgColor == .clear {
+        let dx = canvasPt.x - stamp.position.x
+        let dy = canvasPt.y - stamp.position.y
+        let angle = -stamp.rotation * .pi / 180
+        let lx = dx * cos(angle) - dy * sin(angle) + stamp.displayWidth / 2
+        let ly = dx * sin(angle) + dy * cos(angle) + stamp.displayHeight / 2
+        return lx >= 0 && ly >= 0 && lx <= stamp.displayWidth && ly <= stamp.displayHeight
+    }
+
+    let hitImage: UIImage?
+    if let inline = stamp.inlineImage {
+        hitImage = inline
+    } else if let customId = stamp.customImageId,
+              let customStamp = CustomStampManager.shared.stamps.first(where: { $0.id == customId }) {
+        hitImage = customStamp.image
+    } else if let text = stamp.stampText {
+        let hasBg = stamp.textBgColor != .clear
+        let dw = stamp.displayWidth, dh = stamp.displayHeight
+        let key = "txt_\(text.hashValue)_\(stamp.fontName ?? "system")_\(Int(dw))x\(Int(dh))_\(hasBg)"
+        if let cached = _stampHitImageCache[key] {
+            hitImage = cached
+        } else {
+            let fontSize = stamp.stampWidth > 0 ? stamp.size : fitTextFontSize(text: text, stampSize: dw, baseFontId: stamp.fontName)
+            let fmt = UIGraphicsImageRendererFormat(); fmt.opaque = hasBg
+            let img = UIGraphicsImageRenderer(size: CGSize(width: dw, height: dh), format: fmt).image { _ in
+                if hasBg {
+                    UIColor(stamp.textBgColor).setFill()
+                    UIBezierPath(roundedRect: CGRect(x: 0, y: 0, width: dw, height: dh), cornerRadius: 8).fill()
+                }
+                let font = TextStampFont.font(forId: stamp.fontName, style: stamp.fontStyle).withSize(fontSize)
+                let nsAlign: NSTextAlignment = stamp.textAlignment == "left" ? .left : stamp.textAlignment == "right" ? .right : .center
+                let para = NSMutableParagraphStyle(); para.alignment = nsAlign; para.lineBreakMode = .byClipping
+                let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor(stamp.textColor), .paragraphStyle: para]
+                let str = text as NSString
+                let br = str.boundingRect(with: CGSize(width: dw - 20, height: dh - 10),
+                                          options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: attrs, context: nil)
+                str.draw(with: CGRect(x: 10, y: (dh - br.height) / 2, width: dw - 20, height: br.height),
+                         options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: attrs, context: nil)
+            }
+            _stampHitImageCache[key] = img; hitImage = img
+        }
+    } else {
+        let key = "\(stamp.emoji)_\(Int(stamp.size))"
+        if let cached = _stampHitImageCache[key] {
+            hitImage = cached
+        } else {
+            let s = stamp.size
+            let fmt = UIGraphicsImageRendererFormat(); fmt.opaque = false
+            let img = UIGraphicsImageRenderer(size: CGSize(width: s, height: s), format: fmt).image { _ in
+                let attrs: [NSAttributedString.Key: Any] = [.font: UIFont.systemFont(ofSize: s * 0.85)]
+                let str = stamp.emoji as NSString
+                let sz = str.size(withAttributes: attrs)
+                str.draw(at: CGPoint(x: (s - sz.width) / 2, y: (s - sz.height) / 2), withAttributes: attrs)
+            }
+            _stampHitImageCache[key] = img; hitImage = img
+        }
+    }
+
+    guard let img = hitImage, let cgImage = img.cgImage else { return true }
+
+    let dx = canvasPt.x - stamp.position.x
+    let dy = canvasPt.y - stamp.position.y
+    let angle = -stamp.rotation * .pi / 180
+    let lx = dx * cos(angle) - dy * sin(angle) + stamp.displayWidth / 2
+    let ly = dx * sin(angle) + dy * cos(angle) + stamp.displayHeight / 2
+    let imgW = CGFloat(cgImage.width), imgH = CGFloat(cgImage.height)
+    let dw2 = stamp.displayWidth, dh2 = stamp.displayHeight
+    let scale = min(dw2 / imgW, dh2 / imgH)
+    let fitW = imgW * scale, fitH = imgH * scale
+    let offX = (dw2 - fitW) / 2, offY = (dh2 - fitH) / 2
+    guard lx >= offX, ly >= offY, lx < offX + fitW, ly < offY + fitH else { return false }
+    let px = Int((lx - offX) / fitW * imgW)
+    let pyUI = Int((ly - offY) / fitH * imgH)
+    let pyCG = Int(imgH) - pyUI - 1
+    guard px >= 0, pyCG >= 0, px < Int(imgW), pyCG < Int(imgH) else { return false }
+    var pixel = [UInt8](repeating: 0, count: 4)
+    guard let ctx = CGContext(data: &pixel, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+                              space: CGColorSpaceCreateDeviceRGB(),
+                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return true }
+    ctx.draw(cgImage, in: CGRect(x: -CGFloat(px), y: -CGFloat(pyCG), width: imgW, height: imgH))
+    return pixel[3] > 25
+}
+
+/// Returns the topmost stamp hit at canvasPt, respecting visual z-order from layerOrder.
+/// layerOrder is bottom-first (last = topmost), so we iterate reversed().
+func topmostStampHit(at pt: CGPoint, layerOrder: [LayerEntry], stamps: [PlacedStamp]) -> PlacedStamp? {
+    for entry in layerOrder.reversed() {
+        guard case .stamp(let sid) = entry,
+              let s = stamps.first(where: { $0.id == sid }) else { continue }
+        if stampHitTest(stamp: s, canvasPt: pt) { return s }
+    }
+    return nil
+}
+
 struct DrawScreen: View {
     @EnvironmentObject var store: SnoodleStore
     @Binding var isPresented: Bool
@@ -1097,20 +1199,15 @@ struct DrawScreen: View {
                 if case .drawing(let id) = entry,
                    let layer = drawingLayers.first(where: { $0.id == id }) {
                     drawingLayerCanvas(lines: layer.lines, chipW: chipW, chipH: chipH)
-                    if layer.lines.isEmpty {
-                        Text("empty")
-                            .font(.system(size: 9))
-                            .foregroundColor(.secondary)
-                    }
                 } else if case .stamp(let id) = entry {
                     stampChipContent(id: id, chipW: chipW, chipH: chipH)
                 }
             }
             .frame(width: chipW, height: chipH)
             .clipShape(RoundedRectangle(cornerRadius: 7))
-            .overlay(RoundedRectangle(cornerRadius: 7)
-                .stroke(isActive ? Color.white.opacity(0.9) : Color.clear, lineWidth: isActive ? 1 : 0)
-                .padding(1))
+            .overlay(RoundedRectangle(cornerRadius: 5)
+                .stroke(isActive ? Color(UIColor.systemGray) : Color.clear, lineWidth: 2)
+                .padding(2))
             .overlay(RoundedRectangle(cornerRadius: 7)
                 .stroke(isActive ? Color.yellow : Color.gray.opacity(0.3),
                         lineWidth: isActive ? 3.5 : 1))
@@ -1353,52 +1450,41 @@ struct DrawScreen: View {
 
                 Divider()
 
-                ScrollView(.vertical, showsIndicators: true) {
-                    // ID changes when line counts change OR when any stamp moves/resizes/rotates
-                    let layerCountsId = drawingLayers.map { $0.lines.count }.description
-                    let stampStateId = placedStamps.map {
-                        "\(Int($0.position.x)),\(Int($0.position.y)),\(Int($0.size)),\(Int($0.rotation))"
-                    }.description
-                    let refreshId = layerCountsId + stampStateId
-                    VStack(spacing: 5) {
+                ScrollViewReader { proxy in
+                    List {
                         ForEach(Array(layerOrder.reversed())) { entry in
                             layerChipView(entry: entry)
-                            // Reorder buttons below the selected chip
-                            let entryIsActive: Bool = {
-                                if case .drawing(let id) = entry { return id == userSelectedLayerId }
-                                if case .stamp(let id) = entry { return id == selectedStampId }
-                                return false
-                            }()
-                            if entryIsActive {
-                                let idx = layerOrder.firstIndex(where: { $0.id == entry.id }) ?? -1
-                                HStack(spacing: 16) {
-                                    Button { moveLayerEntry(entry, by: 1) } label: {
-                                        Image(systemName: "arrow.up.circle.fill")
-                                            .font(.system(size: 26))
-                                            .foregroundColor(idx < layerOrder.count - 1 ? .yellow : .gray.opacity(0.3))
-                                    }
-                                    .disabled(idx >= layerOrder.count - 1)
-                                    Button { moveLayerEntry(entry, by: -1) } label: {
-                                        Image(systemName: "arrow.down.circle.fill")
-                                            .font(.system(size: 26))
-                                            .foregroundColor(idx > 0 ? .yellow : .gray.opacity(0.3))
-                                    }
-                                    .disabled(idx <= 0)
-                                }
-                                .padding(.bottom, 2)
-                            }
+                                .listRowBackground(Color.clear)
+                                .listRowSeparator(.hidden)
+                                .listRowInsets(EdgeInsets(top: 3, leading: 6, bottom: 3, trailing: 6))
                         }
-                        // Background chip — always at the bottom
+                        .onMove { source, destination in
+                            var reversed = Array(layerOrder.reversed())
+                            reversed.move(fromOffsets: source, toOffset: destination)
+                            layerOrder = reversed.reversed()
+                            consolidateDrawingLayers()
+                        }
                         backgroundLayerChip
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                            .listRowInsets(EdgeInsets(top: 3, leading: 6, bottom: 3, trailing: 6))
+                            .moveDisabled(true)
                     }
-                    .padding(8)
-                    .id(refreshId)
+                    .listStyle(.plain)
+                    .scrollContentBackground(.hidden)
+                    .environment(\.editMode, .constant(.active))
+                    .frame(maxHeight: .infinity)
+                    .onChange(of: selectedStampId) { _, newId in
+                        if let id = newId {
+                            withAnimation { proxy.scrollTo(id, anchor: .center) }
+                        }
+                    }
                 }
-                .frame(maxHeight: .infinity)
             }
-            .frame(width: 136)
+            .frame(width: 160)
             .frame(maxHeight: canvasSize.height - 48)
             .background(.ultraThinMaterial)
+            .contentShape(Rectangle())
             .clipShape(RoundedRectangle(cornerRadius: 14))
             .shadow(color: .black.opacity(0.2), radius: 10, x: -4, y: 0)
             .offset(layersPanelOffset)
@@ -1421,24 +1507,22 @@ struct DrawScreen: View {
         redoStack = []
     }
 
-    /// Place a stamp: append to placedStamps + layerOrder, then create a fresh drawing layer on top.
+    // Place a stamp: append to placedStamps + layerOrder, reset drawing selection.
+    // No empty drawing layer is created here — one will be lazily created on first stroke via onBeforeDraw.
     func appendStampToLayer(_ stamp: PlacedStamp) {
         placedStamps.append(stamp)
-        userSelectedLayerId = nil   // reset to topmost before placement logic
-        let activeIsEmpty = drawingLayers[activeDrawingLayerIndex].lines.isEmpty
-        if activeIsEmpty, let activeOrderIdx = layerOrder.lastIndex(where: {
-            if case .drawing(let id) = $0 { return id == activeDrawingLayerId }
-            return false
-        }) {
-            // Active layer is empty — slide stamp below it, reuse the empty layer on top
-            layerOrder.insert(.stamp(stamp.id), at: activeOrderIdx)
-        } else {
-            // Active layer has content — stamp goes above it, new empty layer on top
-            layerOrder.append(.stamp(stamp.id))
-            let newLayer = DrawingLayer()
-            drawingLayers.append(newLayer)
-            layerOrder.append(.drawing(newLayer.id))
-        }
+        userSelectedLayerId = nil
+        layerOrder.append(.stamp(stamp.id))
+    }
+
+    // Lazy binding to the active drawing layer's lines. Evaluates activeDrawingLayerIndex
+    // at access time (not at SwiftUI render time), so it picks up a layer that
+    // onBeforeDraw just created before the first stroke point is written.
+    var activeLayerLinesBinding: Binding<[DrawingLine]> {
+        Binding(
+            get: { drawingLayers[activeDrawingLayerIndex].lines },
+            set: { drawingLayers[activeDrawingLayerIndex].lines = $0 }
+        )
     }
 
     @State private var showCanvasBgSheet: Bool = false
@@ -1646,6 +1730,31 @@ struct DrawScreen: View {
     func layerStampView(id: UUID) -> some View {
         if let stamp = placedStamps.first(where: { $0.id == id }) {
             StampRenderView(stamp: stamp)
+        }
+    }
+
+    @ViewBuilder
+    var activeMagicMenuView: some View {
+        if showStampMagicMenu,
+           let id = selectedStampId,
+           let stamp = placedStamps.first(where: { $0.id == id }) {
+            stampMagicMenuView(id: id, stamp: stamp)
+        }
+    }
+
+    // Extracted to reduce body complexity
+    @ViewBuilder
+    var snugRectOverlay: some View {
+        if (showStampMagicMenu || isLongPressing),
+           let selId = selectedStampId,
+           let selStamp = placedStamps.first(where: { $0.id == selId }) {
+            Rectangle()
+                .stroke(Color.black, lineWidth: 3)
+                .overlay(Rectangle().stroke(Color.white, lineWidth: 1))
+                .frame(width: selStamp.snugSize.width, height: selStamp.snugSize.height)
+                .rotationEffect(.degrees(selStamp.rotation))
+                .position(selStamp.position)
+                .allowsHitTesting(false)
         }
     }
 
@@ -2150,7 +2259,7 @@ struct DrawScreen: View {
                         }
                         // Input handler — no self-rendering; external layer canvases handle display
                         DrawingCanvas(
-                            lines: $drawingLayers[activeDrawingLayerIndex].lines,
+                            lines: activeLayerLinesBinding,
                             currentColor: currentColor,
                             lineWidth: $lineWidth,
                             isEraser: $isEraser,
@@ -2162,7 +2271,18 @@ struct DrawScreen: View {
                             currentStamps: placedStamps,
                             isLongPressing: isLongPressing,
                             stampResizeTargetId: stampResizeTargetId,
-                            onBeforeDraw: { pushUndoSnapshot() },
+                            onBeforeDraw: {
+                                pushUndoSnapshot()
+                                // Lazy layer creation: if topmost is a stamp (or no drawing layer
+                                // is explicitly selected), create a new drawing layer on top now.
+                                if userSelectedLayerId == nil,
+                                   let last = layerOrder.last, case .stamp = last {
+                                    let newLayer = DrawingLayer()
+                                    drawingLayers.append(newLayer)
+                                    layerOrder.append(.drawing(newLayer.id))
+                                    userSelectedLayerId = newLayer.id
+                                }
+                            },
                             onEraserCommitted: { eraserLine in
                                 let activeIdx = activeDrawingLayerIndex
                                 // If the active layer has no real drawing content, the eraser did nothing useful.
@@ -2183,10 +2303,19 @@ struct DrawScreen: View {
                         )
                             .contentShape(Rectangle())
                             .allowsHitTesting(!isLongPressing)
-                            .simultaneousGesture(TapGesture().onEnded {
-                                selectedStampId = nil
-                                showStampMagicMenu = false
-                            })
+                            .simultaneousGesture(
+                                SpatialTapGesture()
+                                    .onEnded { value in
+                                        let loc = value.location
+                                        if let hit = topmostStampHit(at: loc, layerOrder: layerOrder, stamps: placedStamps) {
+                                            selectedStampId = hit.id
+                                            showStampMagicMenu = true
+                                        } else {
+                                            selectedStampId = nil
+                                            showStampMagicMenu = false
+                                        }
+                                    }
+                            )
                             .background(GeometryReader { geo in
                                 Color.clear
                                     .onAppear {
@@ -2221,23 +2350,9 @@ struct DrawScreen: View {
                         .frame(width: canvasSize.width, height: canvasSize.height)
                         .allowsHitTesting(true)
                         // Selection indicator — snug bounding rect
-                        if let selId = selectedStampId, showStampMagicMenu,
-                           let selStamp = placedStamps.first(where: { $0.id == selId }) {
-                            Rectangle()
-                                .stroke(Color.black, lineWidth: 3)
-                                .overlay(Rectangle().stroke(Color.white, lineWidth: 1))
-                                .frame(width: selStamp.snugSize.width, height: selStamp.snugSize.height)
-                                .rotationEffect(.degrees(selStamp.rotation))
-                                .position(selStamp.position)
-                                .allowsHitTesting(false)
-                        }
+                        snugRectOverlay
                         // Magic menu renders on top of all stamps
-                        if showStampMagicMenu {
-                            if let id = selectedStampId,
-                               let stamp = placedStamps.first(where: { $0.id == id }) {
-                                stampMagicMenuView(id: id, stamp: stamp)
-                            }
-                        }
+                        activeMagicMenuView
                         // Window-level pinch + long press
                         WindowPinchView(
                             placedStamps: $placedStamps,
@@ -2247,24 +2362,23 @@ struct DrawScreen: View {
                             canvasOrigin: canvasOriginInWindow,
                             canvasSize: canvasSize,
                             selectedStamp: selectedStamp,
-                            onLongPress: { loc in
-                                let hits = placedStamps.filter { s in
-                                    let dx = loc.x - s.position.x
-                                    let dy = loc.y - s.position.y
-                                    return sqrt(dx*dx + dy*dy) <= s.size * 0.5 * 0.75
-                                }
-                                if hits.isEmpty {
-                                    pushUndoSnapshot()
-                                    if isCustomStampMode, let customId = UUID(uuidString: lastCustomStampIdString) {
-                                        var stamp = PlacedStamp(emoji: "📷", position: loc, size: 158)
-                                        stamp.customImageId = customId
-                                        appendStampToLayer(stamp)
-                                    } else {
-                                        appendStampToLayer(PlacedStamp(emoji: selectedStamp, position: loc, size: 126))
-                                    }
-                                }
-                            },
+                            onLongPress: { _ in },
                             isLongPressing: $isLongPressing,
+                            showLayersPanel: showLayersPanel,
+                            layerOrder: layerOrder,
+                            onLongPressStamp: { id in
+                                selectedStampId = id
+                                showStampMagicMenu = false
+                            },
+                            onStampTap: { id in
+                                selectedStampId = id
+                                showStampMagicMenu = true
+                            },
+                            onCanvasTap: {
+                                selectedStampId = nil
+                                showStampMagicMenu = false
+                            },
+                            onBeforeStampChange: { pushUndoSnapshot() },
                             onBackgroundPanBegan: canvasBackgroundImage != nil ? {
                                 undoStack.append(CanvasSnapshot(drawingLayers: drawingLayers, stamps: placedStamps, layerOrder: layerOrder, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset))
                                 redoStack = []
@@ -2715,6 +2829,12 @@ struct WindowPinchView: UIViewRepresentable {
     var selectedStamp: String
     var onLongPress: (CGPoint) -> Void
     @Binding var isLongPressing: Bool
+    var showLayersPanel: Bool = false
+    var layerOrder: [LayerEntry] = []
+    var onLongPressStamp: ((UUID) -> Void)? = nil
+    var onStampTap: ((UUID) -> Void)? = nil
+    var onCanvasTap: (() -> Void)? = nil
+    var onBeforeStampChange: (() -> Void)? = nil
     var onBackgroundPanBegan: (() -> Void)? = nil
     var onBackgroundPan: ((CGSize) -> Void)? = nil
 
@@ -2757,12 +2877,22 @@ struct WindowPinchView: UIViewRepresentable {
                     target: context.coordinator,
                     action: #selector(Coordinator.handleLongPress(_:))
                 )
-                longPress.minimumPressDuration = 0.6
-                longPress.allowableMovement = 10
+                longPress.minimumPressDuration = 0.4
+                longPress.allowableMovement = 30
                 longPress.cancelsTouchesInView = false
                 longPress.delegate = context.coordinator
                 window.addGestureRecognizer(longPress)
                 context.coordinator.longPressRecognizer = longPress
+
+                let tap = UITapGestureRecognizer(
+                    target: context.coordinator,
+                    action: #selector(Coordinator.handleWindowTap(_:))
+                )
+                tap.numberOfTapsRequired = 1
+                tap.cancelsTouchesInView = false
+                tap.delegate = context.coordinator
+                window.addGestureRecognizer(tap)
+                context.coordinator.tapRecognizer = tap
             }
         }
         return view
@@ -2789,6 +2919,9 @@ struct WindowPinchView: UIViewRepresentable {
             if let bgPan = coordinator.backgroundPanRecognizer {
                 window.removeGestureRecognizer(bgPan)
             }
+            if let tap = coordinator.tapRecognizer {
+                window.removeGestureRecognizer(tap)
+            }
         }
     }
 
@@ -2797,6 +2930,7 @@ struct WindowPinchView: UIViewRepresentable {
         var pinchRecognizer: UIPinchGestureRecognizer?
         var rotationRecognizer: UIRotationGestureRecognizer?
         var longPressRecognizer: UILongPressGestureRecognizer?
+        var tapRecognizer: UITapGestureRecognizer?
         var backgroundPanRecognizer: UIPanGestureRecognizer?
         private var lastPanTranslation: CGPoint = .zero
         var startCentroid: CGPoint = .zero
@@ -2808,7 +2942,8 @@ struct WindowPinchView: UIViewRepresentable {
         var startRotation: Double = 0
         var longPressStampId: UUID? = nil
         var longPressStartLocation: CGPoint? = nil
-        var emojiHitCache: [String: UIImage] = [:]
+        var longPressDragStartPos: CGPoint? = nil
+        var longPressDragStarted: Bool = false
 
         init(_ parent: WindowPinchView) { self.parent = parent }
 
@@ -2854,7 +2989,7 @@ struct WindowPinchView: UIViewRepresentable {
                 // The stamp that wins the most touch points becomes the target.
                 var votes: [UUID: Int] = [:]
                 for pt in touchPoints {
-                    if let winner = parent.placedStamps.reversed().first(where: { stampHit(stamp: $0, canvasPt: pt) }) {
+                    if let winner = topmostStampHit(at: pt, layerOrder: parent.layerOrder, stamps: parent.placedStamps) {
                         votes[winner.id, default: 0] += 1
                     }
                 }
@@ -2920,7 +3055,7 @@ struct WindowPinchView: UIViewRepresentable {
                 }
                 var votes: [UUID: Int] = [:]
                 for pt in touchPoints {
-                    if let winner = parent.placedStamps.reversed().first(where: { stampHit(stamp: $0, canvasPt: pt) }) {
+                    if let winner = topmostStampHit(at: pt, layerOrder: parent.layerOrder, stamps: parent.placedStamps) {
                         votes[winner.id, default: 0] += 1
                     }
                 }
@@ -2948,35 +3083,67 @@ struct WindowPinchView: UIViewRepresentable {
             }
         }
 
+        @objc func handleWindowTap(_ g: UITapGestureRecognizer) {
+            guard !parent.showLayersPanel else { return }
+            let windowPt = g.location(in: nil)
+            let canvasX = windowPt.x - parent.canvasOrigin.x
+            let canvasY = windowPt.y - parent.canvasOrigin.y
+            guard canvasX >= 0 && canvasY >= 0 &&
+                  canvasX <= parent.canvasSize.width &&
+                  canvasY <= parent.canvasSize.height else { return }
+            let loc = CGPoint(x: canvasX, y: canvasY)
+            if let hit = topmostStampHit(at: loc, layerOrder: parent.layerOrder, stamps: parent.placedStamps) {
+                parent.onStampTap?(hit.id)
+            } else {
+                parent.onCanvasTap?()
+            }
+        }
+
         @objc func handleLongPress(_ g: UILongPressGestureRecognizer) {
+            // Always clean up on end/cancel regardless of touch location
+            if g.state == .ended || g.state == .cancelled {
+                parent.isLongPressing = false
+                longPressStampId = nil
+                longPressStartLocation = nil
+                longPressDragStartPos = nil
+                longPressDragStarted = false
+                parent.onCanvasTap?()
+                return
+            }
+
             let windowPt = g.location(in: nil)
             let canvasX = windowPt.x - parent.canvasOrigin.x
             let canvasY = windowPt.y - parent.canvasOrigin.y
             let loc = CGPoint(x: canvasX, y: canvasY)
 
-            // Only handle if touch is within canvas bounds
             guard canvasX >= 0 && canvasY >= 0 &&
                   canvasX <= parent.canvasSize.width &&
-                  canvasY <= parent.canvasSize.height else {
-                return
-            }
+                  canvasY <= parent.canvasSize.height else { return }
 
             switch g.state {
             case .began:
+                let hit = topmostStampHit(at: loc, layerOrder: parent.layerOrder, stamps: parent.placedStamps)
+                guard let hitStamp = hit else { return }
                 parent.isLongPressing = true
-                parent.onLongPress(loc)
-                longPressStampId = parent.placedStamps.last?.id
+                longPressStampId = hitStamp.id
                 longPressStartLocation = loc
+                longPressDragStartPos = hitStamp.position
+                longPressDragStarted = false
+                parent.onLongPressStamp?(hitStamp.id)
 
             case .changed:
                 guard let id = longPressStampId,
-                      let idx = parent.placedStamps.firstIndex(where: { $0.id == id }) else { return }
-                parent.placedStamps[idx].position = loc
-
-            case .ended, .cancelled:
-                parent.isLongPressing = false
-                longPressStampId = nil
-                longPressStartLocation = nil
+                      let idx = parent.placedStamps.firstIndex(where: { $0.id == id }),
+                      let startLoc = longPressStartLocation,
+                      let startPos = longPressDragStartPos else { return }
+                if !longPressDragStarted {
+                    longPressDragStarted = true
+                    parent.onBeforeStampChange?()
+                }
+                parent.placedStamps[idx].position = CGPoint(
+                    x: startPos.x + loc.x - startLoc.x,
+                    y: startPos.y + loc.y - startLoc.y
+                )
 
             default: break
             }
@@ -3004,128 +3171,7 @@ struct WindowPinchView: UIViewRepresentable {
         /// Returns true if canvasPt lands on an opaque pixel of stamp,
         /// falling back to bounding box if no image is available.
         func stampHit(stamp: PlacedStamp, canvasPt: CGPoint) -> Bool {
-            // Quick bounding-box reject — use half diagonal of display rect
-            let halfDiag = hypot(stamp.displayWidth, stamp.displayHeight) / 2
-            let dist = hypot(stamp.position.x - canvasPt.x, stamp.position.y - canvasPt.y)
-            guard dist <= halfDiag else { return false }
-
-            // Transparent text stamps — hittable anywhere in bounding rect
-            if stamp.isTextStamp && stamp.textBgColor == .clear {
-                let dx = canvasPt.x - stamp.position.x
-                let dy = canvasPt.y - stamp.position.y
-                let angle = -stamp.rotation * .pi / 180
-                let lx = dx * cos(angle) - dy * sin(angle) + stamp.displayWidth / 2
-                let ly = dx * sin(angle) + dy * cos(angle) + stamp.displayHeight / 2
-                return lx >= 0 && ly >= 0 && lx <= stamp.displayWidth && ly <= stamp.displayHeight
-            }
-
-            // Get hit image
-            let hitImage: UIImage?
-            if let inline = stamp.inlineImage {
-                // Inline image (e.g. autograph badge, extracted subject) — use directly
-                hitImage = inline
-            } else if let customId = stamp.customImageId,
-               let customStamp = CustomStampManager.shared.stamps.first(where: { $0.id == customId }) {
-                hitImage = customStamp.image
-            } else if let text = stamp.stampText {
-                // Text stamp — render with background so whole box is hittable when bg set
-                let hasBg = stamp.textBgColor != .clear
-                let dw = stamp.displayWidth
-                let dh = stamp.displayHeight
-                let key = "txt_\(text.hashValue)_\(stamp.fontName ?? "system")_\(Int(dw))x\(Int(dh))_\(hasBg)"
-                if let cached = emojiHitCache[key] {
-                    hitImage = cached
-                } else {
-                    let fontSize = stamp.stampWidth > 0 ? stamp.size : fitTextFontSize(text: text, stampSize: dw, baseFontId: stamp.fontName)
-                    let fmt = UIGraphicsImageRendererFormat()
-                    fmt.opaque = hasBg
-                    let img = UIGraphicsImageRenderer(size: CGSize(width: dw, height: dh), format: fmt).image { _ in
-                        if hasBg {
-                            UIColor(stamp.textBgColor).setFill()
-                            UIBezierPath(roundedRect: CGRect(x: 0, y: 0, width: dw, height: dh),
-                                         cornerRadius: 8).fill()
-                        }
-                        let font = TextStampFont.font(forId: stamp.fontName, style: stamp.fontStyle).withSize(fontSize)
-                        let nsAlignment: NSTextAlignment = stamp.textAlignment == "left" ? .left : stamp.textAlignment == "right" ? .right : .center
-                        let para = NSMutableParagraphStyle()
-                        para.alignment = nsAlignment
-                        para.lineBreakMode = .byClipping
-                        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor(stamp.textColor), .paragraphStyle: para]
-                        let str = text as NSString
-                        let hPad: CGFloat = 10
-                        let vPad: CGFloat = 5
-                        let br = str.boundingRect(with: CGSize(width: dw - hPad * 2, height: dh - vPad * 2),
-                                                   options: [.usesLineFragmentOrigin, .usesFontLeading],
-                                                   attributes: attrs, context: nil)
-                        str.draw(with: CGRect(x: hPad, y: (dh - br.height) / 2,
-                                              width: dw - hPad * 2, height: br.height),
-                                 options: [.usesLineFragmentOrigin, .usesFontLeading],
-                                 attributes: attrs, context: nil)
-                    }
-                    emojiHitCache[key] = img
-                    hitImage = img
-                }
-            } else {
-                // Emoji stamp
-                let key = "\(stamp.emoji)_\(Int(stamp.size))"
-                if let cached = emojiHitCache[key] {
-                    hitImage = cached
-                } else {
-                    let s = stamp.size
-                    let format = UIGraphicsImageRendererFormat()
-                    format.opaque = false
-                    let img = UIGraphicsImageRenderer(size: CGSize(width: s, height: s), format: format).image { _ in
-                        let attrs: [NSAttributedString.Key: Any] = [.font: UIFont.systemFont(ofSize: s * 0.85)]
-                        let str = stamp.emoji as NSString
-                        let sz = str.size(withAttributes: attrs)
-                        str.draw(at: CGPoint(x: (s - sz.width) / 2, y: (s - sz.height) / 2), withAttributes: attrs)
-                    }
-                    emojiHitCache[key] = img
-                    hitImage = img
-                }
-            }
-
-            guard let img = hitImage, let cgImage = img.cgImage else { return true }
-
-            // Rotate touch point into stamp-local space
-            let dx = canvasPt.x - stamp.position.x
-            let dy = canvasPt.y - stamp.position.y
-            let angle = -stamp.rotation * .pi / 180
-            let ux = dx * cos(angle) - dy * sin(angle)
-            let uy = dx * sin(angle) + dy * cos(angle)
-            // lx/ly are in stamp-local coords (0,0) = top-left of stamp square
-            let lx = ux + stamp.displayWidth / 2
-            let ly = uy + stamp.displayHeight / 2
-
-            let imgW = CGFloat(cgImage.width)
-            let imgH = CGFloat(cgImage.height)
-            let dw2 = stamp.displayWidth
-            let dh2 = stamp.displayHeight
-
-            // Account for scaleAspectFit — image may not fill full stamp rect
-            let scale = min(dw2 / imgW, dh2 / imgH)
-            let fitW = imgW * scale
-            let fitH = imgH * scale
-            let offsetX = (dw2 - fitW) / 2
-            let offsetY = (dh2 - fitH) / 2
-
-            // Reject if touch is in letterbox area
-            guard lx >= offsetX, ly >= offsetY,
-                  lx < offsetX + fitW, ly < offsetY + fitH else { return false }
-
-            let px = Int((lx - offsetX) / fitW * imgW)
-            let pyUI = Int((ly - offsetY) / fitH * imgH)
-            let pyCG = Int(imgH) - pyUI - 1
-            guard px >= 0, pyCG >= 0, px < Int(imgW), pyCG < Int(imgH) else { return false }
-
-            var pixel = [UInt8](repeating: 0, count: 4)
-            guard let ctx = CGContext(data: &pixel, width: 1, height: 1,
-                                      bitsPerComponent: 8, bytesPerRow: 4,
-                                      space: CGColorSpaceCreateDeviceRGB(),
-                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
-            else { return true }
-            ctx.draw(cgImage, in: CGRect(x: -CGFloat(px), y: -CGFloat(pyCG), width: imgW, height: imgH))
-            return pixel[3] > 25
+            stampHitTest(stamp: stamp, canvasPt: canvasPt)
         }
 
         func rotationCentroid(_ g: UIRotationGestureRecognizer) -> CGPoint {

@@ -12,7 +12,7 @@ Eddie Brayman, 72, independent iOS developer, East Village NYC. 50+ years coding
 **App Store URL:** https://apps.apple.com/us/app/skadoodle/id6771497563  
 **Bundle ID:** maxsdad.skadoodle  
 **Firebase project:** snoodle-68bfc  
-**Current version at last session:** 2.1 build 10 (June 2026)
+**Current version at last session:** 2.1 build 12 (June 2026) — ship candidate
 **Last released to App Store:** 2.1 build 4 (June 2026)
 
 ---
@@ -238,6 +238,29 @@ Investigated and tested extensively. Pen lines and stamp positions are geometric
 - **Pulsing crosshair removed** — Selection now shown via snug bounding rect only. `PulsingCrosshair` struct is dead code (can be deleted).
 
 ---
+
+## New in v2.1 b11–b12
+
+### Stamp Interaction Overhaul
+- **Tap to select** — `SpatialTapGesture` (iOS 16+) as `.simultaneousGesture` on `DrawingCanvas` replaces the old window-level `UITapGestureRecognizer` (which SwiftUI's DragGesture was consuming). Tap fires `stampHitTest` (alpha-aware, rotation-aware) and sets `selectedStampId` + `showStampMagicMenu = true`.
+- **Long press to drag** — `UILongPressGestureRecognizer` (0.4s, 30pt allowable movement) highlights the stamp on `.began` (`isLongPressing = true`, `showStampMagicMenu = false`). `.changed` moves the stamp using delta from start position (not raw touch location — that was the 8pt jump bug). On `.ended`/`.cancelled`, all state clears and `selectedStampId` is nil. Long press works with the layers panel open.
+- **Draw-through non-selected stamps** — `StampContainerView.hitTest` returns nil for all non-selected stamps; selected stamp uses `bounds.contains` (solid bounding box) instead of per-pixel alpha test. Non-selected stamps still use alpha-aware `point(inside:)` for tap selection.
+- **Alpha-aware tap selection** — `stampHitTest` (module-level free function, shared by `SpatialTapGesture` and `Coordinator.stampHit`) does rotation math, letterbox rejection, and per-pixel alpha test. Tapping transparent area of front stamp correctly selects the stamp behind it. `_stampHitImageCache` is a module-level cache; `Coordinator.stampHit` is now a one-line delegate.
+- **Z-order-correct hit testing** — All stamp hit tests (tap, long press, pinch) now walk `layerOrder.reversed()` via module-level `topmostStampHit(at:layerOrder:stamps:)`. Previous code iterated `placedStamps.reversed()` (insertion order), which could select a behind stamp instead of the front one.
+- **Snug rect shown during long press** — `snugRectOverlay` shows when `showStampMagicMenu || isLongPressing`.
+- **State cleanup hardened** — `.ended`/`.cancelled` in `handleLongPress` runs before the canvas-bounds guard, so dragging off the canvas edge no longer leaves `isLongPressing` stuck.
+
+### Layers Panel
+- **Drag-to-reorder** — Up/down arrow buttons replaced with SwiftUI `List` + `.onMove` + `.environment(\.editMode, .constant(.active))`. Panel widened to 160pt.
+- **Scroll to selected chip** — `ScrollViewReader` wraps the List; `.onChange(of: selectedStampId)` scrolls selected chip to center.
+- **Selected chip inner border** — Dark gray inner stroke inside the yellow outer border for clearer selection state.
+- **Long press leak fixed** — `guard !parent.showLayersPanel` removed from long press handler (was blocking stamp long press when panel was open, and was only needed for the now-removed stamp auto-placement).
+- **Scroll position jump fixed** — Removed `.id(refreshId)` that was destroying/recreating the List on every stroke.
+
+### Lazy Drawing Layer Creation
+- **No empty layers ever** — `appendStampToLayer` no longer creates a blank drawing layer after placing a stamp. Layers only exist when they have content.
+- **`activeLayerLinesBinding`** — Custom `Binding<[DrawingLine]>` on `DrawScreen` evaluates `activeDrawingLayerIndex` at access time (not render time). Closures capture `@State` heap references so they always see current state.
+- **`onBeforeDraw` lazy creation** — Fires synchronously before the first stroke point. If `userSelectedLayerId == nil` and `layerOrder.last` is a `.stamp`, creates a new `DrawingLayer`, appends it to `drawingLayers` and `layerOrder`, and sets `userSelectedLayerId` to it. The binding's `set` then routes the stroke to the brand-new top layer.
 
 ## New in v2.1 b8–b10
 
