@@ -125,6 +125,7 @@ struct DrawingCanvas: View {
     var currentStamps: [PlacedStamp] = []
     var isLongPressing: Bool = false
     var stampResizeTargetId: UUID? = nil
+    var isStampSelected: Bool = false          // true when a stamp is selected; raises pencil movement threshold to suppress deselect-tap dots
     var renderLines: Bool = false              // true = self-renders (DoodleStampCreatorView); false = external layer canvases render
     var onBeforeDraw: (() -> Void)? = nil      // called once at stroke start; caller should push undo snapshot
     var onEraserCommitted: ((DrawingLine) -> Void)? = nil  // called when an eraser stroke lands; caller may redirect to another layer
@@ -156,8 +157,13 @@ struct DrawingCanvas: View {
                 }
                 let point = value.location
                 let moved = hypot(value.translation.width, value.translation.height)
+                // When a stamp was selected at stroke start, require 12pt before drawing
+                // begins — same guard as iPad PencilTouchView — so a tap that deselects
+                // a stamp doesn't leave a dot mark (pencil on iPhone can move ~3–12pt
+                // and still register as a valid tap).
+                let drawThreshold: CGFloat = isStampSelected ? 12 : 3
                 if currentLine == nil {
-                    if moved < 3 { return }
+                    if moved < drawThreshold { return }
                     onBeforeDraw?()
                     currentLine = DrawingLine(
                         points: [point],
@@ -187,6 +193,7 @@ struct DrawingCanvas: View {
         .overlay(isIPad ? AnyView(PencilInputView(
                 isLongPressing: isLongPressing,
                 stampResizeTargetId: stampResizeTargetId,
+                isStampSelected: isStampSelected,
                 onBegan: { point, pressure, isPencil in
                     guard !isLongPressing && stampResizeTargetId == nil else { return }
                     lastPoint = point
@@ -359,6 +366,7 @@ struct TwoFingerPanView: UIViewRepresentable {
 struct PencilInputView: UIViewRepresentable {
     var isLongPressing: Bool
     var stampResizeTargetId: UUID?
+    var isStampSelected: Bool = false
     var onBegan: (CGPoint, CGFloat, Bool) -> Void
     var onMoved: (CGPoint, CGFloat, Bool) -> Void
     var onEnded: () -> Void
@@ -369,6 +377,7 @@ struct PencilInputView: UIViewRepresentable {
         view.backgroundColor = .clear
         view.isUserInteractionEnabled = true
         view.isMultipleTouchEnabled = true
+        view.isStampSelected = isStampSelected
         view.onBegan = onBegan
         view.onMoved = onMoved
         view.onEnded = onEnded
@@ -385,6 +394,7 @@ struct PencilInputView: UIViewRepresentable {
 
     func updateUIView(_ uiView: UIView, context: Context) {
         guard let view = uiView as? PencilTouchView else { return }
+        view.isStampSelected = isStampSelected
         view.onBegan = onBegan
         view.onMoved = onMoved
         view.onEnded = onEnded
@@ -393,6 +403,7 @@ struct PencilInputView: UIViewRepresentable {
 }
 
 class PencilTouchView: UIView {
+    var isStampSelected: Bool = false
     var onBegan: ((CGPoint, CGFloat, Bool) -> Void)?
     var onMoved: ((CGPoint, CGFloat, Bool) -> Void)?
     var onEnded: (() -> Void)?
@@ -400,6 +411,14 @@ class PencilTouchView: UIView {
 
     private var activeTouch: UITouch? = nil
     private var lastPanTranslation: CGPoint = .zero
+    // Pencil-tap deselect guard: if a stamp was selected when touch began, defer
+    // onBegan and suppress onMoved until the pencil moves ≥12pt. A pencil tap
+    // that deselects a stamp can move up to ~12pt (still a valid iOS tap), which
+    // would cross the 3pt draw threshold and leave a dot. Deferring onBegan means
+    // no undo snapshot is pushed and no lastPoint is set for suppressed taps.
+    private var touchBeganWithStampSelected: Bool = false
+    private var touchBeginPoint: CGPoint = .zero
+    private var deferredBeganArgs: (point: CGPoint, pressure: CGFloat, isPencil: Bool)? = nil
 
     @objc func handleTwoFingerPan(_ g: UIPanGestureRecognizer) {
         switch g.state {
@@ -434,12 +453,24 @@ class PencilTouchView: UIView {
         guard let touch = touches.first(where: { $0.type == .direct || $0.type == .pencil || $0.type == .stylus }) else { return }
         activeTouch = touch
         let point = activeTouch!.location(in: self)
+        // Record whether a stamp is currently selected so touchesMoved can apply a
+        // higher movement threshold. A pencil "deselect tap" can move ~3–12pt (still
+        // recognized as a tap by iOS) which crosses the 3pt draw threshold and leaves
+        // a dot. Requiring 12pt when stamp was selected prevents this.
+        let isPencilTouch = activeTouch!.type == .pencil || activeTouch!.type == .stylus
+        touchBeganWithStampSelected = isPencilTouch && isStampSelected
+        touchBeginPoint = point
         // Pencil: use real pressure. Finger: fixed 0.5 (no pressure sensor)
         let pressure: CGFloat = activeTouch!.type == .pencil || activeTouch!.type == .stylus
             ? (activeTouch!.force > 0 ? activeTouch!.force / activeTouch!.maximumPossibleForce : 0.5)
             : 0.5
-        let isPencilTouch = activeTouch!.type == .pencil || activeTouch!.type == .stylus
-        onBegan?(point, pressure, isPencilTouch)
+        if touchBeganWithStampSelected {
+            // Defer: don't push undo snapshot or set lastPoint until we know this
+            // is a real drag (≥12pt), not a deselect tap.
+            deferredBeganArgs = (point, pressure, isPencilTouch)
+        } else {
+            onBegan?(point, pressure, isPencilTouch)
+        }
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -447,6 +478,19 @@ class PencilTouchView: UIView {
         let allTouches = event?.coalescedTouches(for: active) ?? [active]
         for touch in allTouches {
             let point = touch.location(in: self)
+            // If touch began while a stamp was selected, suppress drawing until the
+            // pencil has moved far enough that it's clearly a drag (not a deselect tap).
+            if touchBeganWithStampSelected {
+                let dist = hypot(point.x - touchBeginPoint.x, point.y - touchBeginPoint.y)
+                if dist < 12 { continue }
+                // Threshold crossed — real drag confirmed. Fire deferred onBegan so
+                // lastPoint and undo snapshot are set before the first onMoved call.
+                touchBeganWithStampSelected = false
+                if let args = deferredBeganArgs {
+                    onBegan?(args.point, args.pressure, args.isPencil)
+                    deferredBeganArgs = nil
+                }
+            }
             // Pencil: use real pressure. Finger: fixed 0.5 (no pressure sensor)
             let pressure: CGFloat = touch.type == .pencil || touch.type == .stylus
                 ? (touch.force > 0 ? touch.force / touch.maximumPossibleForce : 0.5)
@@ -459,11 +503,15 @@ class PencilTouchView: UIView {
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let active = activeTouch, touches.contains(active) else { return }
         activeTouch = nil
+        touchBeganWithStampSelected = false
+        deferredBeganArgs = nil
         onEnded?()
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         activeTouch = nil
+        touchBeganWithStampSelected = false
+        deferredBeganArgs = nil
         onEnded?()
     }
 }

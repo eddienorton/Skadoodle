@@ -1424,7 +1424,7 @@ struct DrawScreen: View {
                         withAnimation(.easeInOut(duration: 0.2)) { showLayersPanel = false }
                     } label: {
                         Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 15))
+                            .font(.system(size: 22))
                             .foregroundColor(.secondary)
                     }
                 }
@@ -2271,6 +2271,7 @@ struct DrawScreen: View {
                             currentStamps: placedStamps,
                             isLongPressing: isLongPressing,
                             stampResizeTargetId: stampResizeTargetId,
+                            isStampSelected: selectedStampId != nil,
                             onBeforeDraw: {
                                 pushUndoSnapshot()
                                 // Lazy layer creation: if topmost is a stamp (or no drawing layer
@@ -2830,6 +2831,7 @@ struct WindowPinchView: UIViewRepresentable {
     var onLongPress: (CGPoint) -> Void
     @Binding var isLongPressing: Bool
     var showLayersPanel: Bool = false
+    var suppressCanvasTap: Bool = false
     var layerOrder: [LayerEntry] = []
     var onLongPressStamp: ((UUID) -> Void)? = nil
     var onStampTap: ((UUID) -> Void)? = nil
@@ -2951,8 +2953,25 @@ struct WindowPinchView: UIViewRepresentable {
 
         // Pencil touches go straight to DrawingCanvas — never intercepted at window level.
         // Window-level recognizers (pinch, rotation, pan, long press) are finger-only.
+        // For the tap recognizer: also reject taps that land on interactive UIKit/SwiftUI
+        // elements (picker cells, buttons, scroll views) so they never reach handleWindowTap.
+        // This prevents picker taps from deselecting a just-placed stamp — no SwiftUI state
+        // or render-cycle timing involved; shouldReceive fires before the gesture begins.
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-            return touch.type != .pencil && touch.type != .stylus
+            guard touch.type != .pencil && touch.type != .stylus else { return false }
+            if gestureRecognizer === tapRecognizer {
+                var view: UIView? = touch.view
+                while let v = view {
+                    let name = String(describing: type(of: v))
+                    if name.contains("Button") || name.contains("Control") ||
+                       name.contains("Collection") || name.contains("ScrollView") ||
+                       name.contains("List") {
+                        return false
+                    }
+                    view = v.superview
+                }
+            }
+            return true
         }
 
         @objc func handleBackgroundPan(_ g: UIPanGestureRecognizer) {
@@ -3095,19 +3114,24 @@ struct WindowPinchView: UIViewRepresentable {
             if let hit = topmostStampHit(at: loc, layerOrder: parent.layerOrder, stamps: parent.placedStamps) {
                 parent.onStampTap?(hit.id)
             } else {
+                guard !parent.suppressCanvasTap else { return }
                 parent.onCanvasTap?()
             }
         }
 
         @objc func handleLongPress(_ g: UILongPressGestureRecognizer) {
-            // Always clean up on end/cancel regardless of touch location
+            // Always clean up on end/cancel regardless of touch location.
+            // Only call onCanvasTap if a stamp drag was actually in progress —
+            // prevents long-pressing UI elements (e.g. TweakRepeatButton) from
+            // dismissing the magic menu when the press is released.
             if g.state == .ended || g.state == .cancelled {
+                let wasDraggingStamp = longPressStampId != nil
                 parent.isLongPressing = false
                 longPressStampId = nil
                 longPressStartLocation = nil
                 longPressDragStartPos = nil
                 longPressDragStarted = false
-                parent.onCanvasTap?()
+                if wasDraggingStamp { parent.onCanvasTap?() }
                 return
             }
 

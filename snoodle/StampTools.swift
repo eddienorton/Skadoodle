@@ -1364,17 +1364,16 @@ struct StampMagicMenu: View {
         .frame(width: 300)
         // Apply the drag offset with .offset() — purely local @State, no binding writes
         // during the gesture, so no parent re-render occurs mid-drag (which was the flicker cause).
+        // .animation(.none) on the offset itself is the final backstop: even if a surrounding
+        // view injects an animation transaction, the offset change is always instant.
         .offset(x: accDrag.width + liveDrag.width, y: accDrag.height + liveDrag.height)
+        .animation(.none, value: liveDrag)
+        .animation(.none, value: accDrag)
         // Restore saved position when the panel appears.
-        // withAnimation(.none) prevents any inherited animation context (e.g. from the
-        // tap that opened the panel) from animating the initial offset into place.
         .onAppear { withAnimation(.none) { accDrag = initialOffset } }
         // Drag anywhere on the panel that isn't a button (buttons consume their own taps).
         // Both the normal menu and precision tweak share the same accDrag so switching
         // between them keeps the panel in place.
-        // withAnimation(.none) in gesture callbacks ensures live drag updates are
-        // always instant regardless of any parent animation context — prevents the
-        // "first drag frozen, jumps on release" bug caused by animation inheritance.
         .gesture(
             DragGesture(minimumDistance: 4)
                 .onChanged { value in withAnimation(.none) { liveDrag = value.translation } }

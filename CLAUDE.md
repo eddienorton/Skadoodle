@@ -12,8 +12,22 @@ Eddie Brayman, 72, independent iOS developer, East Village NYC. 50+ years coding
 **App Store URL:** https://apps.apple.com/us/app/skadoodle/id6771497563  
 **Bundle ID:** maxsdad.skadoodle  
 **Firebase project:** snoodle-68bfc  
-**Current version at last session:** 2.1 build 12 (June 2026) — ship candidate
+**Current version at last session:** 2.1 build 13 (June 2026) — ship candidate
 **Last released to App Store:** 2.1 build 4 (June 2026)
+
+---
+
+## New in v2.1 b13 (continued — same build, additional fixes)
+
+### Fixes
+- **Magic menu invisible in DoodleStampCreatorView on iPad** — root cause: `doodleMenuOffsetX/Y` AppStorage values were persisted from a previous session where the user had dragged the panel. On a larger iPad canvas, the restored offset pushed the menu 161pt below the bottom edge. Fix: `initialOffset: .zero` in DoodleStampCreatorView's StampMagicMenu call — menu always opens at default position in the doodle canvas (still draggable per-session).
+- **Tapping transparent area around selected stamp didn't deselect** — `StampContainerView.hitTest` used `bounds.contains` (full bounding box) for the selected stamp, swallowing taps in transparent padding. Fix: use snug rect as the hit area when a stamp is selected, matching the visible selection indicator exactly. Outside snug rect → touch falls through to canvas → deselects. Non-selected stamps unchanged (still alpha-aware via `point(inside:)`).
+- **TweakRepeatButton long-press dismissing magic menu** — window-level `UILongPressGestureRecognizer` (0.4s) fired when holding a tweak button. On `.ended` it unconditionally called `onCanvasTap?()` → deselect. Fix: `handleLongPress` now only calls `onCanvasTap` if `longPressStampId != nil` (i.e., a stamp drag was actually in progress). Holding a UI control no longer dismisses the panel.
+- **Layers panel close button enlarged** — bumped from 15pt to 22pt for easier tapping.
+
+### Architecture note
+- `shouldReceive touch` in `WindowPinchView.Coordinator` now also walks the view hierarchy for the tap recognizer, rejecting taps on Button/Control/Collection/ScrollView class names. Added during iPad magic menu debugging; ultimately not the root fix but harmless. Revert first if unexpected tap behavior appears.
+- `onCanvasTap: nil` in DoodleStampCreatorView's WindowPinchView call — deselect is handled solely by `SpatialTapGesture` in the doodle canvas (correct; picker taps don't reach SpatialTapGesture since picker is on top).
 
 ---
 
@@ -261,6 +275,19 @@ Investigated and tested extensively. Pen lines and stamp positions are geometric
 - **No empty layers ever** — `appendStampToLayer` no longer creates a blank drawing layer after placing a stamp. Layers only exist when they have content.
 - **`activeLayerLinesBinding`** — Custom `Binding<[DrawingLine]>` on `DrawScreen` evaluates `activeDrawingLayerIndex` at access time (not render time). Closures capture `@State` heap references so they always see current state.
 - **`onBeforeDraw` lazy creation** — Fires synchronously before the first stroke point. If `userSelectedLayerId == nil` and `layerOrder.last` is a `.stamp`, creates a new `DrawingLayer`, appends it to `drawingLayers` and `layerOrder`, and sets `userSelectedLayerId` to it. The binding's `set` then routes the stroke to the brand-new top layer.
+
+## New in v2.1 b13
+
+### New Feature: Drawing Layer Toggle (Doodle Stamp Canvas)
+- **`drawingOnTop` toggle** — `@AppStorage("doodleDrawingOnTop") private var drawingOnTop: Bool = true` persists preference across sessions. Button in Row 1 toolbar (between eraser and color palette) uses `square.2.layers.3d` SF symbol; blue when stamps are on top, gray when drawing is on top (default).
+- **ZStack conditional ordering** — `if drawingOnTop { ForEach(StampRenderView) }` before `DrawingCanvas`, `if !drawingOnTop { ForEach(StampRenderView) }` after. No duplication of `DrawingCanvas` code; rendering and gestures unchanged regardless of mode.
+- **`DrawingCanvas` extracted to `@ViewBuilder`** — `doodleDrawingCanvas()` function on `DoodleStampCreatorView` pulls the canvas + all modifiers out of the deeply-nested ZStack closure to fix Swift compiler type-check timeout errors.
+
+### Fixes (b13)
+- **Pencil deselect-tap leaving a dot mark** — When stamp is selected and pencil tap deselects it, the tap (which can move 3–12pt) was crossing the draw threshold and leaving a dot. Fix: `PencilTouchView` defers `onBegan` when `touchBeganWithStampSelected`; fires only if movement ≥ 12pt. iPhone `DragGesture` threshold raised to 12pt when stamp selected. (`DrawingEngine.swift`)
+- **Deselect-then-reselect flicker on transparent-pixel tap** — Tapping inside a stamp's bounding box on a transparent pixel: `StampContainerView.canvasTap` fired immediately (deselecting), then `StampItemUIView.singleTap` fired ~350ms later (after double-tap-fail wait) and re-selected because `selectedStampId` was already nil. Fix: `handleSingleTap` now guards with `point(inside: pt, with: nil)` before calling `onTap()` — transparent-pixel taps skip `onTap` entirely. (`StampCanvas.swift`)
+- **Magic panel not opening in doodle stamp canvas** — `WindowPinchView` in `DoodleStampCreatorView` was missing `onStampTap` callback (nil). `handleWindowTap` found a hit → called nil → nothing; if it fired after `SpatialTapGesture` had already selected, the else branch called `onCanvasTap` and deselected. Fix: added `onStampTap: { id in selectedStampId = id; showStampMagicMenu = true }` to match `DrawScreen`. (`CustomStampViews.swift`)
+- **Compiler type-check timeouts in `CustomStampViews.swift`** — Three separate expressions were too complex for Swift to check inside deeply nested closures: (1) `PlacedStamp(...)` with nested `CGPoint` → hoisted `dupePosX/Y` as explicit `CGFloat` locals; (2) `DrawingCanvas` + modifiers chain → extracted to `doodleDrawingCanvas()` `@ViewBuilder`.
 
 ## New in v2.1 b8–b10
 

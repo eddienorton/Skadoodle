@@ -215,7 +215,14 @@ class StampItemUIView: UIView, UIGestureRecognizerDelegate {
         }
     }
 
-    @objc private func handleSingleTap(_ g: UITapGestureRecognizer) { onTap() }
+    @objc private func handleSingleTap(_ g: UITapGestureRecognizer) {
+        // Guard against transparent-pixel taps. Without this, tapping transparent area inside
+        // the bounding box causes a race: canvasTap deselects immediately, then this fires
+        // ~350ms later (after double-tap-fail wait) and reselects because selectedStampId is nil.
+        let pt = g.location(in: self)
+        guard point(inside: pt, with: nil) else { return }
+        onTap()
+    }
     @objc private func handleDoubleTap(_ g: UITapGestureRecognizer) { onDoubleTap() }
     @objc private func handleTwoFingerTap(_ g: UITapGestureRecognizer) {
         guard !recentlyPinched else { return }
@@ -265,12 +272,24 @@ class StampContainerView: UIView {
 
     // Only the selected (highlighted) stamp captures touches — so it can be dragged.
     // All other touches pass through to the drawing canvas.
-    // When selected, the full bounding box is solid hit area (ignores alpha).
+    // Uses the snug rect as the hit area when a stamp is selected — matches exactly
+    // what the user sees on screen. Tapping outside the snug rect (transparent padding)
+    // returns nil so the touch falls through to the canvas and deselects.
+    // Non-selected stamps use alpha-aware point(inside:) in the else branch above.
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         guard let selId = selectedStampId,
               let stampView = itemViews[selId] else { return nil }
         let localPt = stampView.convert(point, from: self)
-        return stampView.bounds.contains(localPt) ? stampView : nil
+        let snug = stampView.stamp.snugSize
+        let dw = stampView.bounds.width
+        let dh = stampView.bounds.height
+        let snugRect = CGRect(
+            x: (dw - snug.width) / 2,
+            y: (dh - snug.height) / 2,
+            width: snug.width,
+            height: snug.height
+        )
+        return snugRect.contains(localPt) ? stampView : nil
     }
 
     func syncStamps(_ stamps: [PlacedStamp], draggingId: UUID?, rotatingId: UUID?, imageProvider: (PlacedStamp) -> UIImage?) {

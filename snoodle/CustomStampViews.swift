@@ -226,6 +226,48 @@ struct CameraView: UIViewControllerRepresentable {
 
 // MARK: - Doodle Stamp Creator
 
+// MARK: - UIKit canvas origin reader
+// SwiftUI's .global coordinate space inside a .sheet on iPad is sheet-relative,
+// not window-relative. WindowPinchView attaches gesture recognizers to the UIWindow
+// and uses window coordinates, so canvasOriginInWindow must match.
+// This UIViewRepresentable uses UIKit (uiView.convert(.zero, to: window)) which
+// always returns real window coordinates regardless of sheet presentation.
+private class _OriginCapturingView: UIView {
+    var onOriginCaptured: ((CGPoint) -> Void)?
+    private var lastReportedOrigin: CGPoint = CGPoint(x: -1, y: -1)
+    private func reportOrigin() {
+        guard let window = window else { return }
+        let o = convert(CGPoint.zero, to: window)
+        guard o != lastReportedOrigin else { return }   // deduplicate — no re-render if unchanged
+        lastReportedOrigin = o
+        onOriginCaptured?(o)
+    }
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        DispatchQueue.main.async { self.reportOrigin() }
+    }
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        reportOrigin()
+    }
+}
+private struct CanvasWindowOriginReader: UIViewRepresentable {
+    var onOriginCaptured: (CGPoint) -> Void
+    func makeUIView(context: Context) -> _OriginCapturingView {
+        let v = _OriginCapturingView()
+        v.backgroundColor = .clear
+        v.isUserInteractionEnabled = false
+        v.onOriginCaptured = onOriginCaptured
+        return v
+    }
+    func updateUIView(_ uiView: _OriginCapturingView, context: Context) {
+        // Only update the callback — do NOT dispatch async here.
+        // Dispatching async sets state → re-render → updateUIView → dispatch → infinite loop.
+        // Origin is captured by layoutSubviews/didMoveToWindow instead.
+        uiView.onOriginCaptured = onOriginCaptured
+    }
+}
+
 struct DoodleStampCreatorView: View {
     let onDone: (Bool) -> Void   // true = stamps were added, false = cancelled
 
@@ -279,6 +321,7 @@ struct DoodleStampCreatorView: View {
     @State private var stampRotatingId: UUID? = nil
     @State private var canvasOriginInWindow: CGPoint = .zero
     @State private var isLongPressing: Bool = false
+    @State private var suppressCanvasTap: Bool = false
 
     // Text stamps
     @State private var showTextComposer: Bool = false
@@ -287,6 +330,9 @@ struct DoodleStampCreatorView: View {
     // Tracing background (shown on canvas for reference; never included in export)
     @State private var tracingImage: UIImage? = nil
     @State private var tracingPickerItem: PhotosPickerItem? = nil
+
+    // Layer order toggle: true = drawing on top of stamps (default), false = stamps on top
+    @AppStorage("doodleDrawingOnTop") private var drawingOnTop: Bool = true
 
     // UI
     @State private var showThicknessPicker: Bool = false
@@ -335,6 +381,54 @@ struct DoodleStampCreatorView: View {
         )
     }
 
+    // MARK: - Drawing canvas (extracted to avoid compiler type-check timeout)
+    @ViewBuilder
+    func doodleDrawingCanvas() -> some View {
+        DrawingCanvas(
+            lines: $lines,
+            currentColor: currentColor,
+            lineWidth: $lineWidth,
+            isEraser: $isEraser,
+            canvasColor: .clear,
+            penType: currentPenType,
+            colorB: dualToneColorB,
+            currentStamps: placedStamps,
+            isLongPressing: isLongPressing,
+            stampResizeTargetId: stampResizeTargetId,
+            isStampSelected: selectedStampId != nil,
+            renderLines: true,
+            onBeforeDraw: { undoStack.append(makeDoodleSnapshot()); redoStack = [] },
+            currentLine: $doodleCurrentLine
+        )
+        .contentShape(Rectangle())
+        .allowsHitTesting(!isLongPressing)
+        .simultaneousGesture(
+            SpatialTapGesture()
+                .onEnded { value in
+                    let loc = value.location
+                    if let hit = placedStamps.reversed().first(where: { stampHitTest(stamp: $0, canvasPt: loc) }) {
+                        selectedStampId = hit.id
+                        showStampMagicMenu = true
+                    } else {
+                        guard !suppressCanvasTap else { return }
+                        selectedStampId = nil
+                        showStampMagicMenu = false
+                    }
+                }
+        )
+        .background(CanvasWindowOriginReader { origin in
+            canvasOriginInWindow = origin
+        })
+    }
+
+    // MARK: - Suppress canvas-tap deselect briefly after placement
+    // The picker tap fires the window-level UITapGestureRecognizer which calls onCanvasTap,
+    // overwriting showStampMagicMenu=true that was just set by placement. Suppress for 0.6s.
+    private func suppressTapBriefly() {
+        suppressCanvasTap = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { suppressCanvasTap = false }
+    }
+
     // MARK: - Auto-place stamp at canvas center
     func autoPlaceStamp() {
         let center = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
@@ -351,6 +445,7 @@ struct DoodleStampCreatorView: View {
             selectedStampId = stamp.id
         }
         showStampMagicMenu = true
+        suppressTapBriefly()
     }
 
     // MARK: - Place text stamp
@@ -371,6 +466,7 @@ struct DoodleStampCreatorView: View {
         placedStamps.append(stamp)
         selectedStampId = stamp.id
         showStampMagicMenu = true
+        suppressTapBriefly()
     }
 
     // MARK: - Measure text stamp natural size
@@ -404,57 +500,45 @@ struct DoodleStampCreatorView: View {
 
                     // ── Canvas ──────────────────────────────────────────────
                     GeometryReader { geo in
-                        Color.white
-                        // Tracing reference layer — faint B&W, never composited into export
-                        if let tracing = tracingImage {
-                            Image(uiImage: tracing)
-                                .resizable()
-                                .scaledToFill()
-                                .frame(width: geo.size.width, height: geo.size.height)
-                                .clipped()
-                                .grayscale(1.0)
-                                .opacity(0.25)
-                                .allowsHitTesting(false)
-                        }
-                        DrawingCanvas(
-                            lines: $lines,
-                            currentColor: isEraser ? (tracingImage != nil ? .clear : .white) : currentColor,
-                            lineWidth: $lineWidth,
-                            isEraser: $isEraser,
-                            canvasColor: tracingImage != nil ? .clear : .white,
-                            penType: currentPenType,
-                            colorB: dualToneColorB,
-                            currentStamps: placedStamps,
-                            isLongPressing: isLongPressing,
-                            stampResizeTargetId: stampResizeTargetId,
-                            renderLines: true,
-                            onBeforeDraw: { undoStack.append(makeDoodleSnapshot()); redoStack = [] },
-                            currentLine: $doodleCurrentLine
-                        )
-                        .contentShape(Rectangle())
-                        .allowsHitTesting(!isLongPressing)
-                        .simultaneousGesture(TapGesture().onEnded {
-                            selectedStampId = nil
-                            showStampMagicMenu = false
-                        })
-                        .background(GeometryReader { geo2 in
-                            Color.clear
-                                .onAppear {
-                                    let frame = geo2.frame(in: .global)
-                                    canvasOriginInWindow = CGPoint(x: frame.minX, y: frame.minY)
-                                }
-                                .onChange(of: geo2.frame(in: .global)) { _, frame in
-                                    canvasOriginInWindow = CGPoint(x: frame.minX, y: frame.minY)
-                                }
-                        })
-                        .onAppear {
-                            canvasSize = geo.size
-                            lineWidth = CGFloat(savedLineWidth)
-                        }
-                        .onChange(of: geo.size) { _, newSize in canvasSize = newSize }
-                        .onChange(of: lineWidth) { _, new in savedLineWidth = Double(new) }
+                        ZStack(alignment: .topLeading) {
+                            Color.white
 
-                        ZStack {
+                            // Tracing reference layer — faint B&W, never composited into export
+                            if let tracing = tracingImage {
+                                Image(uiImage: tracing)
+                                    .resizable()
+                                    .scaledToFill()
+                                    .frame(width: geo.size.width, height: geo.size.height)
+                                    .clipped()
+                                    .grayscale(1.0)
+                                    .opacity(0.25)
+                                    .allowsHitTesting(false)
+                            }
+
+                            // Stamps layer — position relative to drawing is controlled by drawingOnTop toggle
+                            if drawingOnTop {
+                                ForEach(placedStamps) { stamp in
+                                    StampRenderView(stamp: stamp)
+                                }
+                            }
+
+                            // Drawing canvas — extracted to @ViewBuilder to avoid compiler type-check timeout
+                            doodleDrawingCanvas()
+                            .onAppear {
+                                canvasSize = geo.size
+                                lineWidth = CGFloat(savedLineWidth)
+                            }
+                            .onChange(of: geo.size) { _, newSize in canvasSize = newSize }
+                            .onChange(of: lineWidth) { _, new in savedLineWidth = Double(new) }
+
+                            // Stamps on top of drawing when drawingOnTop is false
+                            if !drawingOnTop {
+                                ForEach(placedStamps) { stamp in
+                                    StampRenderView(stamp: stamp)
+                                }
+                            }
+
+                            // UIKit stamp gesture layer (mostly pass-through via StampContainerView.hitTest)
                             StampCanvasView(
                                 stamps: $placedStamps,
                                 selectedStampId: $selectedStampId,
@@ -467,107 +551,20 @@ struct DoodleStampCreatorView: View {
                             .frame(width: canvasSize.width, height: canvasSize.height)
                             .allowsHitTesting(true)
 
-                            if let selId = selectedStampId, showStampMagicMenu,
+                            // Snug rect selection indicator (mirrors DrawScreen's snugRectOverlay)
+                            if (showStampMagicMenu || isLongPressing),
+                               let selId = selectedStampId,
                                let selStamp = placedStamps.first(where: { $0.id == selId }) {
-                                PulsingCrosshair()
-                                    .allowsHitTesting(false)
+                                Rectangle()
+                                    .stroke(Color.black, lineWidth: 3)
+                                    .overlay(Rectangle().stroke(Color.white, lineWidth: 1))
+                                    .frame(width: selStamp.snugSize.width, height: selStamp.snugSize.height)
+                                    .rotationEffect(.degrees(selStamp.rotation))
                                     .position(selStamp.position)
+                                    .allowsHitTesting(false)
                             }
 
-                            if showStampMagicMenu, let id = selectedStampId,
-                               let stamp = placedStamps.first(where: { $0.id == id }) {
-                                StampMagicMenu(
-                                    stamp: stamp,
-                                    canvasSize: canvasSize,
-                                    onDismiss: {
-                                        showStampMagicMenu = false
-                                        selectedStampId = nil
-                                    },
-                                    onTransform: { transform in
-                                        undoStack.append(makeDoodleSnapshot())
-                                        redoStack = []
-                                        if let idx = placedStamps.firstIndex(where: { $0.id == id }) {
-                                            switch transform {
-                                            case .flipH: placedStamps[idx].flipX.toggle()
-                                            case .flipV: placedStamps[idx].flipY.toggle()
-                                            case .rotate90: placedStamps[idx].rotation = (placedStamps[idx].rotation + 90).truncatingRemainder(dividingBy: 360)
-                                            }
-                                        }
-                                        showStampMagicMenu = false
-                                    },
-                                    onDelete: {
-                                        undoStack.append(makeDoodleSnapshot())
-                                        redoStack = []
-                                        placedStamps.removeAll { $0.id == id }
-                                        showStampMagicMenu = false
-                                        selectedStampId = nil
-                                    },
-                                    onDupe: {
-                                        undoStack.append(makeDoodleSnapshot())
-                                        redoStack = []
-                                        if let idx = placedStamps.firstIndex(where: { $0.id == id }) {
-                                            var dupe = placedStamps[idx]
-                                            dupe = PlacedStamp(
-                                                emoji: dupe.emoji,
-                                                position: CGPoint(
-                                                    x: min(dupe.position.x + dupe.size * 0.6, canvasSize.width - dupe.size / 2),
-                                                    y: min(dupe.position.y + dupe.size * 0.6, canvasSize.height - dupe.size / 2)
-                                                ),
-                                                size: dupe.size,
-                                                rotation: dupe.rotation,
-                                                opacity: dupe.opacity,
-                                                flipX: dupe.flipX,
-                                                flipY: dupe.flipY,
-                                                flipStep: dupe.flipStep,
-                                                customImageId: dupe.customImageId,
-                                                stampText: dupe.stampText,
-                                                fontName: dupe.fontName,
-                                                textColor: dupe.textColor,
-                                                textBgColor: dupe.textBgColor,
-                                                stampWidth: dupe.stampWidth,
-                                                stampHeight: dupe.stampHeight
-                                            )
-                                            placedStamps.append(dupe)
-                                            selectedStampId = dupe.id
-                                        }
-                                        showStampMagicMenu = true
-                                    },
-                                    onEdit: {
-                                        editingStampId = id
-                                        showStampMagicMenu = false
-                                        showTextComposer = true
-                                    },
-                                    onNudge: { delta in
-                                        guard let idx = placedStamps.firstIndex(where: { $0.id == id }) else { return }
-                                        placedStamps[idx].position.x = max(0, min(canvasSize.width,  placedStamps[idx].position.x + delta.width))
-                                        placedStamps[idx].position.y = max(0, min(canvasSize.height, placedStamps[idx].position.y + delta.height))
-                                    },
-                                    onResizeBy: { delta in
-                                        guard let idx = placedStamps.firstIndex(where: { $0.id == id }) else { return }
-                                        let oldSize = max(placedStamps[idx].size, 1)
-                                        placedStamps[idx].size = max(20, placedStamps[idx].size + delta)
-                                        let ratio = placedStamps[idx].size / oldSize
-                                        if placedStamps[idx].stampWidth  > 0 { placedStamps[idx].stampWidth  *= ratio }
-                                        if placedStamps[idx].stampHeight > 0 { placedStamps[idx].stampHeight *= ratio }
-                                    },
-                                    onRotateBy: { degrees in
-                                        guard let idx = placedStamps.firstIndex(where: { $0.id == id }) else { return }
-                                        placedStamps[idx].rotation = (placedStamps[idx].rotation + degrees).truncatingRemainder(dividingBy: 360)
-                                    },
-                                    showTweak: $showMenuTweak,
-                                    initialOffset: CGSize(width: savedMenuOffsetX, height: savedMenuOffsetY),
-                                    onOffsetSaved: { offset in
-                                        savedMenuOffsetX = offset.width
-                                        savedMenuOffsetY = offset.height
-                                    }
-                                )
-                                .position(
-                                    x: canvasSize.width / 2,
-                                    y: showMenuTweak ? canvasSize.height - 96 : canvasSize.height - 84
-                                )
-                                .zIndex(1000)
-                            }
-
+                            // Window-level pinch / rotation / long-press-drag
                             WindowPinchView(
                                 placedStamps: $placedStamps,
                                 stampResizeStartSize: $stampResizeStartSize,
@@ -576,33 +573,124 @@ struct DoodleStampCreatorView: View {
                                 canvasOrigin: canvasOriginInWindow,
                                 canvasSize: canvasSize,
                                 selectedStamp: selectedStamp,
-                                onLongPress: { loc in
-                                    let hits = placedStamps.filter { s in
-                                        let dx = loc.x - s.position.x
-                                        let dy = loc.y - s.position.y
-                                        return sqrt(dx*dx + dy*dy) <= s.size * 0.5 * 0.75
-                                    }
-                                    if hits.isEmpty {
-                                        undoStack.append(makeDoodleSnapshot())
-                                        redoStack = []
-                                        if isCustomStampMode, let customId = UUID(uuidString: lastCustomStampIdString) {
-                                            var stamp = PlacedStamp(emoji: "📷", position: loc, size: 158)
-                                            stamp.customImageId = customId
-                                            placedStamps.append(stamp)
-                                        } else {
-                                            placedStamps.append(PlacedStamp(emoji: selectedStamp, position: loc, size: 126))
-                                        }
-                                    }
-                                },
+                                onLongPress: { _ in },   // stamps placed via toolbar only
                                 isLongPressing: $isLongPressing,
+                                suppressCanvasTap: suppressCanvasTap,
+                                layerOrder: placedStamps.map { .stamp($0.id) },
+                                onLongPressStamp: { id in
+                                    selectedStampId = id
+                                    showStampMagicMenu = false
+                                },
+                                onStampTap: { id in
+                                    selectedStampId = id
+                                    showStampMagicMenu = true
+                                },
+                                onCanvasTap: nil,
+                                onBeforeStampChange: { undoStack.append(makeDoodleSnapshot()); redoStack = [] },
                                 onBackgroundPanBegan: nil,
                                 onBackgroundPan: nil
                             )
                         }
                         .coordinateSpace(name: "stampCanvas")
-                        .frame(width: canvasSize.width, height: canvasSize.height, alignment: .topLeading)
+                        .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
                         .fixedSize()
                         .clipped()
+                    }
+                    // Magic menu as overlay so it's outside the stamp/drawing ZStack —
+                    // no sibling DragGesture competition with DrawingCanvas.
+                    .overlay {
+                        if showStampMagicMenu && !isLongPressing, let id = selectedStampId,
+                           let stamp = placedStamps.first(where: { $0.id == id }) {
+                            StampMagicMenu(
+                                stamp: stamp,
+                                canvasSize: canvasSize,
+                                onDismiss: {
+                                    showStampMagicMenu = false
+                                    selectedStampId = nil
+                                },
+                                onTransform: { transform in
+                                    undoStack.append(makeDoodleSnapshot())
+                                    redoStack = []
+                                    if let idx = placedStamps.firstIndex(where: { $0.id == id }) {
+                                        switch transform {
+                                        case .flipH: placedStamps[idx].flipX.toggle()
+                                        case .flipV: placedStamps[idx].flipY.toggle()
+                                        case .rotate90: placedStamps[idx].rotation = (placedStamps[idx].rotation + 90).truncatingRemainder(dividingBy: 360)
+                                        }
+                                    }
+                                    showStampMagicMenu = false
+                                },
+                                onDelete: {
+                                    undoStack.append(makeDoodleSnapshot())
+                                    redoStack = []
+                                    placedStamps.removeAll { $0.id == id }
+                                    showStampMagicMenu = false
+                                    selectedStampId = nil
+                                },
+                                onDupe: {
+                                    undoStack.append(makeDoodleSnapshot())
+                                    redoStack = []
+                                    if let idx = placedStamps.firstIndex(where: { $0.id == id }) {
+                                        var dupe = placedStamps[idx]
+                                        let dupePosX: CGFloat = min(dupe.position.x + dupe.size * 0.6, canvasSize.width - dupe.size / 2)
+                                        let dupePosY: CGFloat = min(dupe.position.y + dupe.size * 0.6, canvasSize.height - dupe.size / 2)
+                                        let dupePos = CGPoint(x: dupePosX, y: dupePosY)
+                                        dupe = PlacedStamp(
+                                            emoji: dupe.emoji,
+                                            position: dupePos,
+                                            size: dupe.size,
+                                            rotation: dupe.rotation,
+                                            opacity: dupe.opacity,
+                                            flipX: dupe.flipX,
+                                            flipY: dupe.flipY,
+                                            flipStep: dupe.flipStep,
+                                            customImageId: dupe.customImageId,
+                                            stampText: dupe.stampText,
+                                            fontName: dupe.fontName,
+                                            textColor: dupe.textColor,
+                                            textBgColor: dupe.textBgColor,
+                                            stampWidth: dupe.stampWidth,
+                                            stampHeight: dupe.stampHeight
+                                        )
+                                        placedStamps.append(dupe)
+                                        selectedStampId = dupe.id
+                                    }
+                                    showStampMagicMenu = true
+                                },
+                                onEdit: {
+                                    editingStampId = id
+                                    showStampMagicMenu = false
+                                    showTextComposer = true
+                                },
+                                onNudge: { delta in
+                                    guard let idx = placedStamps.firstIndex(where: { $0.id == id }) else { return }
+                                    placedStamps[idx].position.x = max(0, min(canvasSize.width,  placedStamps[idx].position.x + delta.width))
+                                    placedStamps[idx].position.y = max(0, min(canvasSize.height, placedStamps[idx].position.y + delta.height))
+                                },
+                                onResizeBy: { delta in
+                                    guard let idx = placedStamps.firstIndex(where: { $0.id == id }) else { return }
+                                    let oldSize = max(placedStamps[idx].size, 1)
+                                    placedStamps[idx].size = max(20, placedStamps[idx].size + delta)
+                                    let ratio = placedStamps[idx].size / oldSize
+                                    if placedStamps[idx].stampWidth  > 0 { placedStamps[idx].stampWidth  *= ratio }
+                                    if placedStamps[idx].stampHeight > 0 { placedStamps[idx].stampHeight *= ratio }
+                                },
+                                onRotateBy: { degrees in
+                                    guard let idx = placedStamps.firstIndex(where: { $0.id == id }) else { return }
+                                    placedStamps[idx].rotation = (placedStamps[idx].rotation + degrees).truncatingRemainder(dividingBy: 360)
+                                },
+                                showTweak: $showMenuTweak,
+                                initialOffset: .zero,
+                                onOffsetSaved: { offset in
+                                    savedMenuOffsetX = offset.width
+                                    savedMenuOffsetY = offset.height
+                                }
+                            )
+                            .position(
+                                x: canvasSize.width / 2,
+                                y: showMenuTweak ? canvasSize.height - 96 : canvasSize.height - 84
+                            )
+                        }
                     }
                     .cornerRadius(12)
                     .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.gray.opacity(0.25), lineWidth: 1))
@@ -665,6 +753,22 @@ struct DoodleStampCreatorView: View {
                                 isEraser = true
                             }
 
+                            // Drawing layer toggle: drawing on top (default) vs stamps on top
+                            Button {
+                                drawingOnTop.toggle()
+                            } label: {
+                                ZStack {
+                                    Circle()
+                                        .fill(!drawingOnTop ? Color.blue.opacity(0.15) : Color(white: 0.95))
+                                        .frame(width: 38, height: 38)
+                                        .overlay(Circle().stroke(!drawingOnTop ? Color.blue : Color.gray.opacity(0.4),
+                                                                 lineWidth: !drawingOnTop ? 2.5 : 1))
+                                    Image(systemName: "square.2.layers.3d")
+                                        .font(.system(size: 17))
+                                        .foregroundColor(!drawingOnTop ? .blue : .gray)
+                                }
+                            }
+
                             ScrollView(.horizontal, showsIndicators: false) {
                                 HStack(spacing: 10) {
                                     ForEach(paletteColors, id: \.self) { color in
@@ -702,7 +806,37 @@ struct DoodleStampCreatorView: View {
                                 isCustomStampMode: $isCustomStampMode,
                                 canvasSize: canvasSize,
                                 allowDoodleCreation: false,
-                                onPlace: { autoPlaceStamp() }
+                                onPlace: { autoPlaceStamp() },
+                                onPlaceMultipleStamps: { ids in
+                                    let center = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
+                                    let stagger: CGFloat = 20
+                                    let offset = -CGFloat(ids.count - 1) * stagger / 2
+                                    undoStack.append(makeDoodleSnapshot()); redoStack = []
+                                    for (i, customId) in ids.enumerated() {
+                                        let pos = CGPoint(x: center.x + offset + CGFloat(i) * stagger,
+                                                          y: center.y + offset + CGFloat(i) * stagger)
+                                        var stamp = PlacedStamp(emoji: "📷", position: pos, size: 158)
+                                        stamp.customImageId = customId
+                                        placedStamps.append(stamp)
+                                        selectedStampId = stamp.id
+                                    }
+                                    showStampMagicMenu = true
+                                    suppressTapBriefly()
+                                },
+                                onPlaceMultipleEmojis: { emojis in
+                                    let center = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
+                                    let stagger: CGFloat = 20
+                                    let offset = -CGFloat(emojis.count - 1) * stagger / 2
+                                    undoStack.append(makeDoodleSnapshot()); redoStack = []
+                                    for (i, emoji) in emojis.enumerated() {
+                                        let pos = CGPoint(x: center.x + offset + CGFloat(i) * stagger,
+                                                          y: center.y + offset + CGFloat(i) * stagger)
+                                        placedStamps.append(PlacedStamp(emoji: emoji, position: pos, size: 126))
+                                        selectedStampId = placedStamps.last?.id
+                                    }
+                                    showStampMagicMenu = true
+                                    suppressTapBriefly()
+                                }
                             )
 
                             Button(action: {
