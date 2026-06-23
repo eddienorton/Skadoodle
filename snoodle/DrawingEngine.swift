@@ -99,6 +99,10 @@ struct CanvasSnapshot {
     var layerOrder: [LayerEntry]
     var backgroundImage: UIImage? = nil
     var backgroundOffset: CGSize = .zero
+    var bgOpacity: Double = 1.0
+    var bgBlur: Double = 0.0
+    var bgBrightness: Double = 0.0
+    var bgSaturation: Double = 1.0
 }
 
 struct DrawingLine {

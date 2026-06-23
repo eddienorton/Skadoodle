@@ -109,8 +109,8 @@ struct OnboardingView: View {
 // MARK: - Root with Tab Bar
 
 struct ContentView: View {
-    @StateObject private var store = SnoodleStore.shared
-    @StateObject private var auth = SnoodleAuthManager.shared
+    @ObservedObject private var store = SnoodleStore.shared
+    @ObservedObject private var auth = SnoodleAuthManager.shared
     @State private var showingDraw = false
     @State private var firstDrawLaunch = true
     @State private var selectedTab: Int = 0

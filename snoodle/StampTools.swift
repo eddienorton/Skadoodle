@@ -26,7 +26,7 @@ struct PreProcessedSegmentation: Identifiable {
 struct SubmitButton: View {
     let entry: SnoodleEntry
     @EnvironmentObject var store: SnoodleStore
-    @StateObject private var auth = SnoodleAuthManager.shared
+    @ObservedObject private var auth = SnoodleAuthManager.shared
     @State private var showSignIn = false
     @State private var isSubmitting = false
     @State private var showError = false
@@ -409,7 +409,6 @@ struct StampToolButton: View {
     }
     @State private var segmentationItem: SegmentationItem? = nil  // drives sheet(item:) atomically
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
-    @State private var showSourcePicker = false
     @State private var pendingSource: Int = 0  // 1 = camera, 2 = library
     @State private var showCamera = false
     @State private var showPhotoPicker = false
@@ -635,8 +634,17 @@ struct StampToolButton: View {
                             ScrollView {
                                 let cols = [GridItem(.adaptive(minimum: 70), spacing: 10)]
                                 LazyVGrid(columns: cols, spacing: 10) {
-                                    // Add button
-                                    Button { showSourcePicker = true } label: {
+                                    // Add button — Menu avoids confirmationDialog-in-sheet presentation conflict
+                                    Menu {
+                                        Button {
+                                            pendingSource = 1
+                                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { showPicker = false }
+                                        } label: { Label("Take Photo", systemImage: "camera") }
+                                        Button {
+                                            pendingSource = 2
+                                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { showPicker = false }
+                                        } label: { Label("Choose from Library", systemImage: "photo.on.rectangle") }
+                                    } label: {
                                         ZStack {
                                             RoundedRectangle(cornerRadius: 10)
                                                 .fill(Color.purple.opacity(0.08))
@@ -820,18 +828,6 @@ struct StampToolButton: View {
             }
             .presentationDetents([.large])
             .presentationDragIndicator(.hidden) // we draw our own above
-            // confirmationDialog inside sheet so it appears centered
-            .confirmationDialog("Add Photo Stamp", isPresented: $showSourcePicker) {
-                Button("Take Photo") {
-                    pendingSource = 1
-                    showPicker = false
-                }
-                Button("Choose from Library") {
-                    pendingSource = 2
-                    showPicker = false
-                }
-                Button("Cancel", role: .cancel) {}
-            }
             // Loading overlay inside sheet so it fills the sheet, not the tiny button
             .overlay {
                 if isLoadingPhotos {
@@ -975,7 +971,16 @@ struct StampToolButton: View {
     }
 
     var addPhotoButton: some View {
-        Button { showSourcePicker = true } label: {
+        Menu {
+            Button {
+                pendingSource = 1
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { showPicker = false }
+            } label: { Label("Take Photo", systemImage: "camera") }
+            Button {
+                pendingSource = 2
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { showPicker = false }
+            } label: { Label("Choose from Library", systemImage: "photo.on.rectangle") }
+        } label: {
             HStack {
                 Image(systemName: "plus.circle.fill")
                 Text("Add from Photo Library")

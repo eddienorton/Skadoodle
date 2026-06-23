@@ -10,6 +10,8 @@ import FirebaseStorage
 import Combine
 import Photos
 import Vision
+import CoreImage
+import CoreImage.CIFilterBuiltins
 
 // MARK: - Background History Manager
 class BackgroundPhotoHistory: ObservableObject {
@@ -91,16 +93,19 @@ class BackgroundPhotoHistory: ObservableObject {
 
     func remove(at index: Int) {
         guard index < thumbnails.count else { return }
-        var existingFull = loadRaw(key: fullKey)
-        var existingThumbs = loadRaw(key: thumbKey)
-        var existingIds = loadIds()
-        if index < existingFull.count { existingFull.remove(at: index) }
-        if index < existingThumbs.count { existingThumbs.remove(at: index) }
-        if index < existingIds.count { existingIds.remove(at: index) }
-        save(existingFull, key: fullKey)
-        save(existingThumbs, key: thumbKey)
-        UserDefaults.standard.set(existingIds, forKey: idKey)
-        load()
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self = self else { return }
+            var existingFull = self.loadRaw(key: self.fullKey)
+            var existingThumbs = self.loadRaw(key: self.thumbKey)
+            var existingIds = self.loadIds()
+            if index < existingFull.count { existingFull.remove(at: index) }
+            if index < existingThumbs.count { existingThumbs.remove(at: index) }
+            if index < existingIds.count { existingIds.remove(at: index) }
+            self.save(existingFull, key: self.fullKey)
+            self.save(existingThumbs, key: self.thumbKey)
+            UserDefaults.standard.set(existingIds, forKey: self.idKey)
+            DispatchQueue.main.async { self.load() }
+        }
     }
 
     func fullImage(at index: Int) -> UIImage? {
@@ -953,6 +958,42 @@ func stampHitTest(stamp: PlacedStamp, canvasPt: CGPoint) -> Bool {
     return pixel[3] > 25
 }
 
+/// Run Vision instance segmentation on `image` and return each extracted object
+/// paired with its origin in the source image's point coordinates.
+/// Used by extractDrawingLayerAsStamp to position stamps at their original canvas location.
+func extractObjectsWithOrigins(from image: UIImage) async -> [(image: UIImage, origin: CGPoint)] {
+    let normalized = image.normalizedOrientation()
+    guard let cgImage = normalized.cgImage else { return [] }
+    let request = VNGenerateForegroundInstanceMaskRequest()
+    let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+    do {
+        try handler.perform([request])
+        guard let result = request.results?.first else { return [] }
+        var found: [(image: UIImage, origin: CGPoint)] = []
+        for index in result.allInstances {
+            let maskHandler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+            guard let maskBuffer = try? result.generateScaledMaskForImage(
+                    forInstances: IndexSet([index]), from: maskHandler) else { continue }
+            let maskCI = CIImage(cvPixelBuffer: maskBuffer)
+            let originalCI = CIImage(cgImage: cgImage)
+            let filter = CIFilter.blendWithMask()
+            filter.inputImage = originalCI
+            filter.maskImage = maskCI
+            filter.backgroundImage = CIImage.empty()
+            guard let output = filter.outputImage else { continue }
+            let ctx = CIContext()
+            guard let rendered = ctx.createCGImage(output, from: output.extent) else { continue }
+            let full = UIImage(cgImage: rendered, scale: image.scale, orientation: image.imageOrientation)
+            if let (cropped, origin) = full.croppedToContentWithOrigin() {
+                found.append((image: cropped, origin: origin))
+            }
+        }
+        return found
+    } catch {
+        return []
+    }
+}
+
 /// Returns the topmost stamp hit at canvasPt, respecting visual z-order from layerOrder.
 /// layerOrder is bottom-first (last = topmost), so we iterate reversed().
 func topmostStampHit(at pt: CGPoint, layerOrder: [LayerEntry], stamps: [PlacedStamp]) -> PlacedStamp? {
@@ -983,6 +1024,8 @@ struct DrawScreen: View {
     @State private var layersPanelOffset: CGSize = .zero
     @State private var layersPanelBaseOffset: CGSize = .zero
     @State private var chipSwipeOffsets: [UUID: CGFloat] = [:]
+    @State private var hiddenLayerIds: Set<UUID> = []
+    @State private var isExtractingLayer: Bool = false
     @State private var isGeneratingCaption: Bool = false
     @State private var canvasSize: CGSize = CGSize(width: 300, height: 300)
     @State private var undoStack: [CanvasSnapshot] = []
@@ -1025,8 +1068,8 @@ struct DrawScreen: View {
         return drawingLayers.firstIndex(where: { $0.id == id }) ?? 0
     }
 
-    /// All lines flattened (used for BackgroundEditorView preview).
-    var allDrawingLines: [DrawingLine] { drawingLayers.flatMap { $0.lines } }
+    /// All visible lines flattened (used for BackgroundEditorView preview). Respects hidden layers.
+    var allDrawingLines: [DrawingLine] { drawingLayers.filter { !hiddenLayerIds.contains($0.id) }.flatMap { $0.lines } }
 
     /// The layer that should receive the live eraser preview.
     /// Normally the active layer; falls through to the topmost non-empty layer when the active layer
@@ -1108,10 +1151,7 @@ struct DrawScreen: View {
     }
 
     func canDeleteLayerEntry(_ entry: LayerEntry) -> Bool {
-        if case .drawing = entry {
-            let drawingCount = layerOrder.filter { if case .drawing = $0 { return true } else { return false } }.count
-            return drawingCount > 1
-        }
+        // All layers are deletable — if no drawing layers remain, onBeforeDraw lazily creates one on first stroke
         return true
     }
 
@@ -1131,7 +1171,12 @@ struct DrawScreen: View {
             layerOrder.removeAll { if case .drawing(let eid) = $0 { return eid == id } else { return false } }
             drawingLayers.removeAll { $0.id == id }
             consolidateDrawingLayers()
-            if userSelectedLayerId == id { userSelectedLayerId = nil }
+            if userSelectedLayerId == id {
+                // Select the topmost remaining drawing layer, or nil if none left
+                userSelectedLayerId = layerOrder.reversed().compactMap {
+                    if case .drawing(let lid) = $0 { return lid } else { return nil }
+                }.first
+            }
         case .stamp(let id):
             placedStamps.removeAll { $0.id == id }
             removeStampFromLayerOrder(id)
@@ -1167,7 +1212,7 @@ struct DrawScreen: View {
         // Maintain canvas aspect ratio, cap at 90pt so a few chips are always visible
         let chipH: CGFloat = chipW * max(canvasSize.height, 1) / max(canvasSize.width, 1)
         let isActive: Bool = {
-            if case .drawing(let id) = entry { return id == userSelectedLayerId }
+            if case .drawing(let id) = entry { return id == userSelectedLayerId && selectedStampId == nil }
             if case .stamp(let id) = entry { return id == selectedStampId }
             return false
         }()
@@ -1242,13 +1287,51 @@ struct DrawScreen: View {
                     return
                 }
                 if case .drawing(let id) = entry {
-                    userSelectedLayerId = (userSelectedLayerId == id) ? nil : id
+                    userSelectedLayerId = id
                     selectedStampId = nil
                     showStampMagicMenu = false
                 } else if case .stamp(let id) = entry {
                     selectedStampId = id
                     showStampMagicMenu = true
-                    userSelectedLayerId = nil
+                    // Drawing layer selection is independent — don't clear it
+                }
+            }
+            // ··· menu and hidden badge — drawing layers only
+            .overlay(alignment: .topTrailing) {
+                if case .drawing(let id) = entry {
+                    HStack(spacing: 3) {
+                        // Eye-slash badge when hidden
+                        if hiddenLayerIds.contains(id) {
+                            Image(systemName: "eye.slash.fill")
+                                .font(.system(size: 9))
+                                .foregroundColor(.white)
+                                .shadow(color: .black.opacity(0.6), radius: 1)
+                        }
+                        // ··· menu
+                        Menu {
+                            Button {
+                                if hiddenLayerIds.contains(id) { hiddenLayerIds.remove(id) }
+                                else { hiddenLayerIds.insert(id) }
+                            } label: {
+                                Label(hiddenLayerIds.contains(id) ? "Show Layer" : "Hide Layer",
+                                      systemImage: hiddenLayerIds.contains(id) ? "eye" : "eye.slash")
+                            }
+                            Button {
+                                extractDrawingLayerAsStamp(layerId: id)
+                            } label: {
+                                Label("Extract as Stamp", systemImage: "scissors")
+                            }
+                            .disabled(isExtractingLayer)
+                        } label: {
+                            Image(systemName: "ellipsis")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundColor(.primary.opacity(0.7))
+                                .frame(width: 24, height: 24)
+                                .contentShape(Rectangle())
+                        }
+                    }
+                    .padding(.top, 3)
+                    .padding(.trailing, 3)
                 }
             }
         }
@@ -1418,7 +1501,7 @@ struct DrawScreen: View {
                         .font(.system(size: 12))
                         .foregroundColor(.secondary)
                     Text("Layers")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.system(size: 16, weight: .semibold))
                     Spacer()
                     Button {
                         withAnimation(.easeInOut(duration: 0.2)) { showLayersPanel = false }
@@ -1499,11 +1582,49 @@ struct DrawScreen: View {
     /// True if all drawing layers are empty.
     var allLinesEmpty: Bool { drawingLayers.allSatisfy { $0.lines.isEmpty } }
 
+    /// Extract all Vision objects from a drawing layer and place them as doodle stamps
+    /// directly above the source layer in the layer order.
+    func extractDrawingLayerAsStamp(layerId: UUID) {
+        guard let layer = drawingLayers.first(where: { $0.id == layerId }),
+              !layer.lines.isEmpty else { return }
+        isExtractingLayer = true
+        let lines = layer.lines
+        let size = canvasSize
+        Task {
+            // Render this layer on white so Vision has good contrast
+            let rendered = renderCanvas(lines: lines, size: size, canvasColor: .white)
+            let objects = await extractObjectsWithOrigins(from: rendered)
+            await MainActor.run {
+                isExtractingLayer = false
+                guard !objects.isEmpty else { return }
+                pushUndoSnapshot()
+                guard let sourceIdx = layerOrder.firstIndex(where: { $0.id == layerId }) else { return }
+                var insertIdx = sourceIdx + 1
+                for (img, origin) in objects {
+                    guard let stamp = CustomStampManager.shared.addStamp(image: img, source: .doodle) else { continue }
+                    // Center stamp at the object's original canvas position
+                    let centerX = origin.x + img.size.width  / 2
+                    let centerY = origin.y + img.size.height / 2
+                    let stampSize = max(img.size.width, img.size.height)
+                    var placed = PlacedStamp(emoji: "",
+                                            position: CGPoint(x: centerX, y: centerY),
+                                            size: stampSize)
+                    placed.customImageId = stamp.id
+                    placedStamps.append(placed)
+                    layerOrder.insert(.stamp(placed.id), at: insertIdx)
+                    insertIdx += 1
+                    if let stampImg = stamp.image { scheduleSnugScan(for: placed.id, image: stampImg) }
+                }
+            }
+        }
+    }
+
     /// Push undo snapshot and clear redo.
     func pushUndoSnapshot() {
         undoStack.append(CanvasSnapshot(
             drawingLayers: drawingLayers, stamps: placedStamps, layerOrder: layerOrder,
-            backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset))
+            backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset,
+            bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation))
         redoStack = []
     }
 
@@ -1511,7 +1632,6 @@ struct DrawScreen: View {
     // No empty drawing layer is created here — one will be lazily created on first stroke via onBeforeDraw.
     func appendStampToLayer(_ stamp: PlacedStamp) {
         placedStamps.append(stamp)
-        userSelectedLayerId = nil
         layerOrder.append(.stamp(stamp.id))
     }
 
@@ -1520,8 +1640,14 @@ struct DrawScreen: View {
     // onBeforeDraw just created before the first stroke point is written.
     var activeLayerLinesBinding: Binding<[DrawingLine]> {
         Binding(
-            get: { drawingLayers[activeDrawingLayerIndex].lines },
-            set: { drawingLayers[activeDrawingLayerIndex].lines = $0 }
+            get: {
+                guard !drawingLayers.isEmpty else { return [] }
+                return drawingLayers[activeDrawingLayerIndex].lines
+            },
+            set: {
+                guard !drawingLayers.isEmpty else { return }
+                drawingLayers[activeDrawingLayerIndex].lines = $0
+            }
         )
     }
 
@@ -1550,7 +1676,7 @@ struct DrawScreen: View {
     @State private var savedBgSaturation: Double = 1.0
 
     @State private var showCanvasImagePicker: Bool = false
-    @StateObject private var auth = SnoodleAuthManager.shared
+    @ObservedObject private var auth = SnoodleAuthManager.shared
     @State private var showSignInForPost: Bool = false
     @State private var currentPenType: PenType = {
         let penName = UserDefaults.standard.string(forKey: "lastPenTypeName") ?? "pencil"
@@ -1620,7 +1746,13 @@ struct DrawScreen: View {
 
     // stampView replaced by StampItemView struct below
     func handleDone() {
-        let img = renderCanvasWithStamps(drawingLayers: drawingLayers, stamps: placedStamps, layerOrder: layerOrder, size: canvasSize, canvasColor: UIColor(canvasColor), backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation)
+        // Hidden layers are excluded from the flattened export
+        let visibleLayers = drawingLayers.filter { !hiddenLayerIds.contains($0.id) }
+        let visibleLayerOrder = layerOrder.filter { entry in
+            if case .drawing(let id) = entry { return !hiddenLayerIds.contains(id) }
+            return true
+        }
+        let img = renderCanvasWithStamps(drawingLayers: visibleLayers, stamps: placedStamps, layerOrder: visibleLayerOrder, size: canvasSize, canvasColor: UIColor(canvasColor), backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation)
         resultImage = img
         isGeneratingCaption = true
         Task {
@@ -1707,7 +1839,6 @@ struct DrawScreen: View {
             .onTapGesture {
                 if let i = idx { selectedColorIndex = i }
                 isEraser = false
-                selectedStampId = nil
             }
     }
 
@@ -1721,7 +1852,8 @@ struct DrawScreen: View {
 
     @ViewBuilder
     func layerDrawingView(id: UUID) -> some View {
-        if let layer = drawingLayers.first(where: { $0.id == id }) {
+        if !hiddenLayerIds.contains(id),
+           let layer = drawingLayers.first(where: { $0.id == id }) {
             drawingLayerView(layer: layer)
         }
     }
@@ -1777,7 +1909,7 @@ struct DrawScreen: View {
                 selectedStampId = nil
             },
             onTransform: { transform in
-                undoStack.append(CanvasSnapshot(drawingLayers: drawingLayers, stamps: placedStamps, layerOrder: layerOrder, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset))
+                undoStack.append(CanvasSnapshot(drawingLayers: drawingLayers, stamps: placedStamps, layerOrder: layerOrder, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation))
                 redoStack = []
                 if let idx = placedStamps.firstIndex(where: { $0.id == id }) {
                     switch transform {
@@ -1789,7 +1921,7 @@ struct DrawScreen: View {
                 showStampMagicMenu = false
             },
             onDelete: {
-                undoStack.append(CanvasSnapshot(drawingLayers: drawingLayers, stamps: placedStamps, layerOrder: layerOrder, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset))
+                undoStack.append(CanvasSnapshot(drawingLayers: drawingLayers, stamps: placedStamps, layerOrder: layerOrder, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation))
                 redoStack = []
                 placedStamps.removeAll { $0.id == id }
                 removeStampFromLayerOrder(id)
@@ -2063,7 +2195,7 @@ struct DrawScreen: View {
                 CanvasColorPickerView(currentIndex: canvasColorIndex,
                     onSelect: { newIndex in
                         bgPickerWasApplied = true
-                        undoStack.append(CanvasSnapshot(drawingLayers: drawingLayers, stamps: placedStamps, layerOrder: layerOrder, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset))
+                        undoStack.append(CanvasSnapshot(drawingLayers: drawingLayers, stamps: placedStamps, layerOrder: layerOrder, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation))
                         redoStack = []
                         canvasColorIndex = newIndex
                         canvasBackgroundImage = nil
@@ -2080,7 +2212,7 @@ struct DrawScreen: View {
                         bgNavPath.append(0)
                     }, onApply: { idx in
                         bgPickerWasApplied = true
-                        undoStack.append(CanvasSnapshot(drawingLayers: drawingLayers, stamps: placedStamps, layerOrder: layerOrder, backgroundImage: savedBgImage, backgroundOffset: savedBgOffset))
+                        undoStack.append(CanvasSnapshot(drawingLayers: drawingLayers, stamps: placedStamps, layerOrder: layerOrder, backgroundImage: savedBgImage, backgroundOffset: savedBgOffset, bgOpacity: savedBgOpacity, bgBlur: savedBgBlur, bgBrightness: savedBgBrightness, bgSaturation: savedBgSaturation))
                         redoStack = []
                         BackgroundPhotoHistory.shared.moveToTop(at: idx)
                         showCanvasBgSheet = false
@@ -2122,7 +2254,7 @@ struct DrawScreen: View {
                                 let hasBgChange = pendingBgHistoryIndex != nil
                                 let hasStamp = pendingExtractedSubject != nil
                                 if hasBgChange || hasStamp {
-                                    undoStack.append(CanvasSnapshot(drawingLayers: drawingLayers, stamps: placedStamps, layerOrder: layerOrder, backgroundImage: savedBgImage, backgroundOffset: savedBgOffset))
+                                    undoStack.append(CanvasSnapshot(drawingLayers: drawingLayers, stamps: placedStamps, layerOrder: layerOrder, backgroundImage: savedBgImage, backgroundOffset: savedBgOffset, bgOpacity: savedBgOpacity, bgBlur: savedBgBlur, bgBrightness: savedBgBrightness, bgSaturation: savedBgSaturation))
                                     redoStack = []
                                 }
                                 if let idx = pendingBgHistoryIndex {
@@ -2199,7 +2331,7 @@ struct DrawScreen: View {
                     },
                     onDone: {
                         if let subject = pendingExtractedSubject {
-                            undoStack.append(CanvasSnapshot(drawingLayers: drawingLayers, stamps: placedStamps, layerOrder: layerOrder, backgroundImage: savedBgImage, backgroundOffset: savedBgOffset))
+                            undoStack.append(CanvasSnapshot(drawingLayers: drawingLayers, stamps: placedStamps, layerOrder: layerOrder, backgroundImage: savedBgImage, backgroundOffset: savedBgOffset, bgOpacity: savedBgOpacity, bgBlur: savedBgBlur, bgBrightness: savedBgBrightness, bgSaturation: savedBgSaturation))
                             redoStack = []
                             let result = subject.croppedToContentWithOrigin()
                             let cropped = result?.image ?? subject
@@ -2274,14 +2406,18 @@ struct DrawScreen: View {
                             isStampSelected: selectedStampId != nil,
                             onBeforeDraw: {
                                 pushUndoSnapshot()
-                                // Lazy layer creation: if topmost is a stamp (or no drawing layer
-                                // is explicitly selected), create a new drawing layer on top now.
-                                if userSelectedLayerId == nil,
-                                   let last = layerOrder.last, case .stamp = last {
+                                // Lazy layer creation: if there are no drawing layers, or the topmost
+                                // entry is a stamp and no drawing layer is explicitly selected.
+                                let needsNewLayer = drawingLayers.isEmpty ||
+                                    (userSelectedLayerId == nil && layerOrder.last.map { if case .stamp = $0 { return true } else { return false } } ?? false)
+                                if needsNewLayer {
                                     let newLayer = DrawingLayer()
                                     drawingLayers.append(newLayer)
                                     layerOrder.append(.drawing(newLayer.id))
                                     userSelectedLayerId = newLayer.id
+                                    // Clear stamp selection so only the new drawing layer is highlighted
+                                    selectedStampId = nil
+                                    showStampMagicMenu = false
                                 }
                             },
                             onEraserCommitted: { eraserLine in
@@ -2381,7 +2517,7 @@ struct DrawScreen: View {
                             },
                             onBeforeStampChange: { pushUndoSnapshot() },
                             onBackgroundPanBegan: canvasBackgroundImage != nil ? {
-                                undoStack.append(CanvasSnapshot(drawingLayers: drawingLayers, stamps: placedStamps, layerOrder: layerOrder, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset))
+                                undoStack.append(CanvasSnapshot(drawingLayers: drawingLayers, stamps: placedStamps, layerOrder: layerOrder, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation))
                                 redoStack = []
                             } : nil,
                             onBackgroundPan: canvasBackgroundImage != nil ? { delta in
@@ -2421,7 +2557,6 @@ struct DrawScreen: View {
                                     .foregroundColor(isEraser ? .blue : .gray)
                             }
                             .onTapGesture {
-                                selectedStampId = nil
                                 isEraser = true
                             }
 
@@ -2469,7 +2604,6 @@ struct DrawScreen: View {
 
                             // Pen Studio button — always just opens pen studio
                             Button(action: {
-                                selectedStampId = nil
                                 showPenStudio = true
                             }) {
                                 ZStack {
@@ -2503,7 +2637,7 @@ struct DrawScreen: View {
                                         if let editId = editingStampId,
                                            let idx = placedStamps.firstIndex(where: { $0.id == editId }) {
                                             // Edit existing — update in place, recompute dimensions
-                                            undoStack.append(CanvasSnapshot(drawingLayers: drawingLayers, stamps: placedStamps, layerOrder: layerOrder, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset))
+                                            undoStack.append(CanvasSnapshot(drawingLayers: drawingLayers, stamps: placedStamps, layerOrder: layerOrder, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation))
                                             redoStack = []
                                             let (natW, natH, fontSize) = naturalTextStampSize(text: text, fontId: fontId, fontStyle: fontStyle, maxWidth: canvasSize.width * 0.7)
                                             placedStamps[idx].stampText = text
@@ -2540,7 +2674,7 @@ struct DrawScreen: View {
                             }
                             Button(action: {
                                 guard !undoStack.isEmpty else { return }
-                                let cur = CanvasSnapshot(drawingLayers: drawingLayers, stamps: placedStamps, layerOrder: layerOrder, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset)
+                                let cur = CanvasSnapshot(drawingLayers: drawingLayers, stamps: placedStamps, layerOrder: layerOrder, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation)
                                 redoStack.append(cur)
                                 let last = undoStack.removeLast()
                                 drawingLayers = last.drawingLayers
@@ -2548,6 +2682,10 @@ struct DrawScreen: View {
                                 layerOrder = last.layerOrder
                                 canvasBackgroundImage = last.backgroundImage
                                 backgroundOffset = last.backgroundOffset
+                                bgOpacity = last.bgOpacity
+                                bgBlur = last.bgBlur
+                                bgBrightness = last.bgBrightness
+                                bgSaturation = last.bgSaturation
                             }) {
                                 Image(systemName: "arrow.uturn.backward")
                                     .font(.system(size: 18, weight: .medium))
@@ -2556,7 +2694,7 @@ struct DrawScreen: View {
                             .disabled(undoStack.isEmpty)
                             Button(action: {
                                 guard !redoStack.isEmpty else { return }
-                                let cur = CanvasSnapshot(drawingLayers: drawingLayers, stamps: placedStamps, layerOrder: layerOrder, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset)
+                                let cur = CanvasSnapshot(drawingLayers: drawingLayers, stamps: placedStamps, layerOrder: layerOrder, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation)
                                 undoStack.append(cur)
                                 let last = redoStack.removeLast()
                                 drawingLayers = last.drawingLayers
@@ -2564,6 +2702,10 @@ struct DrawScreen: View {
                                 layerOrder = last.layerOrder
                                 canvasBackgroundImage = last.backgroundImage
                                 backgroundOffset = last.backgroundOffset
+                                bgOpacity = last.bgOpacity
+                                bgBlur = last.bgBlur
+                                bgBrightness = last.bgBrightness
+                                bgSaturation = last.bgSaturation
                             }) {
                                 Image(systemName: "arrow.uturn.forward")
                                     .font(.system(size: 18, weight: .medium))
@@ -3470,41 +3612,6 @@ struct StampItemView: View {
     }
 }
 
-// MARK: - Pulsing Crosshair
-
-struct PulsingCrosshair: View {
-    @State private var pulsing = false
-
-    var body: some View {
-        let crossSize: CGFloat = 30
-        let outerWidth: CGFloat = 6
-        let innerWidth: CGFloat = 3
-
-        ZStack {
-            // White outer lines
-            Rectangle()
-                .fill(Color.white)
-                .frame(width: crossSize, height: outerWidth)
-            Rectangle()
-                .fill(Color.white)
-                .frame(width: outerWidth, height: crossSize)
-            // Black inner lines
-            Rectangle()
-                .fill(Color.black)
-                .frame(width: crossSize, height: innerWidth)
-            Rectangle()
-                .fill(Color.black)
-                .frame(width: innerWidth, height: crossSize)
-        }
-        .scaleEffect(pulsing ? 1.45 : 0.85)
-        .opacity(pulsing ? 1.0 : 0.6)
-        .animation(
-            .easeInOut(duration: 0.65).repeatForever(autoreverses: true),
-            value: pulsing
-        )
-        .onAppear { pulsing = true }
-    }
-}
 
 // MARK: - Detail / Swipe View
 // Single consolidated view for viewing doodles.

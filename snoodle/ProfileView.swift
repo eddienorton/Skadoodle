@@ -975,7 +975,7 @@ struct LinkEditorSheet: View {
 // MARK: - Profile Tab
 
 struct ProfileTab: View {
-    @StateObject private var auth = SnoodleAuthManager.shared
+    @ObservedObject private var auth = SnoodleAuthManager.shared
 
     var body: some View {
         if auth.isSignedIn {

@@ -20,6 +20,7 @@ struct SettingsTab: View {
     @State private var showingDeleteConfirm = false
     @State private var isDeletingAccount = false
     @State private var showDeletedMessage = false
+    @State private var deleteAccountErrorMessage: String? = nil
     @State private var isDownloadingDoodles = false
     @State private var downloadStatus: String = ""
     @State private var communityCount: Int = 0
@@ -35,7 +36,7 @@ struct SettingsTab: View {
     @State private var nukeStatus: String = ""
     @State private var isBackfilling: Bool = false
     @State private var backfillStatus: String = ""
-    @StateObject private var phantomSession = PhantomSessionManager.shared
+    @ObservedObject private var phantomSession = PhantomSessionManager.shared
     #endif
 
     var appVersion: String {
@@ -369,6 +370,14 @@ struct SettingsTab: View {
             .sheet(isPresented: $showDeletedMessage) {
                 AccountDeletedView()
             }
+            .alert("Account Deletion Failed", isPresented: Binding(
+                get: { deleteAccountErrorMessage != nil },
+                set: { if !$0 { deleteAccountErrorMessage = nil } }
+            )) {
+                Button("OK", role: .cancel) { deleteAccountErrorMessage = nil }
+            } message: {
+                Text(deleteAccountErrorMessage ?? "")
+            }
             #if DEBUG
             .confirmationDialog("Nuke Firebase?", isPresented: $showNukeConfirm, titleVisibility: .visible) {
                 Button("Delete world_gallery, likes + Storage", role: .destructive) {
@@ -492,65 +501,97 @@ struct SettingsTab: View {
         let db = Firestore.firestore()
         let storage = Storage.storage()
         let group = DispatchGroup()
+        var errors: [String] = []
+        let errorLock = NSLock()
+
+        func recordError(_ msg: String) {
+            errorLock.lock(); errors.append(msg); errorLock.unlock()
+        }
 
         // Step 1: Delete user's world_gallery docs + their Storage images
         group.enter()
         db.collection("world_gallery")
             .whereField("userId", isEqualTo: userId)
-            .getDocuments { snapshot, _ in
+            .getDocuments { snapshot, error in
+                if let error { recordError("Failed to fetch posts: \(error.localizedDescription)") }
                 let docs = snapshot?.documents ?? []
                 let batch = db.batch()
                 for doc in docs {
                     batch.deleteDocument(doc.reference)
-                    // Delete Storage image
                     if let imageURL = doc.data()["imageURL"] as? String,
                        let path = Self.storagePathFromURL(imageURL) {
                         group.enter()
+                        // Storage image deletion failures are non-critical (orphaned files) — don't block
                         storage.reference().child(path).delete { _ in group.leave() }
                     }
                 }
-                batch.commit { _ in group.leave() }
+                batch.commit { error in
+                    if let error { recordError("Failed to delete posts: \(error.localizedDescription)") }
+                    group.leave()
+                }
             }
 
         // Step 2: Delete all likes by this user
         group.enter()
         db.collection("likes")
             .whereField("userId", isEqualTo: userId)
-            .getDocuments { snapshot, _ in
+            .getDocuments { snapshot, error in
+                if let error { recordError("Failed to fetch likes: \(error.localizedDescription)") }
                 let batch = db.batch()
                 snapshot?.documents.forEach { batch.deleteDocument($0.reference) }
-                batch.commit { _ in group.leave() }
+                batch.commit { error in
+                    if let error { recordError("Failed to delete likes: \(error.localizedDescription)") }
+                    group.leave()
+                }
             }
 
         // Step 3: Delete following/followers subcollections
         group.enter()
-        db.collection("users").document(userId).collection("following").getDocuments { snapshot, _ in
+        db.collection("users").document(userId).collection("following").getDocuments { snapshot, error in
+            if let error { recordError("Failed to fetch following: \(error.localizedDescription)") }
             let batch = db.batch()
             snapshot?.documents.forEach { batch.deleteDocument($0.reference) }
-            batch.commit { _ in group.leave() }
+            batch.commit { error in
+                if let error { recordError("Failed to delete following: \(error.localizedDescription)") }
+                group.leave()
+            }
         }
         group.enter()
-        db.collection("users").document(userId).collection("followers").getDocuments { snapshot, _ in
+        db.collection("users").document(userId).collection("followers").getDocuments { snapshot, error in
+            if let error { recordError("Failed to fetch followers: \(error.localizedDescription)") }
             let batch = db.batch()
             snapshot?.documents.forEach { batch.deleteDocument($0.reference) }
-            batch.commit { _ in group.leave() }
+            batch.commit { error in
+                if let error { recordError("Failed to delete followers: \(error.localizedDescription)") }
+                group.leave()
+            }
         }
 
-        // Step 4: Delete profile photo from Storage if exists
+        // Step 4: Delete profile photo from Storage (non-critical)
         group.enter()
         storage.reference().child("profile_photos/\(userId).jpg").delete { _ in group.leave() }
 
         // Step 5: When all done, delete user doc then sign out
         group.notify(queue: .main) {
-            db.collection("users").document(userId).delete { _ in
+            db.collection("users").document(userId).delete { error in
+                self.isDeletingAccount = false
+                if let error {
+                    errors.append("Failed to delete account: \(error.localizedDescription)")
+                    self.deleteAccountErrorMessage = errors.joined(separator: "\n\n")
+                    return
+                }
+                if !errors.isEmpty {
+                    // Non-fatal errors in prior steps — account doc is gone, proceed with signout
+                    // but log for debugging
+                    print("⚠️ deleteAccount partial errors: \(errors)")
+                }
                 // Clear local data
-                store.clearAll()
+                self.store.clearAll()
                 UserDefaults.standard.removeObject(forKey: "snoodleUsername")
                 UserDefaults.standard.removeObject(forKey: "snoodleAvatar")
                 UserDefaults.standard.removeObject(forKey: "snoodleProfilePhoto")
                 WorldGalleryManager.shared.entries = []
                 SnoodleAuthManager.shared.signOut()
-                self.isDeletingAccount = false
                 self.showDeletedMessage = true
             }
         }

@@ -12,7 +12,7 @@ Eddie Brayman, 72, independent iOS developer, East Village NYC. 50+ years coding
 **App Store URL:** https://apps.apple.com/us/app/skadoodle/id6771497563  
 **Bundle ID:** maxsdad.skadoodle  
 **Firebase project:** snoodle-68bfc  
-**Current version at last session:** 2.1 build 13 (June 2026) — ship candidate
+**Current version at last session:** 2.1 build 14 (June 2026) — ship candidate
 **Last released to App Store:** 2.1 build 4 (June 2026)
 
 ---
@@ -289,6 +289,27 @@ Investigated and tested extensively. Pen lines and stamp positions are geometric
 - **Magic panel not opening in doodle stamp canvas** — `WindowPinchView` in `DoodleStampCreatorView` was missing `onStampTap` callback (nil). `handleWindowTap` found a hit → called nil → nothing; if it fired after `SpatialTapGesture` had already selected, the else branch called `onCanvasTap` and deselected. Fix: added `onStampTap: { id in selectedStampId = id; showStampMagicMenu = true }` to match `DrawScreen`. (`CustomStampViews.swift`)
 - **Compiler type-check timeouts in `CustomStampViews.swift`** — Three separate expressions were too complex for Swift to check inside deeply nested closures: (1) `PlacedStamp(...)` with nested `CGPoint` → hoisted `dupePosX/Y` as explicit `CGFloat` locals; (2) `DrawingCanvas` + modifiers chain → extracted to `doodleDrawingCanvas()` `@ViewBuilder`.
 
+## New in v2.1 b14
+
+### New Features
+- **Layer visibility toggle** — `···` menu on drawing layer chips in the Layers panel. "Hide Layer" / "Show Layer" toggles visibility. Hidden layer IDs stored in `@State private var hiddenLayerIds: Set<UUID>`. Hidden layers are excluded from the live render (`layerDrawingView` checks `hiddenLayerIds`) and from the final export (`handleDone` filters them). The drawing layer selection is unchanged by hiding.
+- **Extract Drawing Layer as Stamp** — second option in the `···` chip menu. Renders the layer's lines to a white-background `UIImage`, runs Vision instance segmentation (`extractObjectsWithOrigins(from:)`), and places each extracted object as a `PlacedStamp` immediately above the source layer in `layerOrder`. Uses `croppedToContentWithOrigin()` to find each object's bounding box and project it to canvas coordinates. `isExtractingLayer: Bool` state drives a progress indicator. New free function `extractObjectsWithOrigins(from:)` lives before `topmostStampHit` in `DrawScreen.swift`.
+- **Always-selected drawing layer model** — There is always a currently selected drawing layer (`userSelectedLayerId` never nil when drawing layers exist). Drawing chip tap always selects that layer (no toggle-to-nil). Stamp chip tap keeps `userSelectedLayerId` unchanged — no dual highlight because `isActive` for a drawing chip requires `selectedStampId == nil`. Color, eraser, and pen studio buttons no longer clear `selectedStampId` (they're just settings). `onBeforeDraw` handles `drawingLayers.isEmpty` case by creating a new layer. `activeLayerLinesBinding` guarded against empty `drawingLayers`.
+- **Layer chip `···` menu** — 14pt bold, `.primary.opacity(0.7)`, overlaid on drawing layer chips. Presents "Hide/Show Layer" and "Extract as Stamp" actions.
+- **Layers panel title enlarged** — 13pt → 16pt.
+- **All layers deletable** — `canDeleteLayerEntry` always returns `true`. On deletion, the next available drawing layer is selected.
+
+### Bug Fixes (b14)
+- **Photo stamp picker "+" button flicker** — selecting photo source (camera / library) from the "+" button caused dismiss → reappear → dismiss flicker. Root cause: `.confirmationDialog` inside a `.sheet` triggers a system-level iOS presentation conflict. Fix: replaced `showSourcePicker` state + `.confirmationDialog` with a `Menu` containing "Take Photo" and "Choose from Library" actions directly on the button. Applies to both the grid "+" button and `addPhotoButton` in `StampTools.swift`.
+- **`@StateObject` on singletons** — `DrawScreen`, `ContentView`, `ProfileView`, `StampTools`, and `SettingsTab` all used `@StateObject` with `.shared` singletons. Changed to `@ObservedObject` in all places. (`DrawScreen.swift`, `ContentView.swift`, `ProfileView.swift`, `StampTools.swift`, `SettingsTab.swift`)
+- **`deleteAccount()` swallowed all errors silently** — user saw success even if Firebase deletes partially failed. Fixed: errors collected via `NSLock`, fatal errors surfaced via new `deleteAccountErrorMessage` state + alert. (`SettingsTab.swift`)
+- **`CanvasSnapshot` didn't capture bg effect params** — undo restored background image but not blur/brightness/saturation/opacity. Fixed: added `bgOpacity`, `bgBlur`, `bgBrightness`, `bgSaturation` fields to `CanvasSnapshot`; all 11 callsites updated; undo/redo restore blocks updated. (`DrawingEngine.swift`, `DrawScreen.swift`)
+- **`BackgroundPhotoHistory.remove(at:)` was synchronous** — `add()` and `moveToTop()` are async; `remove()` wasn't. Made async for consistency. (`DrawScreen.swift`)
+- **`appendStampToLayer` cleared `userSelectedLayerId`** — placing a stamp was deselecting the active drawing layer. Removed that line. (`DrawScreen.swift`)
+- **`PulsingCrosshair` dead code** — struct removed from `DrawScreen.swift` (was dead since b7).
+
+---
+
 ## New in v2.1 b8–b10
 
 ### New Feature: Autograph Stamp
@@ -305,17 +326,11 @@ Investigated and tested extensively. Pen lines and stamp positions are geometric
 
 ## Outstanding Items (for next version)
 
-### Recommended fixes
-1. **`@StateObject` on singletons** — Multiple views use `@StateObject` with `.shared` singletons. Should be `@ObservedObject`. Affects: `DrawScreen`, `GalleryTab` (5 places), `ProfileView`, `StampTools`.
-2. **`deleteAccount()` swallows all errors silently** — User sees success even if Firebase deletes partially fail.
-3. **`CanvasSnapshot` doesn't capture bg effect params** — Undo restores background image but not blur/brightness/saturation/opacity values. Requires adding fields to `CanvasSnapshot` and updating all callsites (~8 places). Medium refactor, defer to next version.
-4. **`BackgroundPhotoHistory.remove(at:)` is synchronous** — `add()` and `moveToTop()` are async; `remove()` isn't. Low impact (user-initiated), but inconsistent. Easy fix when touching that file next.
-
 ### Low priority / style
 - `ProfileView.swift:409-410` — `.presentationDetents` / `.presentationDragIndicator` after `.fullScreenCover` are dead code.
 - `fetchPublicDoodles` does redundant client-side sort after ordered Firebase query.
 - APNs watchdog timer in `snoodleApp.swift` captures `self` without `[weak self]` (benign since AppDelegate has app lifetime).
-- `PulsingCrosshair` struct in `DrawScreen.swift` — dead code since b7 (replaced by snug rect). Safe to delete.
+- `GalleryTab.swift` still uses `@StateObject` with `.shared` singletons (5 places) — lower priority since it's a presentation-only view, but should be `@ObservedObject` for correctness.
 
 ---
 
