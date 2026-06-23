@@ -1619,6 +1619,53 @@ struct DrawScreen: View {
         }
     }
 
+    /// Double-tap on canvas background: flatten ALL visible layers (drawings + stamps) and extract as stamps.
+    /// Places stamps on top of all existing layers. Only called when tap misses every stamp.
+    func extractAllLayersAsStamps() {
+        let visibleLayers = drawingLayers.filter { !hiddenLayerIds.contains($0.id) }
+        let visibleLayerOrder = layerOrder.filter { entry in
+            if case .drawing(let id) = entry { return !hiddenLayerIds.contains(id) }
+            return true
+        }
+        let currentStamps = placedStamps
+        guard !visibleLayers.flatMap({ $0.lines }).isEmpty || !currentStamps.isEmpty else { return }
+        isExtractingLayer = true
+        let size = canvasSize
+        Task {
+            // Render on white, no background image — gives Vision clean contrast
+            let rendered = renderCanvasWithStamps(
+                drawingLayers: visibleLayers, stamps: currentStamps, layerOrder: visibleLayerOrder,
+                size: size, canvasColor: .white
+            )
+            let objects = await extractObjectsWithOrigins(from: rendered)
+            await MainActor.run {
+                isExtractingLayer = false
+                guard !objects.isEmpty else { return }
+                pushUndoSnapshot()
+                var insertIdx = layerOrder.endIndex
+                for (img, origin) in objects {
+                    guard let stamp = CustomStampManager.shared.addStamp(image: img, source: .doodle) else { continue }
+                    let centerX = origin.x + img.size.width  / 2
+                    let centerY = origin.y + img.size.height / 2
+                    let stampSize = max(img.size.width, img.size.height)
+                    var placed = PlacedStamp(emoji: "",
+                                            position: CGPoint(x: centerX, y: centerY),
+                                            size: stampSize)
+                    placed.customImageId = stamp.id
+                    placedStamps.append(placed)
+                    layerOrder.insert(.stamp(placed.id), at: insertIdx)
+                    insertIdx += 1
+                    if let stampImg = stamp.image { scheduleSnugScan(for: placed.id, image: stampImg) }
+                }
+                // Select the last placed stamp with snug rect + magic menu
+                if let last = placedStamps.last {
+                    selectedStampId = last.id
+                    showStampMagicMenu = true
+                }
+            }
+        }
+    }
+
     /// Push undo snapshot and clear redo.
     func pushUndoSnapshot() {
         undoStack.append(CanvasSnapshot(
@@ -2451,6 +2498,15 @@ struct DrawScreen: View {
                                             selectedStampId = nil
                                             showStampMagicMenu = false
                                         }
+                                    }
+                            )
+                            .simultaneousGesture(
+                                SpatialTapGesture(count: 2)
+                                    .onEnded { value in
+                                        let loc = value.location
+                                        // Only fire on background — tapping a stamp does nothing
+                                        guard topmostStampHit(at: loc, layerOrder: layerOrder, stamps: placedStamps) == nil else { return }
+                                        extractAllLayersAsStamps()
                                     }
                             )
                             .background(GeometryReader { geo in

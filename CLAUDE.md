@@ -12,7 +12,7 @@ Eddie Brayman, 72, independent iOS developer, East Village NYC. 50+ years coding
 **App Store URL:** https://apps.apple.com/us/app/skadoodle/id6771497563  
 **Bundle ID:** maxsdad.skadoodle  
 **Firebase project:** snoodle-68bfc  
-**Current version at last session:** 2.1 build 14 (June 2026) — ship candidate
+**Current version at last session:** 2.1 build 15 (June 2026) — ship candidate
 **Last released to App Store:** 2.1 build 4 (June 2026)
 
 ---
@@ -288,6 +288,18 @@ Investigated and tested extensively. Pen lines and stamp positions are geometric
 - **Deselect-then-reselect flicker on transparent-pixel tap** — Tapping inside a stamp's bounding box on a transparent pixel: `StampContainerView.canvasTap` fired immediately (deselecting), then `StampItemUIView.singleTap` fired ~350ms later (after double-tap-fail wait) and re-selected because `selectedStampId` was already nil. Fix: `handleSingleTap` now guards with `point(inside: pt, with: nil)` before calling `onTap()` — transparent-pixel taps skip `onTap` entirely. (`StampCanvas.swift`)
 - **Magic panel not opening in doodle stamp canvas** — `WindowPinchView` in `DoodleStampCreatorView` was missing `onStampTap` callback (nil). `handleWindowTap` found a hit → called nil → nothing; if it fired after `SpatialTapGesture` had already selected, the else branch called `onCanvasTap` and deselected. Fix: added `onStampTap: { id in selectedStampId = id; showStampMagicMenu = true }` to match `DrawScreen`. (`CustomStampViews.swift`)
 - **Compiler type-check timeouts in `CustomStampViews.swift`** — Three separate expressions were too complex for Swift to check inside deeply nested closures: (1) `PlacedStamp(...)` with nested `CGPoint` → hoisted `dupePosX/Y` as explicit `CGFloat` locals; (2) `DrawingCanvas` + modifiers chain → extracted to `doodleDrawingCanvas()` `@ViewBuilder`.
+
+## New in v2.1 b15
+
+### New Feature: Double-Tap to Extract All Layers as Stamps
+- **Double-tap on canvas background** — `SpatialTapGesture(count: 2)` added as `.simultaneousGesture` on `DrawingCanvas`. Only fires when the tap misses every stamp (`topmostStampHit` returns nil). Tapping on a stamp does nothing.
+- **Full flatten** — renders all visible drawing layers + all existing stamps together (via `renderCanvasWithStamps` with white background, no background image) so Vision gets clean contrast. Hidden layers excluded.
+- **Vision extraction** — runs `extractObjectsWithOrigins(from:)` on the flattened image; each object is placed as a doodle stamp at the top of `layerOrder`, positioned at its original canvas coordinates.
+- **Auto-select last stamp** — after extraction, the last placed stamp is selected with the snug rect and magic menu open.
+- **Undo/redo** — `pushUndoSnapshot()` called before any stamps are placed; single undo removes all extracted stamps.
+- **`extractAllLayersAsStamps()`** — new function in `DrawScreen.swift`. Parallels `extractDrawingLayerAsStamp` but operates on the full visible canvas rather than a single layer.
+
+---
 
 ## New in v2.1 b14
 
