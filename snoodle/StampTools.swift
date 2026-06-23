@@ -392,6 +392,7 @@ struct StampToolButton: View {
     var onPlaceMultipleStamps: (([UUID]) -> Void)? = nil
     /// Called when multiple emojis are selected in multi-select mode.
     var onPlaceMultipleEmojis: (([String]) -> Void)? = nil
+    var onDoubleTap: (() -> Void)? = nil
     @State private var showPicker = false
     @AppStorage("stampPickerMultiSelect_0") private var multiSelectEmoji  = false
     @AppStorage("stampPickerMultiSelect_1") private var multiSelectPhotos = false
@@ -1092,6 +1093,7 @@ func renderCanvasWithStamps(drawingLayers: [DrawingLayer], stamps: [PlacedStamp]
                             renderLine(line, in: &context, canvasColor: canvasSwiftUI)
                         }
                     }
+                    .opacity(layer.opacity)
                 }
             case .stamp(let stampId):
                 if let stamp = stamps.first(where: { $0.id == stampId }) {
@@ -1251,6 +1253,10 @@ private struct TweakRepeatButton: View {
                         timer = nil
                     }
             )
+            .onDisappear {
+                timer?.invalidate()
+                timer = nil
+            }
     }
 }
 

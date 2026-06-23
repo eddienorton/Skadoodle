@@ -1005,6 +1005,62 @@ func topmostStampHit(at pt: CGPoint, layerOrder: [LayerEntry], stamps: [PlacedSt
     return nil
 }
 
+struct LayerOpacitySheet: View {
+    let targetId: UUID?
+    @Binding var drawingLayers: [DrawingLayer]
+    @Binding var placedStamps: [PlacedStamp]
+    let pushSnapshot: () -> Void
+
+    @State private var sliderValue: Double = 1.0
+    @State private var snapshotPushed: Bool = false
+
+    private var currentOpacity: Double {
+        if let id = targetId {
+            if let idx = drawingLayers.firstIndex(where: { $0.id == id }) {
+                return drawingLayers[idx].opacity
+            } else if let idx = placedStamps.firstIndex(where: { $0.id == id }) {
+                return placedStamps[idx].opacity
+            }
+        }
+        return 1.0
+    }
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Text("Layer Opacity")
+                .font(.headline)
+                .padding(.top, 20)
+            HStack {
+                Text("0%").font(.caption).foregroundColor(.secondary)
+                Slider(value: $sliderValue, in: 0...1) { editing in
+                    if editing && !snapshotPushed {
+                        pushSnapshot()
+                        snapshotPushed = true
+                    }
+                }
+                Text("100%").font(.caption).foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 24)
+            Text("\(Int(sliderValue * 100))%")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+            Spacer()
+        }
+        .onAppear {
+            sliderValue = currentOpacity
+            snapshotPushed = false
+        }
+        .onChange(of: sliderValue) { newVal in
+            guard let id = targetId else { return }
+            if let idx = drawingLayers.firstIndex(where: { $0.id == id }) {
+                drawingLayers[idx].opacity = newVal
+            } else if let idx = placedStamps.firstIndex(where: { $0.id == id }) {
+                placedStamps[idx].opacity = newVal
+            }
+        }
+    }
+}
+
 struct DrawScreen: View {
     @EnvironmentObject var store: SnoodleStore
     @Binding var isPresented: Bool
@@ -1026,6 +1082,8 @@ struct DrawScreen: View {
     @State private var chipSwipeOffsets: [UUID: CGFloat] = [:]
     @State private var hiddenLayerIds: Set<UUID> = []
     @State private var isExtractingLayer: Bool = false
+    @State private var opacityTargetId: UUID? = nil
+    @State private var showOpacitySheet: Bool = false
     @State private var isGeneratingCaption: Bool = false
     @State private var canvasSize: CGSize = CGSize(width: 300, height: 300)
     @State private var undoStack: [CanvasSnapshot] = []
@@ -1161,7 +1219,6 @@ struct DrawScreen: View {
         guard newIdx >= 0 && newIdx < layerOrder.count else { return }
         pushUndoSnapshot()
         layerOrder.swapAt(idx, newIdx)
-        consolidateDrawingLayers()
     }
 
     func deleteLayerEntry(_ entry: LayerEntry) {
@@ -1296,7 +1353,54 @@ struct DrawScreen: View {
                     // Drawing layer selection is independent — don't clear it
                 }
             }
-            // ··· menu and hidden badge — drawing layers only
+            // ··· menu and hidden badge — all layer types
+            .overlay(alignment: .topTrailing) {
+                if case .stamp(let id) = entry {
+                    HStack(spacing: 3) {
+                        if hiddenLayerIds.contains(id) {
+                            Image(systemName: "eye.slash.fill")
+                                .font(.system(size: 9))
+                                .foregroundColor(.white)
+                                .shadow(color: .black.opacity(0.6), radius: 1)
+                        }
+                        Menu {
+                            Button {
+                                if hiddenLayerIds.contains(id) { hiddenLayerIds.remove(id) }
+                                else { hiddenLayerIds.insert(id) }
+                            } label: {
+                                Label(hiddenLayerIds.contains(id) ? "Show Stamp" : "Hide Stamp",
+                                      systemImage: hiddenLayerIds.contains(id) ? "eye" : "eye.slash")
+                            }
+                            Button {
+                                opacityTargetId = id
+                                showOpacitySheet = true
+                            } label: {
+                                Label("Opacity", systemImage: "circle.lefthalf.filled")
+                            }
+                            Button {
+                                duplicateStamp(id: id)
+                            } label: {
+                                Label("Duplicate Stamp", systemImage: "plus.rectangle.on.rectangle")
+                            }
+                        } label: {
+                            Image(systemName: "ellipsis")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundColor(.primary.opacity(0.7))
+                                .frame(width: 24, height: 24)
+                                .contentShape(Rectangle())
+                        }
+                    }
+                    .padding(.top, 3)
+                    .padding(.trailing, 3)
+                }
+            }
+            .overlay(alignment: .center) {
+                if case .stamp(let id) = entry, hiddenLayerIds.contains(id) {
+                    Color.white.opacity(0.55)
+                        .clipShape(RoundedRectangle(cornerRadius: 7))
+                        .allowsHitTesting(false)
+                }
+            }
             .overlay(alignment: .topTrailing) {
                 if case .drawing(let id) = entry {
                     HStack(spacing: 3) {
@@ -1317,6 +1421,17 @@ struct DrawScreen: View {
                                       systemImage: hiddenLayerIds.contains(id) ? "eye" : "eye.slash")
                             }
                             Button {
+                                opacityTargetId = id
+                                showOpacitySheet = true
+                            } label: {
+                                Label("Opacity", systemImage: "circle.lefthalf.filled")
+                            }
+                            Button {
+                                duplicateDrawingLayer(layerId: id)
+                            } label: {
+                                Label("Duplicate Layer", systemImage: "plus.rectangle.on.rectangle")
+                            }
+                            Button {
                                 extractDrawingLayerAsStamp(layerId: id)
                             } label: {
                                 Label("Extract as Stamp", systemImage: "scissors")
@@ -1332,6 +1447,13 @@ struct DrawScreen: View {
                     }
                     .padding(.top, 3)
                     .padding(.trailing, 3)
+                }
+            }
+            .overlay(alignment: .center) {
+                if case .drawing(let id) = entry, hiddenLayerIds.contains(id) {
+                    Color.white.opacity(0.55)
+                        .clipShape(RoundedRectangle(cornerRadius: 7))
+                        .allowsHitTesting(false)
                 }
             }
         }
@@ -1375,6 +1497,25 @@ struct DrawScreen: View {
             bgNavPath = NavigationPath()
             saveBgStateForCancel()
             showCanvasBgSheet = true
+        }
+        .overlay(alignment: .topTrailing) {
+            Menu {
+                Button {
+                    extractAllLayersAsStamps()
+                } label: {
+                    Label("Extract All as Stamps", systemImage: "square.on.square.badge.person.crop")
+                }
+                .disabled(isExtractingLayer)
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundColor(.white)
+                    .shadow(color: .black.opacity(0.7), radius: 1)
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .padding(.top, 3)
+            .padding(.trailing, 3)
         }
     }
 
@@ -1542,10 +1683,10 @@ struct DrawScreen: View {
                                 .listRowInsets(EdgeInsets(top: 3, leading: 6, bottom: 3, trailing: 6))
                         }
                         .onMove { source, destination in
+                            pushUndoSnapshot()
                             var reversed = Array(layerOrder.reversed())
                             reversed.move(fromOffsets: source, toOffset: destination)
                             layerOrder = reversed.reversed()
-                            consolidateDrawingLayers()
                         }
                         backgroundLayerChip
                             .listRowBackground(Color.clear)
@@ -1619,12 +1760,56 @@ struct DrawScreen: View {
         }
     }
 
+    /// Duplicate a stamp — inserts an identical copy directly above the source in layerOrder.
+    func duplicateStamp(id: UUID) {
+        guard let stamp = placedStamps.first(where: { $0.id == id }),
+              let orderIdx = layerOrder.firstIndex(where: { $0.id == id }) else { return }
+        pushUndoSnapshot()
+        var dupe = PlacedStamp(emoji: stamp.emoji,
+                               position: CGPoint(x: stamp.position.x + 12, y: stamp.position.y + 12),
+                               size: stamp.size)
+        dupe.rotation = stamp.rotation
+        dupe.opacity = stamp.opacity
+        dupe.flipX = stamp.flipX; dupe.flipY = stamp.flipY; dupe.flipStep = stamp.flipStep
+        dupe.customImageId = stamp.customImageId
+        dupe.inlineImage = stamp.inlineImage
+        dupe.stampText = stamp.stampText
+        dupe.fontName = stamp.fontName
+        dupe.fontStyle = stamp.fontStyle
+        dupe.textAlignment = stamp.textAlignment
+        dupe.textColor = stamp.textColor
+        dupe.textBgColor = stamp.textBgColor
+        dupe.stampWidth = stamp.stampWidth
+        dupe.stampHeight = stamp.stampHeight
+        dupe.snugWidthRatio = stamp.snugWidthRatio
+        dupe.snugHeightRatio = stamp.snugHeightRatio
+        placedStamps.append(dupe)
+        layerOrder.insert(.stamp(dupe.id), at: orderIdx + 1)
+        selectedStampId = dupe.id
+        showStampMagicMenu = true
+        if let img = dupe.inlineImage ?? dupe.customImageId.flatMap({ _ in CustomStampManager.shared.stamps.first(where: { $0.id == id })?.image }) {
+            scheduleSnugScan(for: dupe.id, image: img)
+        }
+    }
+
+    /// Duplicate a drawing layer — copies all lines to a new layer inserted directly above the source.
+    func duplicateDrawingLayer(layerId: UUID) {
+        guard let layer = drawingLayers.first(where: { $0.id == layerId }),
+              let orderIdx = layerOrder.firstIndex(where: { $0.id == layerId }) else { return }
+        pushUndoSnapshot()
+        let newLayer = DrawingLayer(lines: layer.lines)
+        drawingLayers.append(newLayer)
+        layerOrder.insert(.drawing(newLayer.id), at: orderIdx + 1)
+        userSelectedLayerId = newLayer.id
+    }
+
     /// Double-tap on canvas background: flatten ALL visible layers (drawings + stamps) and extract as stamps.
     /// Places stamps on top of all existing layers. Only called when tap misses every stamp.
     func extractAllLayersAsStamps() {
         let visibleLayers = drawingLayers.filter { !hiddenLayerIds.contains($0.id) }
         let visibleLayerOrder = layerOrder.filter { entry in
             if case .drawing(let id) = entry { return !hiddenLayerIds.contains(id) }
+            if case .stamp(let id) = entry { return !hiddenLayerIds.contains(id) }
             return true
         }
         let currentStamps = placedStamps
@@ -1675,7 +1860,7 @@ struct DrawScreen: View {
         redoStack = []
     }
 
-    // Place a stamp: append to placedStamps + layerOrder, reset drawing selection.
+    // Place a stamp: append to placedStamps + layerOrder.
     // No empty drawing layer is created here — one will be lazily created on first stroke via onBeforeDraw.
     func appendStampToLayer(_ stamp: PlacedStamp) {
         placedStamps.append(stamp)
@@ -1797,6 +1982,7 @@ struct DrawScreen: View {
         let visibleLayers = drawingLayers.filter { !hiddenLayerIds.contains($0.id) }
         let visibleLayerOrder = layerOrder.filter { entry in
             if case .drawing(let id) = entry { return !hiddenLayerIds.contains(id) }
+            if case .stamp(let id) = entry { return !hiddenLayerIds.contains(id) }
             return true
         }
         let img = renderCanvasWithStamps(drawingLayers: visibleLayers, stamps: placedStamps, layerOrder: visibleLayerOrder, size: canvasSize, canvasColor: UIColor(canvasColor), backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation)
@@ -1902,13 +2088,16 @@ struct DrawScreen: View {
         if !hiddenLayerIds.contains(id),
            let layer = drawingLayers.first(where: { $0.id == id }) {
             drawingLayerView(layer: layer)
+                .opacity(layer.opacity)
         }
     }
 
     @ViewBuilder
     func layerStampView(id: UUID) -> some View {
-        if let stamp = placedStamps.first(where: { $0.id == id }) {
+        if !hiddenLayerIds.contains(id),
+           let stamp = placedStamps.first(where: { $0.id == id }) {
             StampRenderView(stamp: stamp)
+            // opacity is applied inside StampRenderView from stamp.opacity
         }
     }
 
@@ -2356,6 +2545,18 @@ struct DrawScreen: View {
                 }
             }
         }
+        .sheet(isPresented: $showOpacitySheet, onDismiss: {
+            opacityTargetId = nil
+        }) {
+            LayerOpacitySheet(
+                targetId: opacityTargetId,
+                drawingLayers: $drawingLayers,
+                placedStamps: $placedStamps,
+                pushSnapshot: { pushUndoSnapshot() }
+            )
+            .presentationDetents([.height(180)])
+            .presentationDragIndicator(.visible)
+        }
         .sheet(isPresented: $showBgEditor) {
             NavigationView {
                 BackgroundEditorView(
@@ -2455,9 +2656,22 @@ struct DrawScreen: View {
                                 pushUndoSnapshot()
                                 // Lazy layer creation: if there are no drawing layers, or the topmost
                                 // entry is a stamp and no drawing layer is explicitly selected.
+                                let topIsStamp = layerOrder.last.map { if case .stamp = $0 { return true } else { return false } } ?? false
+                                // Create a new layer when the top of the stack is a stamp and either:
+                                // - no drawing layer is selected, OR
+                                // - a stamp is currently selected (user focused on a stamp, not a drawing layer)
                                 let needsNewLayer = drawingLayers.isEmpty ||
-                                    (userSelectedLayerId == nil && layerOrder.last.map { if case .stamp = $0 { return true } else { return false } } ?? false)
+                                    (topIsStamp && (userSelectedLayerId == nil || selectedStampId != nil))
                                 if needsNewLayer {
+                                    // Prune empty drawing layers stranded below stamps before creating the new one
+                                    let emptyIds = Set(drawingLayers.filter { $0.lines.isEmpty }.map { $0.id })
+                                    if !emptyIds.isEmpty {
+                                        drawingLayers.removeAll { emptyIds.contains($0.id) }
+                                        layerOrder.removeAll {
+                                            if case .drawing(let id) = $0 { return emptyIds.contains(id) }
+                                            return false
+                                        }
+                                    }
                                     let newLayer = DrawingLayer()
                                     drawingLayers.append(newLayer)
                                     layerOrder.append(.drawing(newLayer.id))
@@ -2498,15 +2712,6 @@ struct DrawScreen: View {
                                             selectedStampId = nil
                                             showStampMagicMenu = false
                                         }
-                                    }
-                            )
-                            .simultaneousGesture(
-                                SpatialTapGesture(count: 2)
-                                    .onEnded { value in
-                                        let loc = value.location
-                                        // Only fire on background — tapping a stamp does nothing
-                                        guard topmostStampHit(at: loc, layerOrder: layerOrder, stamps: placedStamps) == nil else { return }
-                                        extractAllLayersAsStamps()
                                     }
                             )
                             .background(GeometryReader { geo in
@@ -2582,7 +2787,8 @@ struct DrawScreen: View {
                                     height: backgroundOffset.height + delta.height
                                 )
                                 backgroundOffset = clampedBackgroundOffset(newOffset)
-                            } : nil
+                            } : nil,
+                            onBackgroundDoubleTap: { extractAllLayersAsStamps() }
                         )
                         } // end stamps ZStack
                         .coordinateSpace(name: "stampCanvas")
@@ -3037,6 +3243,7 @@ struct WindowPinchView: UIViewRepresentable {
     var onBeforeStampChange: (() -> Void)? = nil
     var onBackgroundPanBegan: (() -> Void)? = nil
     var onBackgroundPan: ((CGSize) -> Void)? = nil
+    var onBackgroundDoubleTap: (() -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -3084,6 +3291,16 @@ struct WindowPinchView: UIViewRepresentable {
                 window.addGestureRecognizer(longPress)
                 context.coordinator.longPressRecognizer = longPress
 
+                let doubleTap = UITapGestureRecognizer(
+                    target: context.coordinator,
+                    action: #selector(Coordinator.handleWindowDoubleTap(_:))
+                )
+                doubleTap.numberOfTapsRequired = 2
+                doubleTap.cancelsTouchesInView = false
+                doubleTap.delegate = context.coordinator
+                window.addGestureRecognizer(doubleTap)
+                context.coordinator.doubleTapRecognizer = doubleTap
+
                 let tap = UITapGestureRecognizer(
                     target: context.coordinator,
                     action: #selector(Coordinator.handleWindowTap(_:))
@@ -3091,6 +3308,7 @@ struct WindowPinchView: UIViewRepresentable {
                 tap.numberOfTapsRequired = 1
                 tap.cancelsTouchesInView = false
                 tap.delegate = context.coordinator
+                tap.require(toFail: doubleTap)
                 window.addGestureRecognizer(tap)
                 context.coordinator.tapRecognizer = tap
             }
@@ -3122,6 +3340,9 @@ struct WindowPinchView: UIViewRepresentable {
             if let tap = coordinator.tapRecognizer {
                 window.removeGestureRecognizer(tap)
             }
+            if let doubleTap = coordinator.doubleTapRecognizer {
+                window.removeGestureRecognizer(doubleTap)
+            }
         }
     }
 
@@ -3131,6 +3352,7 @@ struct WindowPinchView: UIViewRepresentable {
         var rotationRecognizer: UIRotationGestureRecognizer?
         var longPressRecognizer: UILongPressGestureRecognizer?
         var tapRecognizer: UITapGestureRecognizer?
+        var doubleTapRecognizer: UITapGestureRecognizer?
         var backgroundPanRecognizer: UIPanGestureRecognizer?
         private var lastPanTranslation: CGPoint = .zero
         var startCentroid: CGPoint = .zero
@@ -3298,6 +3520,20 @@ struct WindowPinchView: UIViewRepresentable {
                 targetId = nil
             default: break
             }
+        }
+
+        @objc func handleWindowDoubleTap(_ g: UITapGestureRecognizer) {
+            guard !parent.showLayersPanel else { return }
+            let windowPt = g.location(in: nil)
+            let canvasX = windowPt.x - parent.canvasOrigin.x
+            let canvasY = windowPt.y - parent.canvasOrigin.y
+            guard canvasX >= 0 && canvasY >= 0 &&
+                  canvasX <= parent.canvasSize.width &&
+                  canvasY <= parent.canvasSize.height else { return }
+            let loc = CGPoint(x: canvasX, y: canvasY)
+            // Only fire on background — never when a stamp is under the tap
+            guard topmostStampHit(at: loc, layerOrder: parent.layerOrder, stamps: parent.placedStamps) == nil else { return }
+            parent.onBackgroundDoubleTap?()
         }
 
         @objc func handleWindowTap(_ g: UITapGestureRecognizer) {

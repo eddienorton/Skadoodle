@@ -76,9 +76,11 @@ enum PenType: Equatable {
 struct DrawingLayer: Identifiable {
     var id: UUID
     var lines: [DrawingLine]
-    init(id: UUID = UUID(), lines: [DrawingLine] = []) {
+    var opacity: Double = 1.0
+    init(id: UUID = UUID(), lines: [DrawingLine] = [], opacity: Double = 1.0) {
         self.id = id
         self.lines = lines
+        self.opacity = opacity
     }
 }
 

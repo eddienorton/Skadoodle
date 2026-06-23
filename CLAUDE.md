@@ -12,7 +12,7 @@ Eddie Brayman, 72, independent iOS developer, East Village NYC. 50+ years coding
 **App Store URL:** https://apps.apple.com/us/app/skadoodle/id6771497563  
 **Bundle ID:** maxsdad.skadoodle  
 **Firebase project:** snoodle-68bfc  
-**Current version at last session:** 2.1 build 15 (June 2026) — ship candidate
+**Current version at last session:** 2.1 build 15 (June 2026) — submitted
 **Last released to App Store:** 2.1 build 4 (June 2026)
 
 ---
@@ -291,13 +291,20 @@ Investigated and tested extensively. Pen lines and stamp positions are geometric
 
 ## New in v2.1 b15
 
-### New Feature: Double-Tap to Extract All Layers as Stamps
-- **Double-tap on canvas background** — `SpatialTapGesture(count: 2)` added as `.simultaneousGesture` on `DrawingCanvas`. Only fires when the tap misses every stamp (`topmostStampHit` returns nil). Tapping on a stamp does nothing.
-- **Full flatten** — renders all visible drawing layers + all existing stamps together (via `renderCanvasWithStamps` with white background, no background image) so Vision gets clean contrast. Hidden layers excluded.
-- **Vision extraction** — runs `extractObjectsWithOrigins(from:)` on the flattened image; each object is placed as a doodle stamp at the top of `layerOrder`, positioned at its original canvas coordinates.
-- **Auto-select last stamp** — after extraction, the last placed stamp is selected with the snug rect and magic menu open.
-- **Undo/redo** — `pushUndoSnapshot()` called before any stamps are placed; single undo removes all extracted stamps.
-- **`extractAllLayersAsStamps()`** — new function in `DrawScreen.swift`. Parallels `extractDrawingLayerAsStamp` but operates on the full visible canvas rather than a single layer.
+### New Features
+- **Extract All Layers as Stamps** — flattens all visible drawing layers + stamps into a single image, runs Vision instance segmentation, and places each extracted object as a doodle stamp at its original canvas coordinates. Triggered via `···` menu on the **BG chip** in the Layers panel ("Extract All as Stamps"). Undo/redo supported (single undo removes all placed stamps). Last extracted stamp is auto-selected with snug rect + magic menu open. `extractAllLayersAsStamps()` in `DrawScreen.swift`.
+  - Note: was initially wired as a canvas double-tap (`UITapGestureRecognizer` with `numberOfTapsRequired = 2` in `WindowPinchView`) but moved to the BG chip menu due to gesture conflicts.
+- **Per-layer opacity** — `DrawingLayer` now has `var opacity: Double = 1.0`. `PlacedStamp` already had `opacity`. Both drawing and stamp layer `···` menus now include an **Opacity** option that opens `LayerOpacitySheet` — a `.height(180)` sheet with a 0–100% slider. Changes apply immediately; undo snapshot pushed on first slider drag. Export path (`renderCanvasWithStamps`) applies `.opacity(layer.opacity)` to drawing layer canvases. Stamp opacity already applied inside `StampRenderView`.
+- **Stamp layer `···` menu** — stamp chips in the Layers panel now have a `···` menu (matching drawing layer chips) with: Hide/Show Stamp, Opacity, Duplicate Stamp. Eye-slash badge + white wash overlay on hidden stamp chips.
+- **`···` dots white with shadow** — all layer chip ellipsis buttons changed from `.primary.opacity(0.7)` to `.white` + `.shadow(color: .black.opacity(0.7), radius: 1)` for legibility on dark/black canvas thumbnails.
+- **Drawing layer Duplicate** — `duplicateDrawingLayer(layerId:)` copies lines into a new `DrawingLayer` inserted immediately above the source in `layerOrder`. Available via drawing layer `···` menu.
+- **Layer drag-to-reorder no longer merges adjacent drawing layers** — `consolidateDrawingLayers()` removed from `onMove` and `moveLayerEntry`. Adjacent drawing layers are valid state.
+- **Ghost empty layer fix** — empty drawing layer pruning moved from `appendStampToLayer` (which broke pen flow) to inside `onBeforeDraw`'s `if needsNewLayer` block. Pruning only runs when a new layer is being created.
+- **Draw-above-stamp fix** — `needsNewLayer` in `onBeforeDraw` now also triggers when `selectedStampId != nil`, so drawing after selecting a stamp always creates a new layer above all stamps.
+
+### Bug Fixes
+- **TweakRepeatButton timer leak** — holding a tweak button (rotate, move, resize) while the precision panel is dismissed left an orphaned `Timer` firing indefinitely, causing stamps to rotate/move uncontrollably. Fix: `.onDisappear { timer?.invalidate(); timer = nil }` added to `TweakRepeatButton`. (`StampTools.swift`)
+- **Duplicate stamp compile errors** — `isTextStamp` is computed (not settable); correct field is `stampText` not `textContent`; `flatMap` closure fixed to `{ _ in ... }`. (`DrawScreen.swift`)
 
 ---
 
