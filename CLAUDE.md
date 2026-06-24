@@ -12,7 +12,7 @@ Eddie Brayman, 72, independent iOS developer, East Village NYC. 50+ years coding
 **App Store URL:** https://apps.apple.com/us/app/skadoodle/id6771497563  
 **Bundle ID:** maxsdad.skadoodle  
 **Firebase project:** snoodle-68bfc  
-**Current version at last session:** 2.1 build 15 (June 2026) — submitted
+**Current version at last session:** 2.1 build 16 (June 2026) — pending submission
 **Last released to App Store:** 2.1 build 4 (June 2026)
 
 ---
@@ -289,6 +289,17 @@ Investigated and tested extensively. Pen lines and stamp positions are geometric
 - **Magic panel not opening in doodle stamp canvas** — `WindowPinchView` in `DoodleStampCreatorView` was missing `onStampTap` callback (nil). `handleWindowTap` found a hit → called nil → nothing; if it fired after `SpatialTapGesture` had already selected, the else branch called `onCanvasTap` and deselected. Fix: added `onStampTap: { id in selectedStampId = id; showStampMagicMenu = true }` to match `DrawScreen`. (`CustomStampViews.swift`)
 - **Compiler type-check timeouts in `CustomStampViews.swift`** — Three separate expressions were too complex for Swift to check inside deeply nested closures: (1) `PlacedStamp(...)` with nested `CGPoint` → hoisted `dupePosX/Y` as explicit `CGFloat` locals; (2) `DrawingCanvas` + modifiers chain → extracted to `doodleDrawingCanvas()` `@ViewBuilder`.
 
+## New in v2.1 b16
+
+### Bug Fixes
+- **iPad Share Skadoodle crash** — `UIActivityViewController` requires a `popoverPresentationController` source on iPad or it crashes. Fixed by setting `sourceView` and `sourceRect` to the center of the root view with no arrow. (`SettingsTab.swift`)
+- **Portrait-only orientation** — locked both iPhone and iPad to portrait in Xcode target settings. Landscape was never tested or designed for; artists rotate the device, not the app.
+- **Layer merge on stamp delete** — removed `consolidateDrawingLayers()` from `deleteLayerEntry` and `removeStampFromLayerOrder`. Deleting a stamp between two drawing layers no longer merges them. Adjacent drawing layers are valid state everywhere. (`DrawScreen.swift`)
+- **Layers panel drag-to-reorder now selects dragged chip** — after reordering, the moved stamp becomes selected (magic menu opens) or the moved drawing layer becomes the active layer. (`DrawScreen.swift`)
+- **Text stamp edit reset size** — editing a text stamp via the magic panel was resetting `size` back to the base font size (48pt), discarding any user resize. Fix: preserve `existingSize`, scale recomputed `stampWidth`/`stampHeight` proportionally. (`DrawScreen.swift`)
+
+---
+
 ## New in v2.1 b15
 
 ### New Features
@@ -344,6 +355,10 @@ Investigated and tested extensively. Pen lines and stamp positions are geometric
 ---
 
 ## Outstanding Items (for next version)
+
+### Bugs
+- **`consolidateDrawingLayers()` still called in delete paths** — `deleteLayerEntry` and `removeStampFromLayerOrder` both call it, so deleting a stamp between two drawing layers merges them. Should be removed from both paths; adjacent drawing layers are valid state everywhere.
+- **Empty layers** — mechanism not yet confirmed. Suspected paths: eraser removing all lines from a layer (layer stays), or `onBeforeDraw` creating a layer that gets cancelled before any point lands. Needs repro to confirm.
 
 ### Low priority / style
 - `ProfileView.swift:409-410` — `.presentationDetents` / `.presentationDragIndicator` after `.fullScreenCover` are dead code.

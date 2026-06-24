@@ -220,6 +220,11 @@ struct SettingsTab: View {
                         let av = UIActivityViewController(activityItems: ["Check out Skadoodle — a fun doodling app!", url], applicationActivities: nil)
                         if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
                            let root = scene.windows.first?.rootViewController {
+                            if let popover = av.popoverPresentationController {
+                                popover.sourceView = root.view
+                                popover.sourceRect = CGRect(x: root.view.bounds.midX, y: root.view.bounds.midY, width: 0, height: 0)
+                                popover.permittedArrowDirections = []
+                            }
                             root.present(av, animated: true)
                         }
                     } label: {

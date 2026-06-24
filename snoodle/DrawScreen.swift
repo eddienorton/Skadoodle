@@ -1152,7 +1152,6 @@ struct DrawScreen: View {
             if case .stamp(let sid) = entry { return sid == id }
             return false
         }
-        consolidateDrawingLayers()
     }
 
     /// Merge consecutive drawing entries in layerOrder so there's never more than one drawing layer
@@ -1227,7 +1226,6 @@ struct DrawScreen: View {
         case .drawing(let id):
             layerOrder.removeAll { if case .drawing(let eid) = $0 { return eid == id } else { return false } }
             drawingLayers.removeAll { $0.id == id }
-            consolidateDrawingLayers()
             if userSelectedLayerId == id {
                 // Select the topmost remaining drawing layer, or nil if none left
                 userSelectedLayerId = layerOrder.reversed().compactMap {
@@ -1685,8 +1683,18 @@ struct DrawScreen: View {
                         .onMove { source, destination in
                             pushUndoSnapshot()
                             var reversed = Array(layerOrder.reversed())
+                            let movedEntry = reversed[source.first!]
                             reversed.move(fromOffsets: source, toOffset: destination)
                             layerOrder = reversed.reversed()
+                            switch movedEntry {
+                            case .stamp(let id):
+                                selectedStampId = id
+                                showStampMagicMenu = true
+                            case .drawing(let id):
+                                userSelectedLayerId = id
+                                selectedStampId = nil
+                                showStampMagicMenu = false
+                            }
                         }
                         backgroundLayerChip
                             .listRowBackground(Color.clear)
@@ -2901,16 +2909,19 @@ struct DrawScreen: View {
                                             // Edit existing — update in place, recompute dimensions
                                             undoStack.append(CanvasSnapshot(drawingLayers: drawingLayers, stamps: placedStamps, layerOrder: layerOrder, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation))
                                             redoStack = []
-                                            let (natW, natH, fontSize) = naturalTextStampSize(text: text, fontId: fontId, fontStyle: fontStyle, maxWidth: canvasSize.width * 0.7)
+                                            let (natW, natH, baseFontSize) = naturalTextStampSize(text: text, fontId: fontId, fontStyle: fontStyle, maxWidth: canvasSize.width * 0.7)
+                                            // Preserve the user's current size — only recompute natural dimensions scaled to it
+                                            let existingSize = placedStamps[idx].size
+                                            let scale = existingSize / baseFontSize
                                             placedStamps[idx].stampText = text
                                             placedStamps[idx].fontName = fontId
                                             placedStamps[idx].fontStyle = fontStyle
                                             placedStamps[idx].textAlignment = alignment
                                             placedStamps[idx].textColor = color
                                             placedStamps[idx].textBgColor = bgColor
-                                            placedStamps[idx].size = fontSize
-                                            placedStamps[idx].stampWidth = natW
-                                            placedStamps[idx].stampHeight = natH
+                                            // size stays as existingSize (user's chosen scale)
+                                            placedStamps[idx].stampWidth = natW * scale
+                                            placedStamps[idx].stampHeight = natH * scale
                                             selectedStampId = editId
                                             showStampMagicMenu = true
                                         } else {
