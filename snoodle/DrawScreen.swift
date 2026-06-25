@@ -638,18 +638,24 @@ struct PenStudioSheet: View {
                                 .foregroundColor(.secondary)
                                 .padding(.horizontal, 20)
 
-                            ScrollView(.horizontal, showsIndicators: false) {
-                                HStack(spacing: 10) {
-                                    ForEach(DualToneStyle.allCases) { style in
-                                        DualToneStyleChip(style: style, isSelected: penType.dualToneStyle == style)
-                                            .onTapGesture {
-                                                selectedDualStyle = style
-                                                penType = .dualTone(style)
-                                                UserDefaults.standard.set(style.rawValue, forKey: "lastDualToneStyle")
-                                            }
+                            ScrollViewReader { proxy in
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    HStack(spacing: 10) {
+                                        ForEach(DualToneStyle.allCases) { style in
+                                            DualToneStyleChip(style: style, isSelected: penType.dualToneStyle == style)
+                                                .id(style.id)
+                                                .onTapGesture {
+                                                    selectedDualStyle = style
+                                                    penType = .dualTone(style)
+                                                    UserDefaults.standard.set(style.rawValue, forKey: "lastDualToneStyle")
+                                                }
+                                        }
                                     }
+                                    .padding(.horizontal, 20)
                                 }
-                                .padding(.horizontal, 20)
+                                .onAppear {
+                                    proxy.scrollTo(penType.dualToneStyle.id, anchor: .center)
+                                }
                             }
 
                             // Second color picker
@@ -770,6 +776,12 @@ struct DualToneStyleChip: View {
         case .split:       return "rectangle.split.2x1"
         case .reactive:    return "arrow.up.left.and.arrow.down.right"
         case .alternating: return "alternatingcurrent"
+        case .braid:       return "link"
+        case .hairy:       return "sun.min"
+        case .thorns:      return "bolt"
+        case .zigzag:      return "waveform.path.ecg"
+        case .bubble:      return "circle.grid.3x3"
+        case .stars:       return "star"
         }
     }
 
@@ -1069,14 +1081,17 @@ struct DrawScreen: View {
     // Drawing layers — new interleaved layer architecture.
     // The active layer is always the last .drawing entry in layerOrder.
     private static let _initialLayerId = UUID()
-    @State private var drawingLayers: [DrawingLayer] = [DrawingLayer(id: DrawScreen._initialLayerId)]
-    @State private var layerOrder: [LayerEntry] = [.drawing(DrawScreen._initialLayerId)]
+    @State private var drawingLayers: [DrawingLayer] = []
+    @State private var layerOrder: [LayerEntry] = []
     @State private var currentLine: DrawingLine? = nil   // live preview during active stroke
 
     @State private var lineWidth: CGFloat = CGFloat(UserDefaults.standard.double(forKey: "lastLineWidth") == 0 ? 4 : UserDefaults.standard.double(forKey: "lastLineWidth"))
     @State private var isEraser: Bool = false
     @State private var showLayersPanel: Bool = false
     @State private var userSelectedLayerId: UUID? = nil
+    /// When set, onBeforeDraw inserts the new drawing layer just above this stamp id
+    /// instead of appending to the top of the stack.
+    @State private var pendingInsertAboveStampId: UUID? = nil
     @State private var layersPanelOffset: CGSize = .zero
     @State private var layersPanelBaseOffset: CGSize = .zero
     @State private var chipSwipeOffsets: [UUID: CGFloat] = [:]
@@ -1212,6 +1227,39 @@ struct DrawScreen: View {
         return true
     }
 
+    /// Ensures a drawing layer is always highlighted in the panel.
+    /// Called whenever the panel opens or layers change. No-op if a stamp is selected.
+    func ensureLayerSelection() {
+        guard selectedStampId == nil else { return }
+        let validSelection = userSelectedLayerId.flatMap { id in
+            layerOrder.first { if case .drawing(let eid) = $0 { return eid == id } else { return false } }
+        }
+        if validSelection == nil {
+            userSelectedLayerId = layerOrder.reversed().compactMap {
+                if case .drawing(let id) = $0 { return id } else { return nil }
+            }.first
+        }
+    }
+
+    /// Select a stamp and set up the correct drawing context above it.
+    /// - If the entry immediately above the stamp is a draw layer → activate that layer.
+    /// - If the entry immediately above is another stamp (or stamp is at top) →
+    ///   set pendingInsertAboveStampId so onBeforeDraw inserts a new layer right there.
+    func activateStamp(id: UUID) {
+        selectedStampId = id
+        showStampMagicMenu = true
+        pendingInsertAboveStampId = nil
+        guard let stampIdx = layerOrder.firstIndex(where: { $0.id == id }) else { return }
+        let nextIdx = stampIdx + 1
+        if nextIdx < layerOrder.count, case .drawing(let drawId) = layerOrder[nextIdx] {
+            // Draw layer immediately above — use it directly.
+            userSelectedLayerId = drawId
+        } else {
+            // Stamp above (or top of stack) — signal onBeforeDraw to insert here.
+            pendingInsertAboveStampId = id
+        }
+    }
+
     func moveLayerEntry(_ entry: LayerEntry, by delta: Int) {
         guard let idx = layerOrder.firstIndex(where: { $0.id == entry.id }) else { return }
         let newIdx = idx + delta
@@ -1263,7 +1311,7 @@ struct DrawScreen: View {
 
     @ViewBuilder
     func layerChipView(entry: LayerEntry) -> some View {
-        let chipW: CGFloat = 112
+        let chipW: CGFloat = UIDevice.current.userInterfaceIdiom == .pad ? 112 : 84
         // Maintain canvas aspect ratio, cap at 90pt so a few chips are always visible
         let chipH: CGFloat = chipW * max(canvasSize.height, 1) / max(canvasSize.width, 1)
         let isActive: Bool = {
@@ -1346,9 +1394,7 @@ struct DrawScreen: View {
                     selectedStampId = nil
                     showStampMagicMenu = false
                 } else if case .stamp(let id) = entry {
-                    selectedStampId = id
-                    showStampMagicMenu = true
-                    // Drawing layer selection is independent — don't clear it
+                    activateStamp(id: id)
                 }
             }
             // ··· menu and hidden badge — all layer types
@@ -1363,8 +1409,16 @@ struct DrawScreen: View {
                         }
                         Menu {
                             Button {
-                                if hiddenLayerIds.contains(id) { hiddenLayerIds.remove(id) }
-                                else { hiddenLayerIds.insert(id) }
+                                if hiddenLayerIds.contains(id) {
+                                    hiddenLayerIds.remove(id)
+                                } else {
+                                    hiddenLayerIds.insert(id)
+                                    // Deselect hidden stamp — close magic menu
+                                    if selectedStampId == id {
+                                        selectedStampId = nil
+                                        showStampMagicMenu = false
+                                    }
+                                }
                             } label: {
                                 Label(hiddenLayerIds.contains(id) ? "Show Stamp" : "Hide Stamp",
                                       systemImage: hiddenLayerIds.contains(id) ? "eye" : "eye.slash")
@@ -1379,6 +1433,11 @@ struct DrawScreen: View {
                                 duplicateStamp(id: id)
                             } label: {
                                 Label("Duplicate Stamp", systemImage: "plus.rectangle.on.rectangle")
+                            }
+                            Button(role: .destructive) {
+                                deleteLayerEntry(entry)
+                            } label: {
+                                Label("Delete Stamp", systemImage: "trash")
                             }
                         } label: {
                             Image(systemName: "ellipsis")
@@ -1412,8 +1471,18 @@ struct DrawScreen: View {
                         // ··· menu
                         Menu {
                             Button {
-                                if hiddenLayerIds.contains(id) { hiddenLayerIds.remove(id) }
-                                else { hiddenLayerIds.insert(id) }
+                                if hiddenLayerIds.contains(id) {
+                                    hiddenLayerIds.remove(id)
+                                } else {
+                                    hiddenLayerIds.insert(id)
+                                    // Deselect hidden layer — move to topmost visible drawing layer
+                                    if userSelectedLayerId == id {
+                                        userSelectedLayerId = layerOrder.reversed().compactMap {
+                                            if case .drawing(let lid) = $0, !hiddenLayerIds.contains(lid) { return lid }
+                                            return nil
+                                        }.first
+                                    }
+                                }
                             } label: {
                                 Label(hiddenLayerIds.contains(id) ? "Show Layer" : "Hide Layer",
                                       systemImage: hiddenLayerIds.contains(id) ? "eye" : "eye.slash")
@@ -1435,6 +1504,11 @@ struct DrawScreen: View {
                                 Label("Extract as Stamp", systemImage: "scissors")
                             }
                             .disabled(isExtractingLayer)
+                            Button(role: .destructive) {
+                                deleteLayerEntry(entry)
+                            } label: {
+                                Label("Delete Layer", systemImage: "trash")
+                            }
                         } label: {
                             Image(systemName: "ellipsis")
                                 .font(.system(size: 14, weight: .bold))
@@ -1454,13 +1528,27 @@ struct DrawScreen: View {
                         .allowsHitTesting(false)
                 }
             }
+            // Pencil badge — shows while a stroke is in progress on this layer
+            .overlay(alignment: .bottomLeading) {
+                if case .drawing(let id) = entry,
+                   id == userSelectedLayerId,
+                   currentLine != nil {
+                    Image(systemName: "pencil")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.white)
+                        .padding(3)
+                        .background(Circle().fill(Color.blue.opacity(0.85)))
+                        .padding(4)
+                        .allowsHitTesting(false)
+                }
+            }
         }
         .frame(width: chipW, height: chipH)
     }
 
     @ViewBuilder
     var backgroundLayerChip: some View {
-        let chipW: CGFloat = 112
+        let chipW: CGFloat = UIDevice.current.userInterfaceIdiom == .pad ? 112 : 84
         let chipH: CGFloat = chipW * max(canvasSize.height, 1) / max(canvasSize.width, 1)
         ZStack {
             // Canvas color is always the base
@@ -1636,12 +1724,24 @@ struct DrawScreen: View {
         if showLayersPanel {
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
-                    Image(systemName: "line.3.horizontal")
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
                     Text("Layers")
                         .font(.system(size: 16, weight: .semibold))
+                        .lineLimit(1)
                     Spacer()
+                    // Add new drawing layer at top
+                    Button {
+                        pushUndoSnapshot()
+                        let newLayer = DrawingLayer()
+                        drawingLayers.append(newLayer)
+                        layerOrder.append(.drawing(newLayer.id))
+                        userSelectedLayerId = newLayer.id
+                        selectedStampId = nil
+                        showStampMagicMenu = false
+                    } label: {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.system(size: 22))
+                            .foregroundColor(.blue)
+                    }
                     Button {
                         withAnimation(.easeInOut(duration: 0.2)) { showLayersPanel = false }
                     } label: {
@@ -1688,8 +1788,7 @@ struct DrawScreen: View {
                             layerOrder = reversed.reversed()
                             switch movedEntry {
                             case .stamp(let id):
-                                selectedStampId = id
-                                showStampMagicMenu = true
+                                activateStamp(id: id)
                             case .drawing(let id):
                                 userSelectedLayerId = id
                                 selectedStampId = nil
@@ -1711,11 +1810,12 @@ struct DrawScreen: View {
                             withAnimation { proxy.scrollTo(id, anchor: .center) }
                         }
                     }
+                    .onAppear { ensureLayerSelection() }
                 }
             }
-            .frame(width: 160)
+            .frame(width: UIDevice.current.userInterfaceIdiom == .pad ? 160 : 122)
             .frame(maxHeight: canvasSize.height - 48)
-            .background(.ultraThinMaterial)
+            .background(.thinMaterial)
             .contentShape(Rectangle())
             .clipShape(RoundedRectangle(cornerRadius: 14))
             .shadow(color: .black.opacity(0.2), radius: 10, x: -4, y: 0)
@@ -1872,7 +1972,20 @@ struct DrawScreen: View {
     // No empty drawing layer is created here — one will be lazily created on first stroke via onBeforeDraw.
     func appendStampToLayer(_ stamp: PlacedStamp) {
         placedStamps.append(stamp)
-        layerOrder.append(.stamp(stamp.id))
+        // Priority: insert above the selected stamp if one is selected,
+        // otherwise insert above the selected drawing layer.
+        // Falls back to top of stack if neither is valid.
+        if let selStampId = selectedStampId,
+           let selIdx = layerOrder.firstIndex(where: { $0.id == selStampId }) {
+            layerOrder.insert(.stamp(stamp.id), at: selIdx + 1)
+        } else if let selId = userSelectedLayerId,
+           let selIdx = layerOrder.firstIndex(where: {
+               if case .drawing(let id) = $0 { return id == selId } else { return false }
+           }) {
+            layerOrder.insert(.stamp(stamp.id), at: selIdx + 1)
+        } else {
+            layerOrder.append(.stamp(stamp.id))
+        }
     }
 
     // Lazy binding to the active drawing layer's lines. Evaluates activeDrawingLayerIndex
@@ -2662,29 +2775,28 @@ struct DrawScreen: View {
                             isStampSelected: selectedStampId != nil,
                             onBeforeDraw: {
                                 pushUndoSnapshot()
-                                // Lazy layer creation: if there are no drawing layers, or the topmost
-                                // entry is a stamp and no drawing layer is explicitly selected.
+                                // Create a new layer when:
+                                // 1. No drawing layers exist (lazy first-stroke creation), or
+                                // 2. Top of stack is a stamp and no drawing layer is selected / stamp is selected
+                                //    (working at the front edge), or
+                                // 3. pendingInsertAboveStampId is set — user selected a stamp whose immediate
+                                //    neighbor above is another stamp; new layer inserts between them.
                                 let topIsStamp = layerOrder.last.map { if case .stamp = $0 { return true } else { return false } } ?? false
-                                // Create a new layer when the top of the stack is a stamp and either:
-                                // - no drawing layer is selected, OR
-                                // - a stamp is currently selected (user focused on a stamp, not a drawing layer)
                                 let needsNewLayer = drawingLayers.isEmpty ||
-                                    (topIsStamp && (userSelectedLayerId == nil || selectedStampId != nil))
+                                    (topIsStamp && (userSelectedLayerId == nil || selectedStampId != nil)) ||
+                                    pendingInsertAboveStampId != nil
                                 if needsNewLayer {
-                                    // Prune empty drawing layers stranded below stamps before creating the new one
-                                    let emptyIds = Set(drawingLayers.filter { $0.lines.isEmpty }.map { $0.id })
-                                    if !emptyIds.isEmpty {
-                                        drawingLayers.removeAll { emptyIds.contains($0.id) }
-                                        layerOrder.removeAll {
-                                            if case .drawing(let id) = $0 { return emptyIds.contains(id) }
-                                            return false
-                                        }
-                                    }
                                     let newLayer = DrawingLayer()
                                     drawingLayers.append(newLayer)
-                                    layerOrder.append(.drawing(newLayer.id))
+                                    if let insertAbove = pendingInsertAboveStampId,
+                                       let insertIdx = layerOrder.firstIndex(where: { $0.id == insertAbove }) {
+                                        // Insert just above the target stamp, not at the top.
+                                        layerOrder.insert(.drawing(newLayer.id), at: insertIdx + 1)
+                                    } else {
+                                        layerOrder.append(.drawing(newLayer.id))
+                                    }
+                                    pendingInsertAboveStampId = nil
                                     userSelectedLayerId = newLayer.id
-                                    // Clear stamp selection so only the new drawing layer is highlighted
                                     selectedStampId = nil
                                     showStampMagicMenu = false
                                 }
@@ -2772,17 +2884,19 @@ struct DrawScreen: View {
                             isLongPressing: $isLongPressing,
                             showLayersPanel: showLayersPanel,
                             layerOrder: layerOrder,
+                            selectedStampId: selectedStampId,
                             onLongPressStamp: { id in
                                 selectedStampId = id
                                 showStampMagicMenu = false
                             },
                             onStampTap: { id in
-                                selectedStampId = id
-                                showStampMagicMenu = true
+                                activateStamp(id: id)
                             },
                             onCanvasTap: {
                                 selectedStampId = nil
                                 showStampMagicMenu = false
+                                pendingInsertAboveStampId = nil
+                                ensureLayerSelection()
                             },
                             onBeforeStampChange: { pushUndoSnapshot() },
                             onBackgroundPanBegan: canvasBackgroundImage != nil ? {
@@ -2959,6 +3073,11 @@ struct DrawScreen: View {
                                 bgBlur = last.bgBlur
                                 bgBrightness = last.bgBrightness
                                 bgSaturation = last.bgSaturation
+                                // Revalidate selection — restored state may not have the previously selected layer/stamp
+                                if let sid = selectedStampId, !placedStamps.contains(where: { $0.id == sid }) {
+                                    selectedStampId = nil; showStampMagicMenu = false
+                                }
+                                ensureLayerSelection()
                             }) {
                                 Image(systemName: "arrow.uturn.backward")
                                     .font(.system(size: 18, weight: .medium))
@@ -2979,6 +3098,10 @@ struct DrawScreen: View {
                                 bgBlur = last.bgBlur
                                 bgBrightness = last.bgBrightness
                                 bgSaturation = last.bgSaturation
+                                if let sid = selectedStampId, !placedStamps.contains(where: { $0.id == sid }) {
+                                    selectedStampId = nil; showStampMagicMenu = false
+                                }
+                                ensureLayerSelection()
                             }) {
                                 Image(systemName: "arrow.uturn.forward")
                                     .font(.system(size: 18, weight: .medium))
@@ -2990,19 +3113,25 @@ struct DrawScreen: View {
                                 if thingCount == 1 {
                                     // Only one thing — clear it directly, no sheet
                                     pushUndoSnapshot()
-                                    if canvasBackgroundImage != nil { canvasBackgroundImage = nil; backgroundOffset = .zero }
-                                    else if !allLinesEmpty {
-                                        let baseId = DrawScreen._initialLayerId
-                                        drawingLayers = [DrawingLayer(id: baseId)]
-                                        layerOrder = [.drawing(baseId)]
-                                    }
-                                    else if !placedStamps.isEmpty {
+                                    if canvasBackgroundImage != nil {
+                                        canvasBackgroundImage = nil; backgroundOffset = .zero
+                                    } else if !allLinesEmpty {
+                                        // Remove all drawing layers. Stamps keep their relative order.
+                                        // First stroke after clear lazily creates a fresh drawing layer.
+                                        let stampEntries = layerOrder.filter { if case .stamp = $0 { return true } else { return false } }
+                                        drawingLayers = []
+                                        layerOrder = stampEntries
+                                        hiddenLayerIds = hiddenLayerIds.intersection(Set(placedStamps.map { $0.id }))
+                                        userSelectedLayerId = nil
+                                    } else if !placedStamps.isEmpty {
+                                        // Only stamps — remove all stamps. Canvas is empty; first stroke creates a layer.
                                         placedStamps = []
-                                        // Reset layerOrder to single drawing layer
-                                        let baseId = DrawScreen._initialLayerId
-                                        drawingLayers = [DrawingLayer(id: baseId)]
-                                        layerOrder = [.drawing(baseId)]
+                                        drawingLayers = []
+                                        layerOrder = []
                                         stampUndoStack = []; stampRedoStack = []
+                                        hiddenLayerIds = []
+                                        selectedStampId = nil; showStampMagicMenu = false
+                                        userSelectedLayerId = nil
                                     }
                                 } else {
                                     showClearSheet = true
@@ -3015,13 +3144,15 @@ struct DrawScreen: View {
                                 // Sheet only shown when 2+ things exist — Clear All always relevant
                                 Button("Clear All", role: .destructive) {
                                     pushUndoSnapshot()
-                                    let baseId = DrawScreen._initialLayerId
-                                    drawingLayers = [DrawingLayer(id: baseId)]
-                                    layerOrder = [.drawing(baseId)]
+                                    drawingLayers = []
+                                    layerOrder = []
                                     placedStamps = []
                                     stampUndoStack = []; stampRedoStack = []
                                     canvasBackgroundImage = nil
                                     backgroundOffset = .zero
+                                    hiddenLayerIds = []
+                                    selectedStampId = nil; showStampMagicMenu = false
+                                    userSelectedLayerId = nil
                                 }
                                 if canvasBackgroundImage != nil {
                                     Button("Clear Background", role: .destructive) {
@@ -3033,10 +3164,13 @@ struct DrawScreen: View {
                                 if !allLinesEmpty {
                                     Button("Clear Drawing", role: .destructive) {
                                         pushUndoSnapshot()
-                                        let baseId = DrawScreen._initialLayerId
-                                        drawingLayers = [DrawingLayer(id: baseId)]
-                                        // Keep stamps in layerOrder, reset drawing layers
-                                        layerOrder = [.drawing(baseId)] + placedStamps.map { .stamp($0.id) }
+                                        // Remove all drawing layers. Stamps keep their relative order.
+                                        // First stroke lazily creates a fresh drawing layer.
+                                        let stampEntries = layerOrder.filter { if case .stamp = $0 { return true } else { return false } }
+                                        drawingLayers = []
+                                        layerOrder = stampEntries
+                                        hiddenLayerIds = hiddenLayerIds.intersection(Set(placedStamps.map { $0.id }))
+                                        userSelectedLayerId = nil
                                     }
                                 }
                                 if !placedStamps.isEmpty {
@@ -3049,6 +3183,9 @@ struct DrawScreen: View {
                                             if case .stamp = $0 { return false }
                                             return true
                                         }
+                                        // Remove stamp IDs from hidden set
+                                        hiddenLayerIds = hiddenLayerIds.intersection(Set(drawingLayers.map { $0.id }))
+                                        selectedStampId = nil; showStampMagicMenu = false
                                     }
                                 }
                                 Button("Cancel", role: .cancel) {}
@@ -3248,6 +3385,7 @@ struct WindowPinchView: UIViewRepresentable {
     var showLayersPanel: Bool = false
     var suppressCanvasTap: Bool = false
     var layerOrder: [LayerEntry] = []
+    var selectedStampId: UUID? = nil
     var onLongPressStamp: ((UUID) -> Void)? = nil
     var onStampTap: ((UUID) -> Void)? = nil
     var onCanvasTap: (() -> Void)? = nil
@@ -3390,17 +3528,18 @@ struct WindowPinchView: UIViewRepresentable {
         // or render-cycle timing involved; shouldReceive fires before the gesture begins.
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
             guard touch.type != .pencil && touch.type != .stylus else { return false }
-            if gestureRecognizer === tapRecognizer {
-                var view: UIView? = touch.view
-                while let v = view {
+            var view: UIView? = touch.view
+            while let v = view {
+                // UICollectionView / UITableView are the concrete backing views for SwiftUI List.
+                // Block ALL gesture recognizers (tap, pinch, rotation, pan) when a touch
+                // lands inside one — this covers the layers panel for multi-finger gestures.
+                if v is UICollectionView || v is UITableView { return false }
+                // Button / Control checks only needed for the tap recognizer.
+                if gestureRecognizer === tapRecognizer {
                     let name = String(describing: type(of: v))
-                    if name.contains("Button") || name.contains("Control") ||
-                       name.contains("Collection") || name.contains("ScrollView") ||
-                       name.contains("List") {
-                        return false
-                    }
-                    view = v.superview
+                    if name.contains("Button") || name.contains("Control") { return false }
                 }
+                view = v.superview
             }
             return true
         }
@@ -3425,26 +3564,28 @@ struct WindowPinchView: UIViewRepresentable {
             switch g.state {
             case .began:
                 let c = centroid(g)
-                // Collect individual touch points
-                var touchPoints: [CGPoint] = []
-                for i in 0..<g.numberOfTouches {
-                    let wp = g.location(ofTouch: i, in: nil)
-                    touchPoints.append(CGPoint(x: wp.x - parent.canvasOrigin.x,
-                                               y: wp.y - parent.canvasOrigin.y))
-                }
-                // Pick the topmost stamp (last in array = highest z) that any finger
-                // lands on — using opaque pixel test, falling back to bounding box.
-                // For each touch point, find the topmost stamp whose opaque
-                // pixel is actually hit (same logic as StampContainerView.hitTest).
-                // The stamp that wins the most touch points becomes the target.
-                var votes: [UUID: Int] = [:]
-                for pt in touchPoints {
-                    if let winner = topmostStampHit(at: pt, layerOrder: parent.layerOrder, stamps: parent.placedStamps) {
-                        votes[winner.id, default: 0] += 1
+                // If a stamp is already selected, operate on it directly regardless of
+                // what's visually on top — selected stamp "owns" all two-finger gestures.
+                let target: PlacedStamp?
+                if let selId = parent.selectedStampId,
+                   let stamp = parent.placedStamps.first(where: { $0.id == selId }) {
+                    target = stamp
+                } else {
+                    var touchPoints: [CGPoint] = []
+                    for i in 0..<g.numberOfTouches {
+                        let wp = g.location(ofTouch: i, in: nil)
+                        touchPoints.append(CGPoint(x: wp.x - parent.canvasOrigin.x,
+                                                   y: wp.y - parent.canvasOrigin.y))
                     }
+                    var votes: [UUID: Int] = [:]
+                    for pt in touchPoints {
+                        if let winner = topmostStampHit(at: pt, layerOrder: parent.layerOrder, stamps: parent.placedStamps) {
+                            votes[winner.id, default: 0] += 1
+                        }
+                    }
+                    let targetId2 = votes.max(by: { $0.value < $1.value })?.key
+                    target = parent.placedStamps.first(where: { $0.id == targetId2 })
                 }
-                let targetId2 = votes.max(by: { $0.value < $1.value })?.key
-                let target = parent.placedStamps.first(where: { $0.id == targetId2 })
                 if let stamp = target {
                     cancelAllStampPans()
                     targetId = stamp.id
@@ -3497,20 +3638,27 @@ struct WindowPinchView: UIViewRepresentable {
             switch g.state {
             case .began:
                 let c = rotationCentroid(g)
-                var touchPoints: [CGPoint] = []
-                for i in 0..<g.numberOfTouches {
-                    let wp = g.location(ofTouch: i, in: nil)
-                    touchPoints.append(CGPoint(x: wp.x - parent.canvasOrigin.x,
-                                               y: wp.y - parent.canvasOrigin.y))
-                }
-                var votes: [UUID: Int] = [:]
-                for pt in touchPoints {
-                    if let winner = topmostStampHit(at: pt, layerOrder: parent.layerOrder, stamps: parent.placedStamps) {
-                        votes[winner.id, default: 0] += 1
+                // Same priority rule as pinch: selected stamp owns two-finger gestures.
+                let target: PlacedStamp?
+                if let selId = parent.selectedStampId,
+                   let stamp = parent.placedStamps.first(where: { $0.id == selId }) {
+                    target = stamp
+                } else {
+                    var touchPoints: [CGPoint] = []
+                    for i in 0..<g.numberOfTouches {
+                        let wp = g.location(ofTouch: i, in: nil)
+                        touchPoints.append(CGPoint(x: wp.x - parent.canvasOrigin.x,
+                                                   y: wp.y - parent.canvasOrigin.y))
                     }
+                    var votes: [UUID: Int] = [:]
+                    for pt in touchPoints {
+                        if let winner = topmostStampHit(at: pt, layerOrder: parent.layerOrder, stamps: parent.placedStamps) {
+                            votes[winner.id, default: 0] += 1
+                        }
+                    }
+                    let targetId2 = votes.max(by: { $0.value < $1.value })?.key
+                    target = parent.placedStamps.first(where: { $0.id == targetId2 })
                 }
-                let targetId2 = votes.max(by: { $0.value < $1.value })?.key
-                let target = parent.placedStamps.first(where: { $0.id == targetId2 })
                 if let stamp = target {
                     cancelAllStampPans()
                     targetId = stamp.id

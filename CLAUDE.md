@@ -12,8 +12,45 @@ Eddie Brayman, 72, independent iOS developer, East Village NYC. 50+ years coding
 **App Store URL:** https://apps.apple.com/us/app/skadoodle/id6771497563  
 **Bundle ID:** maxsdad.skadoodle  
 **Firebase project:** snoodle-68bfc  
-**Current version at last session:** 2.1 build 16 (June 2026) — pending submission
+**Current version at last session:** 2.1 build 17 (June 2026) — in review
 **Last released to App Store:** 2.1 build 4 (June 2026)
+
+---
+
+## In Progress — v2.2 (not yet submitted)
+
+### New Features
+- **6 new Dual Tone pen styles** — Braid, Hairy, Thorns, Zigzag, Bubble, Stars. All pressure-sensitive. Added to `DualToneStyle` enum in `DrawingEngine.swift`; icons in `DualToneStyleChip` in `DrawScreen.swift`.
+  - **Braid** — two sinusoidal strands weave over/under each other. Pressure scales strand width and amplitude (heavier = wider braid). Arc-length based, alternating half-period draw order for over/under illusion.
+  - **Hairy** — core stroke with perpendicular hairs of varying length/angle both sides. Pressure scales core width and hair size. Deterministic pseudo-random variation per hair.
+  - **Thorns** — core stroke with alternating backward-angled spikes like a bramble. Pressure scales core and thorn size. `backLean: 0.45` gives natural rearward angle.
+  - **Zigzag** — sharp V-path snapping ±amplitude perpendicular at regular intervals. No core — zigzag IS the stroke. Alternating colorA/colorB per zig/zag.
+  - **Bubble** — filled circles strung along path, alternating colorA/colorB. Pressure scales radius.
+  - **Stars** — filled 5-pointed stars along path, alternating colorA/colorB. Pressure scales size. Deterministic rotation variation per star via `starPath()` free function.
+- **Pen studio scrolls to selected style** — `ScrollViewReader` wraps the dual-tone style chip row; `.onAppear` scrolls to the active chip. (`DrawScreen.swift`)
+- **"+" button in layers panel header** — creates a new blank drawing layer at top, selects it immediately. (`DrawScreen.swift`)
+- **Pencil badge on active drawing chip** — small blue circle with pencil icon appears in bottom-left of the active drawing layer chip while `currentLine != nil` (stroke in progress). (`DrawScreen.swift`)
+
+### Layer Architecture Overhaul (v2.2)
+- **Lazy drawing layer creation** — app starts with `drawingLayers = []`, `layerOrder = []`. No blank layer on fresh canvas or after Clear. First stroke lazily creates the drawing layer via `onBeforeDraw`.
+- **`onBeforeDraw`** — `needsNewLayer = drawingLayers.isEmpty || (topIsStamp && (userSelectedLayerId == nil || selectedStampId != nil)) || pendingInsertAboveStampId != nil`. No prune. New layer appended to top unless `pendingInsertAboveStampId` is set, in which case it inserts just above that stamp. (`DrawScreen.swift`)
+- **`pendingInsertAboveStampId`** — set by `activateStamp` when the immediate entry above the selected stamp is another stamp (not a draw layer). `onBeforeDraw` inserts the new layer between the two stamps. Cleared on canvas tap. (`DrawScreen.swift`)
+- **`activateStamp(id:)`** — replaces bare `selectedStampId = id` at all user-tap sites. Sets `selectedStampId`, opens magic menu, and either (a) activates the draw layer immediately above the stamp, or (b) sets `pendingInsertAboveStampId` if another stamp is directly above. (`DrawScreen.swift`)
+- **Stamps obey selected layer** — `appendStampToLayer` inserts above the selected stamp (if one is selected) or above `userSelectedLayerId`. Falls back to append at top. (`DrawScreen.swift`)
+- **Canvas tap → topmost layer** — `onCanvasTap` calls `ensureLayerSelection()` after deselecting, snapping `userSelectedLayerId` to the topmost drawing layer. `pendingInsertAboveStampId` also cleared. (`DrawScreen.swift`)
+- **Two-finger gestures respect selection** — pinch and rotation in `WindowPinchView` now check `selectedStampId` first; if set, the selected stamp is operated on directly without hit testing. Fixes manipulation of stamps buried under other stamps. (`DrawScreen.swift`)
+- **Layers panel gestures blocked** — `shouldReceive` in `WindowPinchView.Coordinator` now checks `v is UICollectionView || v is UITableView` for ALL recognizers (not just tap), blocking two-finger canvas gestures from passing through the panel. (`DrawScreen.swift`)
+- **Clear paths all lazy** — Clear Drawing, Clear All, and single-item clears all set `drawingLayers = []` and remove drawing entries from `layerOrder`. No blank created. First stroke after clear lazily creates the layer.
+- **Clear respects hidden layers** — all clear paths remove hidden drawing layer IDs from `hiddenLayerIds`; Clear Stamps removes hidden stamp IDs.
+- **Undo/redo revalidate selection** — after restore, stale `selectedStampId` is cleared if the stamp no longer exists; `ensureLayerSelection()` ensures a drawing layer is always selected. (`DrawScreen.swift`)
+
+### Fixes
+- **Layer always highlighted** — `ensureLayerSelection()` called on layers panel `.onAppear`. Sets `userSelectedLayerId` to topmost drawing layer if nil or stale. No-op when a stamp is selected. (`DrawScreen.swift`)
+- **Delete for drawing layers** — "Delete Layer" (destructive) added to drawing layer `···` menu. (`DrawScreen.swift`)
+- **Delete for stamps via ··· menu** — "Delete Stamp" (destructive) added to stamp `···` menu for consistency with swipe-to-delete. (`DrawScreen.swift`)
+- **Hiding a layer deselects it** — hiding a drawing layer moves `userSelectedLayerId` to next visible drawing layer; hiding a selected stamp closes the magic menu. (`DrawScreen.swift`)
+- **Layers panel iPhone sizing** — chips reduced from 112pt to 84pt, panel from 160pt to 122pt on iPhone only. iPad unchanged. (`DrawScreen.swift`)
+- **Layers panel header cleanup** — removed decorative icon before "Layers" title; added `lineLimit(1)` to prevent wrapping; background changed from `.ultraThinMaterial` to `.thinMaterial`. (`DrawScreen.swift`)
 
 ---
 

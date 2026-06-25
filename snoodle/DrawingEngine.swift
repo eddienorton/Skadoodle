@@ -14,6 +14,12 @@ enum DualToneStyle: String, CaseIterable, Identifiable {
     case split       = "Split"
     case reactive    = "Reactive"
     case alternating = "Alternating"
+    case braid       = "Braid"
+    case hairy       = "Hairy"
+    case thorns      = "Thorns"
+    case zigzag      = "Zigzag"
+    case bubble      = "Bubble"
+    case stars       = "Stars"
     var id: String { rawValue }
 }
 
@@ -988,7 +994,342 @@ private func drawDualToneLine(_ line: DrawingLine, style: DualToneStyle, in cont
             context.stroke(seg, with: .color(segColor),
                            style: StrokeStyle(lineWidth: w, lineCap: .round, lineJoin: .round))
         }
+
+    case .braid:
+        // Two strands weave over/under each other like a rope braid.
+        // Each strand follows a sinusoidal offset perpendicular to the stroke direction.
+        // Drawing order alternates every half-period so the "over" strand switches at each crossing.
+        // Pressure scales both strand width and amplitude (heavy press = wider braid).
+        if count == 1 {
+            let pt = line.points[0]
+            let rect = CGRect(x: pt.x - baseW/2, y: pt.y - baseW/2, width: baseW, height: baseW)
+            context.fill(Path(ellipseIn: rect), with: .color(line.color))
+            return
+        }
+        let strandW   = baseW * 0.52
+        let amplitude = baseW * 0.28
+        let period    = baseW * 2.0
+        let halfPeriod = period / 2
+
+        var arcLen = [CGFloat](repeating: 0, count: count)
+        for i in 1..<count {
+            arcLen[i] = arcLen[i-1] + hypot(line.points[i].x - line.points[i-1].x,
+                                             line.points[i].y - line.points[i-1].y)
+        }
+
+        // Precompute strand positions — amplitude varies with both taper and pressure
+        var ptsA = [CGPoint](repeating: .zero, count: count)
+        var ptsB = [CGPoint](repeating: .zero, count: count)
+        for i in 0..<count {
+            let pt  = line.points[i]
+            let s   = arcLen[i]
+            let ang = (s / period) * 2 * CGFloat.pi
+            let lo  = max(0, i - 1), hi = min(count - 1, i + 1)
+            let dx  = line.points[hi].x - line.points[lo].x
+            let dy  = line.points[hi].y - line.points[lo].y
+            let len = hypot(dx, dy)
+            let nx  = len > 0 ? -dy / len : 0.0
+            let ny  = len > 0 ?  dx / len : 1.0
+            let taper = strokeTaper(i: i, count: count, taperFraction: 0.15)
+            let amp   = amplitude * taper * pressureAt(i, in: line)
+            let sv    = sin(ang)
+            ptsA[i] = CGPoint(x: pt.x + nx * amp * sv,  y: pt.y + ny * amp * sv)
+            ptsB[i] = CGPoint(x: pt.x - nx * amp * sv,  y: pt.y - ny * amp * sv)
+        }
+
+        // Draw in half-period batches, segment-by-segment so strand width varies with pressure.
+        // Two passes per batch (A then B, or B then A) preserve the over/under layering.
+        var batchStart = 0
+        while batchStart < count - 1 {
+            let startHP = Int(arcLen[batchStart] / halfPeriod)
+            var batchEnd = batchStart + 1
+            while batchEnd < count - 1 && Int(arcLen[batchEnd] / halfPeriod) == startHP {
+                batchEnd += 1
+            }
+            let drawEnd = min(batchEnd, count - 1)
+            guard batchStart + 1 <= drawEnd else { batchStart = batchEnd; continue }
+
+            func drawStrand(_ pts: [CGPoint], color: Color) {
+                for j in (batchStart + 1)...drawEnd {
+                    let w = strandW * pressureAt(j, in: line)
+                    var seg = Path()
+                    seg.move(to: pts[j-1])
+                    seg.addLine(to: pts[j])
+                    context.stroke(seg, with: .color(color),
+                                   style: StrokeStyle(lineWidth: w, lineCap: .round, lineJoin: .round))
+                }
+            }
+
+            if startHP % 2 == 0 {
+                drawStrand(ptsA, color: line.color)
+                drawStrand(ptsB, color: line.colorB)
+            } else {
+                drawStrand(ptsB, color: line.colorB)
+                drawStrand(ptsA, color: line.color)
+            }
+            batchStart = batchEnd
+        }
+
+    case .hairy:
+        // Core stroke (colorA) with perpendicular hairs of varying length/angle (colorB).
+        // Pressure scales core width and hair size.
+        if count == 1 {
+            let pt = line.points[0]
+            context.fill(Path(ellipseIn: CGRect(x: pt.x - baseW/2, y: pt.y - baseW/2, width: baseW, height: baseW)), with: .color(line.color))
+            return
+        }
+        let hairCoreW   = baseW * 0.35
+        let hairW       = baseW * 0.13
+        let hairBaseLen = baseW * 1.1
+        let hairSpacing = baseW * 0.75
+
+        var hairArcLen = [CGFloat](repeating: 0, count: count)
+        for i in 1..<count {
+            hairArcLen[i] = hairArcLen[i-1] + hypot(line.points[i].x - line.points[i-1].x,
+                                                     line.points[i].y - line.points[i-1].y)
+        }
+
+        // Core stroke — segment-by-segment for pressure response
+        for i in 1..<count {
+            let taper = strokeTaper(i: i, count: count, taperFraction: 0.2)
+            let w = hairCoreW * max(0.08, taper) * pressureAt(i, in: line)
+            var seg = Path()
+            seg.move(to: line.points[i-1])
+            seg.addLine(to: line.points[i])
+            context.stroke(seg, with: .color(line.color),
+                           style: StrokeStyle(lineWidth: w, lineCap: .round, lineJoin: .round))
+        }
+
+        // Hairs at arc-length intervals — size scales with pressure at that point
+        var nextHairAt: CGFloat = 0
+        var hairSeed = 0
+        for i in 0..<count {
+            guard hairArcLen[i] >= nextHairAt else { continue }
+            nextHairAt += hairSpacing
+
+            let pt = line.points[i]
+            let lo = max(0, i-1), hi = min(count-1, i+1)
+            let ddx = line.points[hi].x - line.points[lo].x
+            let ddy = line.points[hi].y - line.points[lo].y
+            let dlen = hypot(ddx, ddy)
+            guard dlen > 0 else { continue }
+            let nx = -ddy / dlen, ny = ddx / dlen
+
+            let s = CGFloat(hairSeed)
+            let r1 = fabs(sin(s * 127.1 + 1.0))
+            let r2 = fabs(sin(s * 311.7 + 2.0))
+            let r3 = fabs(sin(s * 73.3  + 3.0))
+            let r4 = fabs(sin(s * 199.3 + 4.0))
+            hairSeed += 1
+
+            let pressure = pressureAt(i, in: line)
+            let lenA = hairBaseLen * (0.5 + r1 * 0.8) * pressure
+            let lenB = hairBaseLen * (0.4 + r3 * 0.7) * pressure
+            let angA = (r2 - 0.5) * 0.5
+            let angB = (r4 - 0.5) * 0.5
+
+            let dAxP =  nx * cos(angA) - ny * sin(angA)
+            let dAyP =  nx * sin(angA) + ny * cos(angA)
+            let dBxN = -nx * cos(angB) + ny * sin(angB)
+            let dByN = -nx * sin(angB) - ny * cos(angB)
+
+            var h = Path()
+            h.move(to: pt)
+            h.addLine(to: CGPoint(x: pt.x + dAxP * lenA, y: pt.y + dAyP * lenA))
+            h.move(to: pt)
+            h.addLine(to: CGPoint(x: pt.x + dBxN * lenB, y: pt.y + dByN * lenB))
+            context.stroke(h, with: .color(line.colorB),
+                           style: StrokeStyle(lineWidth: hairW * pressure, lineCap: .round))
+        }
+
+    case .thorns:
+        // Core stroke (colorA) with alternating backward-angled spikes (colorB), like a bramble.
+        // Pressure scales core width and thorn size.
+        if count == 1 {
+            let pt = line.points[0]
+            context.fill(Path(ellipseIn: CGRect(x: pt.x - baseW/2, y: pt.y - baseW/2, width: baseW, height: baseW)), with: .color(line.color))
+            return
+        }
+        let thornCoreW  = baseW * 0.4
+        let thornW      = baseW * 0.22
+        let thornLen    = baseW * 1.3
+        let thornSpace  = baseW * 1.8
+        let backLean: CGFloat = 0.45
+
+        var thornArcLen = [CGFloat](repeating: 0, count: count)
+        for i in 1..<count {
+            thornArcLen[i] = thornArcLen[i-1] + hypot(line.points[i].x - line.points[i-1].x,
+                                                       line.points[i].y - line.points[i-1].y)
+        }
+
+        // Core stroke — segment-by-segment for pressure response
+        for i in 1..<count {
+            let taper = strokeTaper(i: i, count: count, taperFraction: 0.2)
+            let w = thornCoreW * max(0.08, taper) * pressureAt(i, in: line)
+            var seg = Path()
+            seg.move(to: line.points[i-1])
+            seg.addLine(to: line.points[i])
+            context.stroke(seg, with: .color(line.color),
+                           style: StrokeStyle(lineWidth: w, lineCap: .round, lineJoin: .round))
+        }
+
+        // Thorns — size scales with pressure at placement point
+        var nextThornAt: CGFloat = thornSpace * 0.5
+        var thornIdx = 0
+        for i in 1..<count {
+            guard thornArcLen[i] >= nextThornAt else { continue }
+            nextThornAt += thornSpace
+
+            let pt = line.points[i]
+            let lo = max(0, i-1), hi = min(count-1, i+1)
+            let tdx = line.points[hi].x - line.points[lo].x
+            let tdy = line.points[hi].y - line.points[lo].y
+            let tlen = hypot(tdx, tdy)
+            guard tlen > 0 else { continue }
+            let fdx = tdx / tlen, fdy = tdy / tlen
+
+            let side: CGFloat = thornIdx % 2 == 0 ? 1 : -1
+            let px = -fdy * side - backLean * fdx
+            let py =  fdx * side - backLean * fdy
+            let plen = hypot(px, py)
+            let pressure = pressureAt(i, in: line)
+
+            var thorn = Path()
+            thorn.move(to: pt)
+            thorn.addLine(to: CGPoint(x: pt.x + (px / plen) * thornLen * pressure,
+                                      y: pt.y + (py / plen) * thornLen * pressure))
+            context.stroke(thorn, with: .color(line.colorB),
+                           style: StrokeStyle(lineWidth: thornW * pressure, lineCap: .round))
+            thornIdx += 1
+        }
+
+    case .zigzag:
+        // Sharp V-shaped path that snaps left/right at regular intervals.
+        // No center core — the zigzag IS the stroke. Colors alternate per zig/zag.
+        // Pressure scales both width and amplitude.
+        if count == 1 {
+            let pt = line.points[0]
+            context.fill(Path(ellipseIn: CGRect(x: pt.x - baseW/2, y: pt.y - baseW/2, width: baseW, height: baseW)), with: .color(line.color))
+            return
+        }
+        let zzAmplitude  = baseW * 0.65
+        let zzHalfSpace  = baseW * 1.2   // arc-length per zig or zag
+
+        var zzArcLen = [CGFloat](repeating: 0, count: count)
+        for i in 1..<count {
+            zzArcLen[i] = zzArcLen[i-1] + hypot(line.points[i].x - line.points[i-1].x,
+                                                  line.points[i].y - line.points[i-1].y)
+        }
+
+        // Precompute offset positions — each point displaced ±amplitude perp based on half-cycle
+        var zzPts = [CGPoint](repeating: .zero, count: count)
+        for i in 0..<count {
+            let halfCycle = Int(zzArcLen[i] / zzHalfSpace)
+            let side: CGFloat = halfCycle % 2 == 0 ? 1 : -1
+            let lo = max(0, i-1), hi = min(count-1, i+1)
+            let dx = line.points[hi].x - line.points[lo].x
+            let dy = line.points[hi].y - line.points[lo].y
+            let len = hypot(dx, dy)
+            let nx = len > 0 ? -dy / len : 0
+            let ny = len > 0 ?  dx / len : 1
+            let taper = strokeTaper(i: i, count: count, taperFraction: 0.1)
+            let amp = zzAmplitude * taper * pressureAt(i, in: line)
+            let pt = line.points[i]
+            zzPts[i] = CGPoint(x: pt.x + nx * amp * side, y: pt.y + ny * amp * side)
+        }
+
+        // Draw segment-by-segment, color determined by half-cycle of the midpoint
+        for i in 1..<count {
+            let halfCycle = Int((zzArcLen[i-1] + zzArcLen[i]) / 2 / zzHalfSpace)
+            let segColor = halfCycle % 2 == 0 ? line.color : line.colorB
+            let w = baseW * 0.48 * pressureAt(i, in: line)
+            var seg = Path()
+            seg.move(to: zzPts[i-1])
+            seg.addLine(to: zzPts[i])
+            context.stroke(seg, with: .color(segColor),
+                           style: StrokeStyle(lineWidth: w, lineCap: .round, lineJoin: .miter))
+        }
+
+    case .bubble:
+        // Filled circles strung along the path — like pearls. No core stroke.
+        // Alternating colorA/colorB. Pressure scales radius.
+        if count == 1 {
+            let pt = line.points[0]
+            let r = baseW * 0.5
+            context.fill(Path(ellipseIn: CGRect(x: pt.x - r, y: pt.y - r, width: r*2, height: r*2)), with: .color(line.color))
+            return
+        }
+        let bubbleR       = baseW * 0.5
+        let bubbleSpacing = baseW * 1.3   // arc-length between bubble centers
+
+        var bubbleArcLen = [CGFloat](repeating: 0, count: count)
+        for i in 1..<count {
+            bubbleArcLen[i] = bubbleArcLen[i-1] + hypot(line.points[i].x - line.points[i-1].x,
+                                                          line.points[i].y - line.points[i-1].y)
+        }
+
+        var nextBubbleAt: CGFloat = 0
+        var bubbleIdx = 0
+        for i in 0..<count {
+            guard bubbleArcLen[i] >= nextBubbleAt else { continue }
+            nextBubbleAt += bubbleSpacing
+            let pt = line.points[i]
+            let r = bubbleR * pressureAt(i, in: line)
+            let color = bubbleIdx % 2 == 0 ? line.color : line.colorB
+            context.fill(Path(ellipseIn: CGRect(x: pt.x - r, y: pt.y - r, width: r*2, height: r*2)),
+                         with: .color(color))
+            bubbleIdx += 1
+        }
+
+    case .stars:
+        // Filled 5-pointed stars along the path. Alternating colorA/colorB.
+        // Pressure scales size. Slight rotation variation per star.
+        if count == 1 {
+            let pt = line.points[0]
+            context.fill(starPath(center: pt, outerR: baseW * 0.55, innerR: baseW * 0.22, rotation: 0),
+                         with: .color(line.color))
+            return
+        }
+        let starOuter   = baseW * 0.55
+        let starInner   = starOuter * 0.4
+        let starSpacing = baseW * 1.4
+
+        var starArcLen = [CGFloat](repeating: 0, count: count)
+        for i in 1..<count {
+            starArcLen[i] = starArcLen[i-1] + hypot(line.points[i].x - line.points[i-1].x,
+                                                      line.points[i].y - line.points[i-1].y)
+        }
+
+        var nextStarAt: CGFloat = 0
+        var starIdx = 0
+        for i in 0..<count {
+            guard starArcLen[i] >= nextStarAt else { continue }
+            nextStarAt += starSpacing
+            let pt = line.points[i]
+            let pressure = pressureAt(i, in: line)
+            let outer = starOuter * pressure
+            let inner = starInner * pressure
+            // Deterministic rotation variation
+            let rot = CGFloat(starIdx) * 0.37  // irrational step keeps each star oriented differently
+            let color = starIdx % 2 == 0 ? line.color : line.colorB
+            context.fill(starPath(center: pt, outerR: outer, innerR: inner, rotation: rot),
+                         with: .color(color))
+            starIdx += 1
+        }
     }
+}
+
+/// Build a filled 5-pointed star path centered at `center`.
+private func starPath(center: CGPoint, outerR: CGFloat, innerR: CGFloat, rotation: CGFloat) -> Path {
+    var path = Path()
+    for i in 0..<10 {
+        let angle = rotation + CGFloat(i) * .pi / 5 - .pi / 2
+        let r = i % 2 == 0 ? outerR : innerR
+        let pt = CGPoint(x: center.x + r * cos(angle), y: center.y + r * sin(angle))
+        if i == 0 { path.move(to: pt) } else { path.addLine(to: pt) }
+    }
+    path.closeSubpath()
+    return path
 }
 
 /// Linearly interpolate between two SwiftUI Colors at t ∈ [0,1]
