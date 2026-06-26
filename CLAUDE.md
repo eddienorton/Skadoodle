@@ -44,6 +44,45 @@ Eddie Brayman, 72, independent iOS developer, East Village NYC. 50+ years coding
 - **Clear respects hidden layers** — all clear paths remove hidden drawing layer IDs from `hiddenLayerIds`; Clear Stamps removes hidden stamp IDs.
 - **Undo/redo revalidate selection** — after restore, stale `selectedStampId` is cleared if the stamp no longer exists; `ensureLayerSelection()` ensures a drawing layer is always selected. (`DrawScreen.swift`)
 
+### .skadoodle Re-editable Format (v2.2)
+
+#### New file: `DoodleFormat.swift`
+All Codable conformances and format infrastructure live here. Nothing in the existing model files was restructured — conformances are added via extensions.
+
+- **`CodableColor`** — bridges `SwiftUI.Color` ↔ JSON as four RGBA doubles via `UIColor.getRed(_:green:blue:alpha:)`.
+- **`DualToneStyle: Codable`** — added to declaration in `DrawingEngine.swift` (free via `String` raw value).
+- **`DrawingLayer: Codable`** — added to struct declaration in `DrawingEngine.swift` (synthesized; `DrawingLine` conformance is in extension in `DoodleFormat.swift` so synthesis must be in same file).
+- **`PenType: Codable`** — custom encode/decode; `dualTone` case encodes style rawValue under key `"style"`.
+- **`DrawingLine: Codable`** — custom encode/decode; points stored as parallel `px`/`py` Double arrays for compactness; `Color` fields via `CodableColor`; `CGFloat` fields as `Double`.
+- **`LayerEntry: Codable`** — custom encode/decode; stored as `{type: "drawing"|"stamp", id: UUID}`.
+- **`PlacedStamp: Codable`** — custom encode/decode; `inlineImage` serialized as PNG data under key `inlineImageData`; all `Color` fields via `CodableColor`; `position` as `px`/`py` doubles. `var id: UUID = UUID()` (changed from `let` to allow decode assignment).
+- **`SkadoodleDocument`** — top-level Codable struct: `version`, `drawingLayers`, `placedStamps`, `layerOrder`, `hiddenLayerIds` (as `[UUID]`), `canvasColorIndex`, `backgroundImageData` (JPEG at 0.85 quality), `backgroundOffset[X/Y]`, `bgOpacity/Blur/Brightness/Saturation`.
+- **`FileManager.currentSkadoodleURL`** — `Documents/current.skadoodle` — the auto-save slot for the current in-progress session.
+- **`Notification.Name.snoodleReEditEntry`** — posted by `SnoodleDetailView` to trigger re-edit from ContentView.
+
+#### Save / Load (DrawScreen.swift)
+- **`saveSkadoodleData() -> Data?`** — encodes current canvas state to JSON. Only called when canvas has content. Prints `[Skadoodle] saved N layers, N stamps, N bytes` to console.
+- **`restoreSkadoodleData(_ data: Data)`** — decodes and restores full canvas state. Guards against empty docs (deletes file if empty). Calls `ensureLayerSelection()` after restore. Pushes undo snapshot only if canvas was non-empty before restore.
+
+#### Auto-save / Resume
+- **Auto-save on Cancel** — `isPresented = false` path in Cancel button writes `current.skadoodle` if canvas has content.
+- **Auto-save on background** — `UIApplication.didEnterBackgroundNotification` writes `current.skadoodle` if canvas has content (safety net for app kill).
+- **Resume alert** — `.onAppear` checks for `current.skadoodle` when canvas is empty; shows "Resume Last Doodle?" alert with **Resume** / **Discard** buttons (no Cancel). Discard deletes the file.
+- **Cleanup on Done** — `saveEntry(post:)` deletes `current.skadoodle` after saving to gallery.
+
+#### Gallery Re-edit
+- **`SnoodleEntry.skadoodleURL`** — `Documents/Doodles/<id>.skadoodle` — paired file for each gallery entry.
+- **`SnoodleEntry.hasSkadoodleFile`** — checks if `.skadoodle` exists on disk.
+- **`saveEntry(post:)`** — writes `.skadoodle` to `entry.skadoodleURL` before saving to gallery (both private and world).
+- **Re-edit button** — pencil icon (`pencil.and.scribble`) in `SnoodleDetailView.card(for:)` action bar. Dismisses detail view, then posts `snoodleReEditEntry` notification with the `SnoodleEntry` as object (0.35s delay for sheet transition).
+- **ContentView** — listens for `snoodleReEditEntry`, sets `@State var entryToEdit: SnoodleEntry?`, opens DrawScreen. Clears `entryToEdit` in `onDismiss`.
+- **DrawScreen `entryToEdit: SnoodleEntry?`** — non-binding `let` parameter (default `nil`). `.onAppear` checks:
+  - If `entryToEdit != nil` + `.skadoodle` exists → full `restoreSkadoodleData`
+  - If `entryToEdit != nil` + no `.skadoodle` → load flat JPEG as `canvasBackgroundImage` (legacy path)
+  - If `entryToEdit == nil` → check `current.skadoodle` for resume prompt
+- **Legacy import banner** — orange banner at top of canvas: *"Original layers aren't available — opened as background image."* Shown for pre-v2.2 doodles. Dismissed by tapping ✕, by first stroke (`onBeforeDraw`), or by first stamp placement (`appendStampToLayer`). No auto-timer.
+- **World gallery** — Re-edit button intentionally not added to `WorldSnoodleDetailView`. Other users' public doodles have no `.skadoodle` file. Your own posted doodles could theoretically be re-edited (file exists locally) but button is not wired up yet.
+
 ### Fixes
 - **Layer always highlighted** — `ensureLayerSelection()` called on layers panel `.onAppear`. Sets `userSelectedLayerId` to topmost drawing layer if nil or stale. No-op when a stamp is selected. (`DrawScreen.swift`)
 - **Delete for drawing layers** — "Delete Layer" (destructive) added to drawing layer `···` menu. (`DrawScreen.swift`)

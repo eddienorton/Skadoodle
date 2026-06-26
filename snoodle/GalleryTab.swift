@@ -176,6 +176,18 @@ struct SnoodleDetailView: View {
                         .foregroundColor(.white.opacity(0.6))
                 }
 
+                // Re-edit button
+                Button(action: {
+                    dismiss()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        NotificationCenter.default.post(name: .snoodleReEditEntry, object: entry)
+                    }
+                }) {
+                    Image(systemName: "pencil.and.scribble")
+                        .font(.system(size: 22))
+                        .foregroundColor(.white.opacity(0.8))
+                }
+
                 // Submit to world gallery
                 SubmitButton(entry: entry)
 

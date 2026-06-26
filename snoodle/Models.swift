@@ -79,6 +79,12 @@ struct SnoodleEntry: Identifiable, Codable {
 
     var imageURL: URL { SnoodleEntry.imagesDirectory.appendingPathComponent(imageFilename) }
 
+    /// URL for the re-editable .skadoodle file paired with this entry (may not exist for old doodles).
+    var skadoodleURL: URL { SnoodleEntry.imagesDirectory.appendingPathComponent("\(id.uuidString).skadoodle") }
+
+    /// True if a .skadoodle file exists on disk for this entry (i.e. saved in v2.2+).
+    var hasSkadoodleFile: Bool { FileManager.default.fileExists(atPath: skadoodleURL.path) }
+
     // Backwards-compatible accessor: existing call sites using `entry.imageData`
     // keep working unchanged. The bytes are read from / written to disk, not UserDefaults.
     var imageData: Data {

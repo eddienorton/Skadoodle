@@ -113,6 +113,7 @@ struct ContentView: View {
     @ObservedObject private var auth = SnoodleAuthManager.shared
     @State private var showingDraw = false
     @State private var firstDrawLaunch = true
+    @State private var entryToEdit: SnoodleEntry? = nil
     @State private var selectedTab: Int = 0
     @AppStorage("hasSeenOnboarding") private var hasSeenOnboarding: Bool = false
     @State private var showingOnboarding: Bool = false
@@ -190,13 +191,18 @@ struct ContentView: View {
             isPresented: $showingDraw,
             onDismiss: {
                 if selectedTab == 2 { selectedTab = 0 }
+                entryToEdit = nil
                 NotificationCenter.default.post(name: .snoodleProfilePhotoRestored, object: nil)
                 DispatchQueue.main.async {
                     NotificationCenter.default.post(name: .snoodleProfilePhotoRestored, object: nil)
                 }
             },
-            content: { DrawScreen(isPresented: $showingDraw, selectedTab: $selectedTab).environmentObject(store) }
+            content: { DrawScreen(isPresented: $showingDraw, selectedTab: $selectedTab, entryToEdit: entryToEdit).environmentObject(store) }
         ))
+        .onReceive(NotificationCenter.default.publisher(for: .snoodleReEditEntry)) { note in
+            entryToEdit = note.object as? SnoodleEntry
+            showingDraw = true
+        }
         // Profile setup handled naturally via Profile tab
     }
 }

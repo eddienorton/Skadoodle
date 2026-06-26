@@ -9,7 +9,7 @@ import FirebaseFirestore
 import FirebaseStorage
 import Combine
 
-enum DualToneStyle: String, CaseIterable, Identifiable {
+enum DualToneStyle: String, CaseIterable, Identifiable, Codable {
     case gradient    = "Gradient"
     case split       = "Split"
     case reactive    = "Reactive"
@@ -79,7 +79,7 @@ enum PenType: Equatable {
 
 // MARK: - Layer Model
 
-struct DrawingLayer: Identifiable {
+struct DrawingLayer: Identifiable, Codable {
     var id: UUID
     var lines: [DrawingLine]
     var opacity: Double = 1.0

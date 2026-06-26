@@ -1077,6 +1077,7 @@ struct DrawScreen: View {
     @EnvironmentObject var store: SnoodleStore
     @Binding var isPresented: Bool
     @Binding var selectedTab: Int
+    var entryToEdit: SnoodleEntry? = nil
 
     // Drawing layers — new interleaved layer architecture.
     // The active layer is always the last .drawing entry in layerOrder.
@@ -1100,6 +1101,8 @@ struct DrawScreen: View {
     @State private var opacityTargetId: UUID? = nil
     @State private var showOpacitySheet: Bool = false
     @State private var isGeneratingCaption: Bool = false
+    @State private var showRestoreAlert: Bool = false
+    @State private var showLegacyImportBanner: Bool = false
     @State private var canvasSize: CGSize = CGSize(width: 300, height: 300)
     @State private var undoStack: [CanvasSnapshot] = []
     @State private var redoStack: [CanvasSnapshot] = []
@@ -1960,6 +1963,59 @@ struct DrawScreen: View {
     }
 
     /// Push undo snapshot and clear redo.
+    // MARK: - .skadoodle save / load
+
+    /// Serialize the current canvas to a SkadoodleDocument and return JSON Data.
+    func saveSkadoodleData() -> Data? {
+        let bgData = canvasBackgroundImage.flatMap { $0.jpegData(compressionQuality: 0.85) }
+        let doc = SkadoodleDocument(
+            drawingLayers: drawingLayers,
+            placedStamps: placedStamps,
+            layerOrder: layerOrder,
+            hiddenLayerIds: Array(hiddenLayerIds),
+            canvasColorIndex: canvasColorIndex,
+            backgroundImageData: bgData,
+            backgroundOffsetX: Double(backgroundOffset.width),
+            backgroundOffsetY: Double(backgroundOffset.height),
+            bgOpacity: bgOpacity,
+            bgBlur: bgBlur,
+            bgBrightness: bgBrightness,
+            bgSaturation: bgSaturation
+        )
+        return try? JSONEncoder().encode(doc)
+    }
+
+    /// Restore canvas state from JSON Data previously produced by saveSkadoodleData().
+    func restoreSkadoodleData(_ data: Data) {
+        let doc: SkadoodleDocument
+        guard let doc = try? JSONDecoder().decode(SkadoodleDocument.self, from: data) else { return }
+        guard !doc.drawingLayers.isEmpty || !doc.placedStamps.isEmpty || doc.backgroundImageData != nil else {
+            try? FileManager.default.removeItem(at: FileManager.currentSkadoodleURL)
+            return
+        }
+        // Only push undo if there's something on the canvas worth preserving
+        if !drawingLayers.isEmpty || !placedStamps.isEmpty { pushUndoSnapshot() }
+        drawingLayers = doc.drawingLayers
+        placedStamps = doc.placedStamps
+        layerOrder = doc.layerOrder
+        hiddenLayerIds = Set(doc.hiddenLayerIds)
+        canvasColorIndex = doc.canvasColorIndex
+        if let imgData = doc.backgroundImageData {
+            canvasBackgroundImage = UIImage(data: imgData)
+        } else {
+            canvasBackgroundImage = nil
+        }
+        backgroundOffset = CGSize(width: doc.backgroundOffsetX, height: doc.backgroundOffsetY)
+        bgOpacity = doc.bgOpacity
+        bgBlur = doc.bgBlur
+        bgBrightness = doc.bgBrightness
+        bgSaturation = doc.bgSaturation
+        selectedStampId = nil
+        showStampMagicMenu = false
+        pendingInsertAboveStampId = nil
+        ensureLayerSelection()
+    }
+
     func pushUndoSnapshot() {
         undoStack.append(CanvasSnapshot(
             drawingLayers: drawingLayers, stamps: placedStamps, layerOrder: layerOrder,
@@ -1971,6 +2027,7 @@ struct DrawScreen: View {
     // Place a stamp: append to placedStamps + layerOrder.
     // No empty drawing layer is created here — one will be lazily created on first stroke via onBeforeDraw.
     func appendStampToLayer(_ stamp: PlacedStamp) {
+        if showLegacyImportBanner { withAnimation { showLegacyImportBanner = false } }
         placedStamps.append(stamp)
         // Priority: insert above the selected stamp if one is selected,
         // otherwise insert above the selected drawing layer.
@@ -2138,6 +2195,10 @@ struct DrawScreen: View {
             keywords: resultKeywords,
             imageData: data
         )
+        // Save .skadoodle alongside the flat image for future re-editing
+        if let skadoodleData = saveSkadoodleData() {
+            try? skadoodleData.write(to: entry.skadoodleURL)
+        }
         if post {
             guard auth.isSignedIn else {
                 showSignInForPost = true
@@ -2170,6 +2231,8 @@ struct DrawScreen: View {
                 selectedTab = 0
             }
         }
+        // Doodle saved to gallery — discard the auto-save so it won't be offered for resume
+        try? FileManager.default.removeItem(at: FileManager.currentSkadoodleURL)
         isPresented = false
     }
 
@@ -2774,6 +2837,7 @@ struct DrawScreen: View {
                             stampResizeTargetId: stampResizeTargetId,
                             isStampSelected: selectedStampId != nil,
                             onBeforeDraw: {
+                                if showLegacyImportBanner { withAnimation { showLegacyImportBanner = false } }
                                 pushUndoSnapshot()
                                 // Create a new layer when:
                                 // 1. No drawing layers exist (lazy first-stroke creation), or
@@ -3218,6 +3282,33 @@ struct DrawScreen: View {
                 // Layers side panel
                 layersPanelView
 
+                // Legacy import banner
+                if showLegacyImportBanner {
+                    VStack {
+                        HStack(spacing: 8) {
+                            Image(systemName: "info.circle")
+                            Text("Original layers aren't available — opened as background image")
+                                .font(.system(size: 13, weight: .medium))
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer()
+                            Button { withAnimation { showLegacyImportBanner = false } } label: {
+                                Image(systemName: "xmark").font(.system(size: 12, weight: .bold))
+                            }
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .background(Color.orange.opacity(0.92))
+                        .foregroundColor(.white)
+                        .cornerRadius(10)
+                        .padding(.horizontal, 12)
+                        .padding(.top, 8)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                        Spacer()
+                    }
+                    .zIndex(5)
+                    .allowsHitTesting(true)
+                }
+
                 // Dimming overlay when result card is showing
                 if showResultCard || isGeneratingCaption {
                     Color.black.opacity(0.4)
@@ -3339,6 +3430,11 @@ struct DrawScreen: View {
                                 showResultCard = false
                             }
                         } else {
+                            // Save unfinished work so it can be resumed next session
+                            let hasContent = !drawingLayers.isEmpty || !placedStamps.isEmpty || canvasBackgroundImage != nil
+                            if hasContent, let data = saveSkadoodleData() {
+                                try? data.write(to: FileManager.currentSkadoodleURL)
+                            }
                             isPresented = false
                         }
                     }
@@ -3363,6 +3459,47 @@ struct DrawScreen: View {
             }
         }
         .interactiveDismissDisabled(true)
+        // Auto-save when app goes to background
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
+            let hasContent = !drawingLayers.isEmpty || !placedStamps.isEmpty || canvasBackgroundImage != nil
+            guard hasContent else { return }
+            if let data = saveSkadoodleData() {
+                try? data.write(to: FileManager.currentSkadoodleURL)
+            }
+        }
+        // Load entry for re-edit, or offer to restore last auto-saved session
+        .onAppear {
+            if let entry = entryToEdit {
+                if entry.hasSkadoodleFile, let data = try? Data(contentsOf: entry.skadoodleURL) {
+                    // Full layer restore — v2.2+ doodle
+                    restoreSkadoodleData(data)
+                } else {
+                    // Legacy doodle — load flat image as canvas background
+                    if let img = UIImage(contentsOfFile: entry.imageURL.path) {
+                        canvasBackgroundImage = img
+                    }
+                    showLegacyImportBanner = true
+                }
+            } else {
+                let url = FileManager.currentSkadoodleURL
+                let isEmpty = drawingLayers.isEmpty && placedStamps.isEmpty && canvasBackgroundImage == nil
+                if isEmpty && FileManager.default.fileExists(atPath: url.path) {
+                    showRestoreAlert = true
+                }
+            }
+        }
+        .alert("Resume Last Doodle?", isPresented: $showRestoreAlert) {
+            Button("Resume") {
+                if let data = try? Data(contentsOf: FileManager.currentSkadoodleURL) {
+                    restoreSkadoodleData(data)
+                }
+            }
+            Button("Discard", role: .cancel) {
+                try? FileManager.default.removeItem(at: FileManager.currentSkadoodleURL)
+            }
+        } message: {
+            Text("You have an unfinished doodle from your last session.")
+        }
     }
 }
 

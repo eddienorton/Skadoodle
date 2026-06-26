@@ -92,7 +92,7 @@ struct IdentifiableInt: Identifiable, Equatable {
 // MARK: - Stamp Tool
 
 struct PlacedStamp: Identifiable {
-    let id = UUID()
+    var id: UUID = UUID()
     var emoji: String
     var position: CGPoint
     var size: CGFloat
