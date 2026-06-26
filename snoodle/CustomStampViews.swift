@@ -161,29 +161,6 @@ struct ObjectSegmentationSheet: View {
     }
 }
 
-// MARK: - Checkerboard (shows transparency)
-
-struct CheckerboardView: View {
-    var body: some View {
-        Canvas { context, size in
-            let tileSize: CGFloat = 8
-            var isLight = true
-            var y: CGFloat = 0
-            while y < size.height {
-                var x: CGFloat = 0
-                isLight = Int(y / tileSize) % 2 == 0
-                while x < size.width {
-                    let color = isLight ? Color.white : Color(white: 0.85)
-                    context.fill(Path(CGRect(x: x, y: y, width: tileSize, height: tileSize)), with: .color(color))
-                    isLight.toggle()
-                    x += tileSize
-                }
-                y += tileSize
-            }
-        }
-    }
-}
-
 // MARK: - Camera View
 
 struct CameraView: UIViewControllerRepresentable {
@@ -303,6 +280,9 @@ struct DoodleStampCreatorView: View {
     @State private var dualToneColorB: Color = .orange
     @State private var showPenStudio: Bool = false
     @AppStorage("doodleStampColorIndex") private var selectedColorIndex: Int = 0
+    @State private var recentColors: [Color] = RecentColors.load()
+    @State private var showDoodleColorPicker = false
+    @State private var doodlePickerColor: Color = .black
 
     // Stamps
     @AppStorage("doodleStampLastEmoji") private var selectedStamp: String = "⭐️"
@@ -344,32 +324,264 @@ struct DoodleStampCreatorView: View {
 
     @ObservedObject private var customManager = CustomStampManager.shared
 
-    private var currentColor: Color { paletteColors[selectedColorIndex] }
+    private var currentColor: Color { recentColors[min(selectedColorIndex, max(0, recentColors.count - 1))] }
     private var canvasIsEmpty: Bool { lines.isEmpty && placedStamps.isEmpty }
 
     // MARK: - Color circle (matches DrawScreen)
     @ViewBuilder
     func colorCircle(_ color: Color) -> some View {
-        let idx = paletteColors.firstIndex(where: { $0 == color })
-        let isSelected = idx == selectedColorIndex && !isEraser
-        Circle()
-            .fill(color)
-            .frame(width: 30, height: 30)
-            .overlay(Group {
-                if isSelected {
-                    ZStack {
-                        Circle().stroke(Color.white, lineWidth: 3).padding(-3)
-                        Circle().stroke(Color.blue, lineWidth: 3).padding(-6)
-                    }
-                } else if color == Color.white {
-                    Circle().stroke(Color.black.opacity(0.3), lineWidth: 1)
-                }
-            })
+        let isSelected = !isEraser && color.isApproximatelyEqual(to: currentColor)
+        ColorSwatchView(color: color, size: 30, isSelected: isSelected, selectionColor: .blue)
             .onTapGesture {
-                if let i = idx { selectedColorIndex = i }
+                if let i = recentColors.firstIndex(where: { $0.isApproximatelyEqual(to: color) }) {
+                    selectedColorIndex = i
+                }
                 isEraser = false
                 selectedStampId = nil
             }
+    }
+
+    // MARK: - Row 2 toolbar (broken out to avoid compiler type-check timeout)
+
+    @ViewBuilder
+    func doodleToolbarRow2() -> some View {
+        HStack(spacing: 12) {
+            Button {
+                showTextComposer = true
+            } label: {
+                ZStack {
+                    Circle()
+                        .fill(Color(UIColor.secondarySystemBackground))
+                        .frame(width: 38, height: 38)
+                        .overlay(Circle().stroke(Color.gray.opacity(0.3), lineWidth: 1))
+                    Text("T")
+                        .font(.system(size: 20, weight: .bold, design: .serif))
+                        .foregroundColor(.primary)
+                }
+            }
+
+            StampToolButton(
+                selectedStamp: $selectedStamp,
+                placedStamps: $placedStamps,
+                stampUndoStack: $stampUndoStack,
+                selectedCustomStampId: $lastCustomStampIdString,
+                isCustomStampMode: $isCustomStampMode,
+                canvasSize: canvasSize,
+                allowDoodleCreation: false,
+                onPlace: { autoPlaceStamp() },
+                onPlaceMultipleStamps: { ids in
+                    let center = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
+                    let stagger: CGFloat = 20
+                    let offset = -CGFloat(ids.count - 1) * stagger / 2
+                    undoStack.append(makeDoodleSnapshot()); redoStack = []
+                    for (i, customId) in ids.enumerated() {
+                        let pos = CGPoint(x: center.x + offset + CGFloat(i) * stagger,
+                                          y: center.y + offset + CGFloat(i) * stagger)
+                        var stamp = PlacedStamp(emoji: "📷", position: pos, size: 158)
+                        stamp.customImageId = customId
+                        placedStamps.append(stamp)
+                        selectedStampId = stamp.id
+                    }
+                    showStampMagicMenu = true
+                    suppressTapBriefly()
+                },
+                onPlaceMultipleEmojis: { emojis in
+                    let center = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
+                    let stagger: CGFloat = 20
+                    let offset = -CGFloat(emojis.count - 1) * stagger / 2
+                    undoStack.append(makeDoodleSnapshot()); redoStack = []
+                    for (i, emoji) in emojis.enumerated() {
+                        let pos = CGPoint(x: center.x + offset + CGFloat(i) * stagger,
+                                          y: center.y + offset + CGFloat(i) * stagger)
+                        placedStamps.append(PlacedStamp(emoji: emoji, position: pos, size: 126))
+                        selectedStampId = placedStamps.last?.id
+                    }
+                    showStampMagicMenu = true
+                    suppressTapBriefly()
+                }
+            )
+
+            Button(action: {
+                selectedStampId = nil
+                showPenStudio = true
+            }) {
+                ZStack {
+                    Circle()
+                        .fill(Color(UIColor.secondarySystemBackground))
+                        .frame(width: 34, height: 34)
+                        .overlay(Circle().stroke(Color.gray.opacity(0.3), lineWidth: 1))
+                    Image(systemName: currentPenType.icon)
+                        .font(.system(size: 20))
+                        .foregroundColor(.primary)
+                }
+            }
+            .sheet(isPresented: $showPenStudio, onDismiss: {
+                if currentPenType.isDualTone {
+                    UserDefaults.standard.set("dualtone", forKey: "doodleLastPenTypeName")
+                    UserDefaults.standard.set(currentPenType.dualToneStyle.rawValue, forKey: "doodleLastDualToneStyle")
+                } else {
+                    UserDefaults.standard.set(currentPenType.displayName.lowercased(), forKey: "doodleLastPenTypeName")
+                }
+            }) {
+                PenStudioSheet(penType: $currentPenType, colorB: $dualToneColorB)
+                    .presentationDragIndicator(.visible)
+            }
+            .sheet(isPresented: $showTextComposer, onDismiss: {
+                editingStampId = nil
+            }) {
+                doodleTextComposerSheet()
+            }
+            .colorPickerSheet(isPresented: $showDoodleColorPicker, color: $doodlePickerColor) { newColor in
+                recentColors = RecentColors.add(newColor)
+                selectedColorIndex = 0
+                isEraser = false
+                selectedStampId = nil
+            }
+
+            Button {
+                showThicknessPicker.toggle()
+            } label: {
+                ZStack {
+                    Circle()
+                        .fill(Color(UIColor.secondarySystemBackground))
+                        .frame(width: 34, height: 34)
+                    Circle()
+                        .fill(Color.primary)
+                        .frame(width: min(lineWidth, 24), height: min(lineWidth, 24))
+                }
+            }
+
+            Button(action: {
+                guard !undoStack.isEmpty else { return }
+                let snapshot = makeDoodleSnapshot()
+                redoStack.append(snapshot)
+                let last = undoStack.removeLast()
+                lines = last.drawingLayers.first?.lines ?? []
+                placedStamps = last.stamps
+            }) {
+                Image(systemName: "arrow.uturn.backward")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundColor(undoStack.isEmpty ? .gray.opacity(0.4) : .blue)
+            }
+            .disabled(undoStack.isEmpty)
+
+            Button(action: {
+                guard !redoStack.isEmpty else { return }
+                let snapshot = makeDoodleSnapshot()
+                undoStack.append(snapshot)
+                let last = redoStack.removeLast()
+                lines = last.drawingLayers.first?.lines ?? []
+                placedStamps = last.stamps
+            }) {
+                Image(systemName: "arrow.uturn.forward")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundColor(redoStack.isEmpty ? .gray.opacity(0.4) : .blue)
+            }
+            .disabled(redoStack.isEmpty)
+
+            Button("Clear") {
+                let thingCount = (lines.isEmpty ? 0 : 1) + (placedStamps.isEmpty ? 0 : 1)
+                if thingCount == 1 {
+                    undoStack.append(makeDoodleSnapshot())
+                    redoStack = []
+                    if !lines.isEmpty { lines = [] }
+                    else { placedStamps = []; stampUndoStack = []; stampRedoStack = [] }
+                } else {
+                    showClearSheet = true
+                }
+            }
+            .foregroundColor(canvasIsEmpty ? .gray.opacity(0.4) : .red)
+            .font(.system(size: 16, weight: .medium))
+            .disabled(canvasIsEmpty)
+            .confirmationDialog("Clear Canvas", isPresented: $showClearSheet, titleVisibility: .visible) {
+                Button("Clear All", role: .destructive) {
+                    undoStack.append(makeDoodleSnapshot())
+                    redoStack = []
+                    lines = []
+                    placedStamps = []
+                    stampUndoStack = []
+                    stampRedoStack = []
+                }
+                if !lines.isEmpty {
+                    Button("Clear Drawing", role: .destructive) {
+                        undoStack.append(makeDoodleSnapshot())
+                        redoStack = []
+                        lines = []
+                    }
+                }
+                if !placedStamps.isEmpty {
+                    Button("Clear Stamps", role: .destructive) {
+                        undoStack.append(makeDoodleSnapshot())
+                        redoStack = []
+                        placedStamps = []
+                        stampUndoStack = []
+                        stampRedoStack = []
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 10)
+    }
+
+    // MARK: - Text stamp helpers (broken out to avoid compiler type-check timeout)
+
+    func handleDoodleTextPlace(text: String, fontId: String, fontStyle: String, alignment: String,
+                               color: Color, bgColor: Color, shEnabled: Bool, shColor: Color,
+                               shBlur: Double, shOffX: Double, shOffY: Double) {
+        if let editId = editingStampId,
+           let idx = placedStamps.firstIndex(where: { $0.id == editId }) {
+            undoStack.append(makeDoodleSnapshot())
+            redoStack = []
+            let (natW, natH, fontSize) = naturalTextStampSize(text: text, fontId: fontId, fontStyle: fontStyle, maxWidth: canvasSize.width * 0.7)
+            placedStamps[idx].stampText = text
+            placedStamps[idx].fontName = fontId
+            placedStamps[idx].fontStyle = fontStyle
+            placedStamps[idx].textAlignment = alignment
+            placedStamps[idx].textColor = color
+            placedStamps[idx].textBgColor = bgColor
+            placedStamps[idx].shadowEnabled = shEnabled
+            placedStamps[idx].shadowColor = shColor
+            placedStamps[idx].shadowBlur = shBlur
+            placedStamps[idx].shadowOffsetX = shOffX
+            placedStamps[idx].shadowOffsetY = shOffY
+            placedStamps[idx].size = fontSize
+            placedStamps[idx].stampWidth = natW
+            placedStamps[idx].stampHeight = natH
+            selectedStampId = editId
+            showStampMagicMenu = true
+        } else {
+            placeTextStamp(text: text, fontId: fontId, fontStyle: fontStyle, alignment: alignment,
+                           color: color, bgColor: bgColor, shadowEnabled: shEnabled,
+                           shadowColor: shColor, shadowBlur: shBlur,
+                           shadowOffsetX: shOffX, shadowOffsetY: shOffY)
+        }
+        showTextComposer = false
+        editingStampId = nil
+    }
+
+    @ViewBuilder
+    func doodleTextComposerSheet() -> some View {
+        let editStamp = editingStampId.flatMap { id in placedStamps.first(where: { $0.id == id }) }
+        TextComposerSheet(
+            initialText: editStamp?.stampText,
+            initialFontStyle: editStamp?.fontStyle,
+            initialAlignment: editStamp?.textAlignment,
+            initialTextColor: editStamp?.textColor,
+            initialTextBgColor: editStamp?.textBgColor,
+            initialShadowEnabled: editStamp?.shadowEnabled ?? false,
+            initialShadowColor: editStamp?.shadowColor ?? .black,
+            initialShadowBlur: editStamp?.shadowBlur ?? 4.0,
+            initialShadowOffsetX: editStamp?.shadowOffsetX ?? 2.0,
+            initialShadowOffsetY: editStamp?.shadowOffsetY ?? 2.0,
+            onPlace: { text, fontId, fontStyle, alignment, color, bgColor, shEnabled, shColor, shBlur, shOffX, shOffY in
+                handleDoodleTextPlace(text: text, fontId: fontId, fontStyle: fontStyle,
+                                      alignment: alignment, color: color, bgColor: bgColor,
+                                      shEnabled: shEnabled, shColor: shColor,
+                                      shBlur: shBlur, shOffX: shOffX, shOffY: shOffY)
+            }
+        )
     }
 
     // MARK: - Snapshot helper (wraps flat lines into the new layer format)
@@ -449,7 +661,9 @@ struct DoodleStampCreatorView: View {
     }
 
     // MARK: - Place text stamp
-    func placeTextStamp(text: String, fontId: String, fontStyle: String, alignment: String, color: Color, bgColor: Color) {
+    func placeTextStamp(text: String, fontId: String, fontStyle: String, alignment: String, color: Color, bgColor: Color,
+                        shadowEnabled: Bool = false, shadowColor: Color = .black, shadowBlur: Double = 4.0,
+                        shadowOffsetX: Double = 2.0, shadowOffsetY: Double = 2.0) {
         let center = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
         undoStack.append(makeDoodleSnapshot())
         redoStack = []
@@ -461,6 +675,11 @@ struct DoodleStampCreatorView: View {
         stamp.textAlignment = alignment
         stamp.textColor = color
         stamp.textBgColor = bgColor
+        stamp.shadowEnabled = shadowEnabled
+        stamp.shadowColor = shadowColor
+        stamp.shadowBlur = shadowBlur
+        stamp.shadowOffsetX = shadowOffsetX
+        stamp.shadowOffsetY = shadowOffsetY
         stamp.stampWidth = natW
         stamp.stampHeight = natH
         placedStamps.append(stamp)
@@ -771,7 +990,21 @@ struct DoodleStampCreatorView: View {
 
                             ScrollView(.horizontal, showsIndicators: false) {
                                 HStack(spacing: 10) {
-                                    ForEach(paletteColors, id: \.self) { color in
+                                    Button {
+                                        doodlePickerColor = currentColor
+                                        showDoodleColorPicker = true
+                                    } label: {
+                                        ZStack {
+                                            Circle()
+                                                .fill(Color(UIColor.secondarySystemBackground))
+                                                .frame(width: 30, height: 30)
+                                                .overlay(Circle().stroke(Color.gray.opacity(0.4), lineWidth: 1))
+                                            Image(systemName: "plus")
+                                                .font(.system(size: 14, weight: .semibold))
+                                                .foregroundColor(.primary)
+                                        }
+                                    }
+                                    ForEach(recentColors, id: \.self) { color in
                                         colorCircle(color)
                                     }
                                 }
@@ -783,211 +1016,7 @@ struct DoodleStampCreatorView: View {
                         }
 
                         // Row 2: T | stamp | pen | thickness | undo | redo | clear
-                        HStack(spacing: 12) {
-                            Button {
-                                showTextComposer = true
-                            } label: {
-                                ZStack {
-                                    Circle()
-                                        .fill(Color(UIColor.secondarySystemBackground))
-                                        .frame(width: 38, height: 38)
-                                        .overlay(Circle().stroke(Color.gray.opacity(0.3), lineWidth: 1))
-                                    Text("T")
-                                        .font(.system(size: 20, weight: .bold, design: .serif))
-                                        .foregroundColor(.primary)
-                                }
-                            }
-
-                            StampToolButton(
-                                selectedStamp: $selectedStamp,
-                                placedStamps: $placedStamps,
-                                stampUndoStack: $stampUndoStack,
-                                selectedCustomStampId: $lastCustomStampIdString,
-                                isCustomStampMode: $isCustomStampMode,
-                                canvasSize: canvasSize,
-                                allowDoodleCreation: false,
-                                onPlace: { autoPlaceStamp() },
-                                onPlaceMultipleStamps: { ids in
-                                    let center = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
-                                    let stagger: CGFloat = 20
-                                    let offset = -CGFloat(ids.count - 1) * stagger / 2
-                                    undoStack.append(makeDoodleSnapshot()); redoStack = []
-                                    for (i, customId) in ids.enumerated() {
-                                        let pos = CGPoint(x: center.x + offset + CGFloat(i) * stagger,
-                                                          y: center.y + offset + CGFloat(i) * stagger)
-                                        var stamp = PlacedStamp(emoji: "📷", position: pos, size: 158)
-                                        stamp.customImageId = customId
-                                        placedStamps.append(stamp)
-                                        selectedStampId = stamp.id
-                                    }
-                                    showStampMagicMenu = true
-                                    suppressTapBriefly()
-                                },
-                                onPlaceMultipleEmojis: { emojis in
-                                    let center = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
-                                    let stagger: CGFloat = 20
-                                    let offset = -CGFloat(emojis.count - 1) * stagger / 2
-                                    undoStack.append(makeDoodleSnapshot()); redoStack = []
-                                    for (i, emoji) in emojis.enumerated() {
-                                        let pos = CGPoint(x: center.x + offset + CGFloat(i) * stagger,
-                                                          y: center.y + offset + CGFloat(i) * stagger)
-                                        placedStamps.append(PlacedStamp(emoji: emoji, position: pos, size: 126))
-                                        selectedStampId = placedStamps.last?.id
-                                    }
-                                    showStampMagicMenu = true
-                                    suppressTapBriefly()
-                                }
-                            )
-
-                            Button(action: {
-                                selectedStampId = nil
-                                showPenStudio = true
-                            }) {
-                                ZStack {
-                                    Circle()
-                                        .fill(Color(UIColor.secondarySystemBackground))
-                                        .frame(width: 34, height: 34)
-                                        .overlay(Circle().stroke(Color.gray.opacity(0.3), lineWidth: 1))
-                                    Image(systemName: currentPenType.icon)
-                                        .font(.system(size: 20))
-                                        .foregroundColor(.primary)
-                                }
-                            }
-                            .sheet(isPresented: $showPenStudio, onDismiss: {
-                                if currentPenType.isDualTone {
-                                    UserDefaults.standard.set("dualtone", forKey: "doodleLastPenTypeName")
-                                    UserDefaults.standard.set(currentPenType.dualToneStyle.rawValue, forKey: "doodleLastDualToneStyle")
-                                } else {
-                                    UserDefaults.standard.set(currentPenType.displayName.lowercased(), forKey: "doodleLastPenTypeName")
-                                }
-                            }) {
-                                PenStudioSheet(penType: $currentPenType, colorB: $dualToneColorB)
-                                    .presentationDragIndicator(.visible)
-                            }
-                            .sheet(isPresented: $showTextComposer, onDismiss: {
-                                editingStampId = nil
-                            }) {
-                                TextComposerSheet(
-                                    initialText: editingStampId.flatMap { id in
-                                        placedStamps.first(where: { $0.id == id })?.stampText
-                                    },
-                                    initialFontStyle: editingStampId.flatMap { id in
-                                        placedStamps.first(where: { $0.id == id })?.fontStyle
-                                    },
-                                    initialAlignment: editingStampId.flatMap { id in
-                                        placedStamps.first(where: { $0.id == id })?.textAlignment
-                                    },
-                                    onPlace: { text, fontId, fontStyle, alignment, color, bgColor in
-                                        if let editId = editingStampId,
-                                           let idx = placedStamps.firstIndex(where: { $0.id == editId }) {
-                                            undoStack.append(makeDoodleSnapshot())
-                                            redoStack = []
-                                            let (natW, natH, fontSize) = naturalTextStampSize(text: text, fontId: fontId, fontStyle: fontStyle, maxWidth: canvasSize.width * 0.7)
-                                            placedStamps[idx].stampText = text
-                                            placedStamps[idx].fontName = fontId
-                                            placedStamps[idx].fontStyle = fontStyle
-                                            placedStamps[idx].textAlignment = alignment
-                                            placedStamps[idx].textColor = color
-                                            placedStamps[idx].textBgColor = bgColor
-                                            placedStamps[idx].size = fontSize
-                                            placedStamps[idx].stampWidth = natW
-                                            placedStamps[idx].stampHeight = natH
-                                            selectedStampId = editId
-                                            showStampMagicMenu = true
-                                        } else {
-                                            placeTextStamp(text: text, fontId: fontId, fontStyle: fontStyle, alignment: alignment, color: color, bgColor: bgColor)
-                                        }
-                                        showTextComposer = false
-                                        editingStampId = nil
-                                    }
-                                )
-                            }
-
-                            Button {
-                                showThicknessPicker.toggle()
-                            } label: {
-                                ZStack {
-                                    Circle()
-                                        .fill(Color(UIColor.secondarySystemBackground))
-                                        .frame(width: 34, height: 34)
-                                    Circle()
-                                        .fill(Color.primary)
-                                        .frame(width: min(lineWidth, 24), height: min(lineWidth, 24))
-                                }
-                            }
-
-                            Button(action: {
-                                guard !undoStack.isEmpty else { return }
-                                let snapshot = makeDoodleSnapshot()
-                                redoStack.append(snapshot)
-                                let last = undoStack.removeLast()
-                                lines = last.drawingLayers.first?.lines ?? []
-                                placedStamps = last.stamps
-                            }) {
-                                Image(systemName: "arrow.uturn.backward")
-                                    .font(.system(size: 18, weight: .medium))
-                                    .foregroundColor(undoStack.isEmpty ? .gray.opacity(0.4) : .blue)
-                            }
-                            .disabled(undoStack.isEmpty)
-
-                            Button(action: {
-                                guard !redoStack.isEmpty else { return }
-                                let snapshot = makeDoodleSnapshot()
-                                undoStack.append(snapshot)
-                                let last = redoStack.removeLast()
-                                lines = last.drawingLayers.first?.lines ?? []
-                                placedStamps = last.stamps
-                            }) {
-                                Image(systemName: "arrow.uturn.forward")
-                                    .font(.system(size: 18, weight: .medium))
-                                    .foregroundColor(redoStack.isEmpty ? .gray.opacity(0.4) : .blue)
-                            }
-                            .disabled(redoStack.isEmpty)
-
-                            Button("Clear") {
-                                let thingCount = (lines.isEmpty ? 0 : 1) + (placedStamps.isEmpty ? 0 : 1)
-                                if thingCount == 1 {
-                                    undoStack.append(makeDoodleSnapshot())
-                                    redoStack = []
-                                    if !lines.isEmpty { lines = [] }
-                                    else { placedStamps = []; stampUndoStack = []; stampRedoStack = [] }
-                                } else {
-                                    showClearSheet = true
-                                }
-                            }
-                            .foregroundColor(canvasIsEmpty ? .gray.opacity(0.4) : .red)
-                            .font(.system(size: 16, weight: .medium))
-                            .disabled(canvasIsEmpty)
-                            .confirmationDialog("Clear Canvas", isPresented: $showClearSheet, titleVisibility: .visible) {
-                                Button("Clear All", role: .destructive) {
-                                    undoStack.append(makeDoodleSnapshot())
-                                    redoStack = []
-                                    lines = []
-                                    placedStamps = []
-                                    stampUndoStack = []
-                                    stampRedoStack = []
-                                }
-                                if !lines.isEmpty {
-                                    Button("Clear Drawing", role: .destructive) {
-                                        undoStack.append(makeDoodleSnapshot())
-                                        redoStack = []
-                                        lines = []
-                                    }
-                                }
-                                if !placedStamps.isEmpty {
-                                    Button("Clear Stamps", role: .destructive) {
-                                        undoStack.append(makeDoodleSnapshot())
-                                        redoStack = []
-                                        placedStamps = []
-                                        stampUndoStack = []
-                                        stampRedoStack = []
-                                    }
-                                }
-                                Button("Cancel", role: .cancel) {}
-                            }
-                        }
-                        .padding(.horizontal, 16)
-                        .padding(.bottom, 10)
+                        doodleToolbarRow2()
                     }
                     .padding(.top, 10)
                 }

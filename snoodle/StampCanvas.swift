@@ -417,14 +417,15 @@ struct StampCanvasView: UIViewRepresentable {
                 let hasBg = bgColor != .clear
                 let dw = stamp.displayWidth
                 let dh = stamp.displayHeight
-                let key = "txt_\(text.hashValue)_\(stamp.fontName ?? "system")_\(stamp.fontStyle)_\(stamp.textAlignment)_\(Int(dw))x\(Int(dh))_\(hasBg)"
+                let shadowKey = stamp.shadowEnabled ? "_sh\(Int(stamp.shadowBlur*10))_\(Int(stamp.shadowOffsetX*10))_\(Int(stamp.shadowOffsetY*10))_\(CodableColor(stamp.shadowColor).r.hashValue)" : "_nosh"
+                let key = "txt_\(text.hashValue)_\(stamp.fontName ?? "system")_\(stamp.fontStyle)_\(stamp.textAlignment)_\(Int(dw))x\(Int(dh))_\(hasBg)\(shadowKey)"
                 if let cached = emojiCache[key] { return cached }
                 // Font size is stored in stamp.size for content-sized stamps
                 let fontSize = stamp.stampWidth > 0 ? stamp.size : fitTextFontSize(text: text, stampSize: s, baseFontId: stamp.fontName)
                 let font = TextStampFont.font(forId: stamp.fontName, style: stamp.fontStyle).withSize(fontSize)
                 let color = UIColor(stamp.textColor)
                 let fmt = UIGraphicsImageRendererFormat()
-                fmt.opaque = hasBg
+                fmt.opaque = hasBg && !stamp.shadowEnabled  // opaque=false when shadow extends outside bg
                 let renderer = UIGraphicsImageRenderer(size: CGSize(width: dw, height: dh), format: fmt)
                 let img = renderer.image { _ in
                     if hasBg {
@@ -436,7 +437,14 @@ struct StampCanvasView: UIViewRepresentable {
                     let para = NSMutableParagraphStyle()
                     para.alignment = nsAlignment
                     para.lineBreakMode = .byClipping
-                    let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color, .paragraphStyle: para]
+                    var attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color, .paragraphStyle: para]
+                    if stamp.shadowEnabled {
+                        let sh = NSShadow()
+                        sh.shadowColor = UIColor(stamp.shadowColor)
+                        sh.shadowBlurRadius = CGFloat(stamp.shadowBlur)
+                        sh.shadowOffset = CGSize(width: stamp.shadowOffsetX, height: stamp.shadowOffsetY)
+                        attrs[.shadow] = sh
+                    }
                     let hPad: CGFloat = 10
                     let vPad: CGFloat = 5
                     let str = text as NSString
@@ -444,9 +452,6 @@ struct StampCanvasView: UIViewRepresentable {
                         with: CGSize(width: dw - hPad * 2, height: dh - vPad * 2),
                         options: [.usesLineFragmentOrigin, .usesFontLeading],
                         attributes: attrs, context: nil)
-                    // Use full available height for draw rect — boundingRect underreports
-                    // text height by a few pts, causing bottom-line clipping.
-                    // Center based on measured br.height but give the draw call room.
                     str.draw(with: CGRect(x: hPad, y: (dh - ceil(br.height)) / 2,
                                           width: dw - hPad * 2, height: dh - vPad * 2),
                              options: [.usesLineFragmentOrigin, .usesFontLeading],
@@ -635,6 +640,16 @@ struct StampTextRenderView: UIViewRepresentable {
         let bg = UIColor(stamp.textBgColor)
         container.backgroundColor = bg == .clear ? .clear : bg
         container.layer.cornerRadius = bg == .clear ? 0 : 8
-        container.layer.masksToBounds = bg != .clear
+        // Shadow applied to label layer; masksToBounds must be false when shadow is visible
+        if stamp.shadowEnabled {
+            label.layer.shadowColor = UIColor(stamp.shadowColor).cgColor
+            label.layer.shadowOpacity = 1.0
+            label.layer.shadowRadius = CGFloat(stamp.shadowBlur)
+            label.layer.shadowOffset = CGSize(width: stamp.shadowOffsetX, height: stamp.shadowOffsetY)
+            container.layer.masksToBounds = false
+        } else {
+            label.layer.shadowOpacity = 0
+            container.layer.masksToBounds = bg != .clear
+        }
     }
 }

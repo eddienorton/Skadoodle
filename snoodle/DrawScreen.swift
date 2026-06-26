@@ -445,8 +445,8 @@ struct BackgroundEditorView: View {
 }
 
 struct CanvasColorPickerView: View {
-    let currentIndex: Int
-    let onSelect: (Int) -> Void
+    let currentColor: Color
+    let onSelectColor: (Color) -> Void
     var onPickPhoto: (() -> Void)? = nil
     var onPreviewPhoto: ((UIImage) -> Void)? = nil
     var onGoToEffects: ((Int) -> Void)? = nil
@@ -455,16 +455,19 @@ struct CanvasColorPickerView: View {
     var onExtractStamps: ((UIImage) -> Void)? = nil
     var initialHistoryIndex: Int? = nil
     @Environment(\.dismiss) var dismiss
-    @State private var selectedIndex: Int
+    @State private var selectedColor: Color
     @State private var wipSelectedIndex: Int? = nil
+    @State private var recentColors: [Color] = RecentCanvasColors.load()
+    @State private var showColorPicker = false
+    @State private var pickerColor: Color = .white
     @ObservedObject private var history = BackgroundPhotoHistory.shared
 
-    init(currentIndex: Int, onSelect: @escaping (Int) -> Void, onPickPhoto: (() -> Void)? = nil,
+    init(currentColor: Color, onSelectColor: @escaping (Color) -> Void, onPickPhoto: (() -> Void)? = nil,
          onPreviewPhoto: ((UIImage) -> Void)? = nil, onGoToEffects: ((Int) -> Void)? = nil,
          onApply: ((Int) -> Void)? = nil, onPickerCancel: (() -> Void)? = nil,
          onExtractStamps: ((UIImage) -> Void)? = nil, initialHistoryIndex: Int? = nil) {
-        self.currentIndex = currentIndex
-        self.onSelect = onSelect
+        self.currentColor = currentColor
+        self.onSelectColor = onSelectColor
         self.onPickPhoto = onPickPhoto
         self.onPreviewPhoto = onPreviewPhoto
         self.onGoToEffects = onGoToEffects
@@ -472,7 +475,7 @@ struct CanvasColorPickerView: View {
         self.onPickerCancel = onPickerCancel
         self.onExtractStamps = onExtractStamps
         self.initialHistoryIndex = initialHistoryIndex
-        _selectedIndex = State(initialValue: currentIndex)
+        _selectedColor = State(initialValue: currentColor)
         _wipSelectedIndex = State(initialValue: initialHistoryIndex)
     }
 
@@ -484,27 +487,33 @@ struct CanvasColorPickerView: View {
                     // MARK: Color row (top)
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 12) {
-                            ForEach(canvasColorOptions.indices, id: \.self) { i in
-                                let color = canvasColorOptions[i]
-                                Circle()
-                                    .fill(color)
-                                    .frame(width: 42, height: 42)
-                                    .overlay(
-                                        Group {
-                                            if selectedIndex == i {
-                                                ZStack {
-                                                    Circle().stroke(Color.white, lineWidth: 3).padding(-3)
-                                                    Circle().stroke(Color.blue, lineWidth: 3).padding(-7)
-                                                }
-                                            } else {
-                                                Circle().stroke(Color.gray.opacity(0.3), lineWidth: 1)
-                                            }
-                                        }
-                                    )
+                            Button {
+                                pickerColor = selectedColor
+                                showColorPicker = true
+                            } label: {
+                                ZStack {
+                                    Circle()
+                                        .fill(Color(UIColor.secondarySystemBackground))
+                                        .frame(width: 42, height: 42)
+                                        .overlay(Circle().stroke(Color.gray.opacity(0.4), lineWidth: 1))
+                                    Image(systemName: "plus")
+                                        .font(.system(size: 16, weight: .semibold))
+                                        .foregroundColor(.primary)
+                                }
+                            }
+                            .colorPickerSheet(isPresented: $showColorPicker, color: $pickerColor) { newColor in
+                                recentColors = RecentCanvasColors.add(newColor)
+                                selectedColor = newColor
+                                onSelectColor(newColor)
+                                dismiss()
+                            }
+                            ForEach(recentColors, id: \.self) { color in
+                                ColorSwatchView(color: color, size: 42,
+                                                isSelected: color.isApproximatelyEqual(to: selectedColor))
                                     .shadow(color: .black.opacity(0.1), radius: 3)
                                     .onTapGesture {
-                                        selectedIndex = i
-                                        onSelect(i)
+                                        selectedColor = color
+                                        onSelectColor(color)
                                         dismiss()
                                     }
                             }
@@ -604,6 +613,8 @@ struct PenStudioSheet: View {
 
     // Local state for dual tone sub-selection
     @State private var selectedDualStyle: DualToneStyle = .gradient
+    @State private var recentColors: [Color] = RecentColors.load()
+    @State private var showColorBPicker = false
 
     private let allPens: [PenType] = [.pencil, .ink, .brush, .marker, .chalk, .neon, .spray, .watercolor, .dotted, .dualTone(.gradient)]
 
@@ -667,28 +678,26 @@ struct PenStudioSheet: View {
 
                                 ScrollView(.horizontal, showsIndicators: false) {
                                     HStack(spacing: 12) {
-                                        ForEach(paletteColors, id: \.self) { color in
-                                            Circle()
-                                                .fill(color)
-                                                .frame(width: 36, height: 36)
-                                                .overlay(
-                                                    Group {
-                                                        if colorB == color {
-                                                            ZStack {
-                                                                Circle().stroke(Color.white, lineWidth: 3).padding(-3)
-                                                                Circle().stroke(Color.purple, lineWidth: 3).padding(-7)
-                                                            }
-                                                        } else {
-                                                            Circle().stroke(Color.gray.opacity(0.25), lineWidth: 1)
-                                                        }
-                                                    }
-                                                )
+                                        Button { showColorBPicker = true } label: {
+                                            ZStack {
+                                                Circle().fill(Color(UIColor.secondarySystemBackground))
+                                                    .frame(width: 36, height: 36)
+                                                Image(systemName: "plus.circle.fill")
+                                                    .font(.system(size: 24))
+                                                    .foregroundColor(.blue)
+                                            }
+                                        }
+                                        .colorPickerSheet(isPresented: $showColorBPicker, color: $colorB) { picked in
+                                            recentColors = RecentColors.add(picked)
+                                            colorB = picked
+                                        }
+                                        ForEach(recentColors, id: \.self) { color in
+                                            ColorSwatchView(color: color, size: 36,
+                                                            isSelected: colorB.isApproximatelyEqual(to: color),
+                                                            selectionColor: .purple)
                                                 .shadow(color: .black.opacity(0.08), radius: 2)
                                                 .onTapGesture {
                                                     colorB = color
-                                                    if let idx = paletteColors.firstIndex(where: { $0 == color }) {
-                                                        UserDefaults.standard.set(idx, forKey: "lastColorBIndex")
-                                                    }
                                                 }
                                         }
                                     }
@@ -1106,9 +1115,14 @@ struct DrawScreen: View {
     @State private var canvasSize: CGSize = CGSize(width: 300, height: 300)
     @State private var undoStack: [CanvasSnapshot] = []
     @State private var redoStack: [CanvasSnapshot] = []
-    @AppStorage("lastCanvasColorIndex") private var canvasColorIndex: Int = 11
-    @AppStorage("lastNonWhiteColorIndex") private var lastNonWhiteColorIndex: Int = 0  // black
     @AppStorage("lastPenColorIndex") private var selectedColorIndex: Int = 0
+    @State private var recentColors: [Color] = RecentColors.load()
+    @State private var showPenColorPicker = false
+    @State private var penPickerColor: Color = .black
+    @State private var selectedCanvasColor: Color = RecentCanvasColors.loadSelected()
+    @State private var recentCanvasColors: [Color] = RecentCanvasColors.load()
+    @State private var showCanvasColorPicker = false
+    @State private var canvasColorPickerColor: Color = .white
 
     // Result card state
     @State private var showResultCard: Bool = false
@@ -1119,8 +1133,8 @@ struct DrawScreen: View {
     @State private var aiFailed: Bool = false
     @FocusState private var captionFocused: Bool
 
-    var currentColor: Color { paletteColors[selectedColorIndex] }
-    var canvasColor: Color { canvasColorOptions[canvasColorIndex] }
+    var currentColor: Color { selectedColorIndex < recentColors.count ? recentColors[selectedColorIndex] : .black }
+    var canvasColor: Color { selectedCanvasColor }
 
     // MARK: - Layer helpers
 
@@ -1164,7 +1178,8 @@ struct DrawScreen: View {
         return activeDrawingLayerId
     }
 
-    /// Remove a stamp entry from layerOrder after deletion, then merge any consecutive drawing layers.
+    /// Remove a stamp entry from layerOrder after deletion.
+    /// Adjacent drawing layers are valid state and are intentionally left as-is.
     func removeStampFromLayerOrder(_ id: UUID) {
         layerOrder.removeAll { entry in
             if case .stamp(let sid) = entry { return sid == id }
@@ -1172,8 +1187,9 @@ struct DrawScreen: View {
         }
     }
 
-    /// Merge consecutive drawing entries in layerOrder so there's never more than one drawing layer
-    /// in a row. Lines from extra layers are appended into the first and those layers are removed.
+    /// Merge consecutive drawing entries in layerOrder into one.
+    /// Not called automatically — adjacent drawing layers are valid state.
+    /// Available for an explicit user-facing "Merge Layers" action in the future.
     func consolidateDrawingLayers() {
         var newOrder: [LayerEntry] = []
         var i = 0
@@ -1973,7 +1989,7 @@ struct DrawScreen: View {
             placedStamps: placedStamps,
             layerOrder: layerOrder,
             hiddenLayerIds: Array(hiddenLayerIds),
-            canvasColorIndex: canvasColorIndex,
+            canvasColorRGBA: CodableColor(canvasColor),
             backgroundImageData: bgData,
             backgroundOffsetX: Double(backgroundOffset.width),
             backgroundOffsetY: Double(backgroundOffset.height),
@@ -1999,7 +2015,11 @@ struct DrawScreen: View {
         placedStamps = doc.placedStamps
         layerOrder = doc.layerOrder
         hiddenLayerIds = Set(doc.hiddenLayerIds)
-        canvasColorIndex = doc.canvasColorIndex
+        if let rgba = doc.canvasColorRGBA {
+            selectedCanvasColor = rgba.color
+        } else {
+            selectedCanvasColor = canvasColorOptions[min(doc.canvasColorIndex, canvasColorOptions.count - 1)]
+        }
         if let imgData = doc.backgroundImageData {
             canvasBackgroundImage = UIImage(data: imgData)
         } else {
@@ -2238,23 +2258,12 @@ struct DrawScreen: View {
 
     @ViewBuilder
     func colorCircle(_ color: Color) -> some View {
-        let idx = paletteColors.firstIndex(where: { $0 == color })
-        let isSelected = idx == selectedColorIndex && !isEraser
-        Circle()
-            .fill(color)
-            .frame(width: 30, height: 30)
-            .overlay(Group {
-                if isSelected {
-                    ZStack {
-                        Circle().stroke(Color.white, lineWidth: 3).padding(-3)
-                        Circle().stroke(Color.blue, lineWidth: 3).padding(-6)
-                    }
-                } else if color == Color.white {
-                    Circle().stroke(Color.black.opacity(0.3), lineWidth: 1)
-                }
-            })
+        let isSelected = !isEraser && currentColor.isApproximatelyEqual(to: color)
+        ColorSwatchView(color: color, size: 30, isSelected: isSelected)
             .onTapGesture {
-                if let i = idx { selectedColorIndex = i }
+                if let i = recentColors.firstIndex(where: { $0.isApproximatelyEqual(to: color) }) {
+                    selectedColorIndex = i
+                }
                 isEraser = false
             }
     }
@@ -2478,7 +2487,9 @@ struct DrawScreen: View {
         showStampMagicMenu = true
     }
 
-    func placeTextStamp(text: String, fontId: String, fontStyle: String, alignment: String, color: Color, bgColor: Color) {
+    func placeTextStamp(text: String, fontId: String, fontStyle: String, alignment: String, color: Color, bgColor: Color,
+                        shadowEnabled: Bool = false, shadowColor: Color = .black, shadowBlur: Double = 4.0,
+                        shadowOffsetX: Double = 2.0, shadowOffsetY: Double = 2.0) {
         let center = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
         pushUndoSnapshot()
 
@@ -2495,6 +2506,11 @@ struct DrawScreen: View {
         stamp.textAlignment = alignment
         stamp.textColor = color
         stamp.textBgColor = bgColor
+        stamp.shadowEnabled = shadowEnabled
+        stamp.shadowColor = shadowColor
+        stamp.shadowBlur = shadowBlur
+        stamp.shadowOffsetX = shadowOffsetX
+        stamp.shadowOffsetY = shadowOffsetY
         stamp.stampWidth = natW
         stamp.stampHeight = natH
         appendStampToLayer(stamp)
@@ -2612,12 +2628,14 @@ struct DrawScreen: View {
             bgPickerWasApplied = false
         }) {
             NavigationStack(path: $bgNavPath) {
-                CanvasColorPickerView(currentIndex: canvasColorIndex,
-                    onSelect: { newIndex in
+                CanvasColorPickerView(currentColor: selectedCanvasColor,
+                    onSelectColor: { newColor in
                         bgPickerWasApplied = true
                         undoStack.append(CanvasSnapshot(drawingLayers: drawingLayers, stamps: placedStamps, layerOrder: layerOrder, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation))
                         redoStack = []
-                        canvasColorIndex = newIndex
+                        selectedCanvasColor = newColor
+                        recentCanvasColors = RecentCanvasColors.add(newColor)
+                        RecentCanvasColors.saveSelected(newColor)
                         canvasBackgroundImage = nil
                         backgroundOffset = .zero
                         resetBgEffects()
@@ -3010,7 +3028,25 @@ struct DrawScreen: View {
 
                             ScrollView(.horizontal, showsIndicators: false) {
                                 HStack(spacing: 10) {
-                                    ForEach(paletteColors, id: \.self) { color in
+                                    // + opens system ColorPicker
+                                    Button {
+                                        penPickerColor = currentColor
+                                        showPenColorPicker = true
+                                    } label: {
+                                        ZStack {
+                                            Circle().fill(Color(UIColor.secondarySystemBackground))
+                                                .frame(width: 30, height: 30)
+                                            Image(systemName: "plus.circle.fill")
+                                                .font(.system(size: 22))
+                                                .foregroundColor(.blue)
+                                        }
+                                    }
+                                    .colorPickerSheet(isPresented: $showPenColorPicker, color: $penPickerColor) { picked in
+                                        recentColors = RecentColors.add(picked)
+                                        selectedColorIndex = 0
+                                        isEraser = false
+                                    }
+                                    ForEach(recentColors, id: \.self) { color in
                                         colorCircle(color)
                                     }
                                 }
@@ -3081,14 +3117,34 @@ struct DrawScreen: View {
                                     initialAlignment: editingStampId.flatMap { id in
                                         placedStamps.first(where: { $0.id == id })?.textAlignment
                                     },
-                                    onPlace: { text, fontId, fontStyle, alignment, color, bgColor in
+                                    initialTextColor: editingStampId.flatMap { id in
+                                        placedStamps.first(where: { $0.id == id })?.textColor
+                                    },
+                                    initialTextBgColor: editingStampId.flatMap { id in
+                                        placedStamps.first(where: { $0.id == id })?.textBgColor
+                                    },
+                                    initialShadowEnabled: editingStampId.flatMap { id in
+                                        placedStamps.first(where: { $0.id == id })?.shadowEnabled
+                                    } ?? false,
+                                    initialShadowColor: editingStampId.flatMap { id in
+                                        placedStamps.first(where: { $0.id == id })?.shadowColor
+                                    } ?? .black,
+                                    initialShadowBlur: editingStampId.flatMap { id in
+                                        placedStamps.first(where: { $0.id == id })?.shadowBlur
+                                    } ?? 4.0,
+                                    initialShadowOffsetX: editingStampId.flatMap { id in
+                                        placedStamps.first(where: { $0.id == id })?.shadowOffsetX
+                                    } ?? 2.0,
+                                    initialShadowOffsetY: editingStampId.flatMap { id in
+                                        placedStamps.first(where: { $0.id == id })?.shadowOffsetY
+                                    } ?? 2.0,
+                                    onPlace: { text, fontId, fontStyle, alignment, color, bgColor, shEnabled, shColor, shBlur, shOffX, shOffY in
                                         if let editId = editingStampId,
                                            let idx = placedStamps.firstIndex(where: { $0.id == editId }) {
                                             // Edit existing — update in place, recompute dimensions
                                             undoStack.append(CanvasSnapshot(drawingLayers: drawingLayers, stamps: placedStamps, layerOrder: layerOrder, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation))
                                             redoStack = []
                                             let (natW, natH, baseFontSize) = naturalTextStampSize(text: text, fontId: fontId, fontStyle: fontStyle, maxWidth: canvasSize.width * 0.7)
-                                            // Preserve the user's current size — only recompute natural dimensions scaled to it
                                             let existingSize = placedStamps[idx].size
                                             let scale = existingSize / baseFontSize
                                             placedStamps[idx].stampText = text
@@ -3097,13 +3153,17 @@ struct DrawScreen: View {
                                             placedStamps[idx].textAlignment = alignment
                                             placedStamps[idx].textColor = color
                                             placedStamps[idx].textBgColor = bgColor
-                                            // size stays as existingSize (user's chosen scale)
+                                            placedStamps[idx].shadowEnabled = shEnabled
+                                            placedStamps[idx].shadowColor = shColor
+                                            placedStamps[idx].shadowBlur = shBlur
+                                            placedStamps[idx].shadowOffsetX = shOffX
+                                            placedStamps[idx].shadowOffsetY = shOffY
                                             placedStamps[idx].stampWidth = natW * scale
                                             placedStamps[idx].stampHeight = natH * scale
                                             selectedStampId = editId
                                             showStampMagicMenu = true
                                         } else {
-                                            placeTextStamp(text: text, fontId: fontId, fontStyle: fontStyle, alignment: alignment, color: color, bgColor: bgColor)
+                                            placeTextStamp(text: text, fontId: fontId, fontStyle: fontStyle, alignment: alignment, color: color, bgColor: bgColor, shadowEnabled: shEnabled, shadowColor: shColor, shadowBlur: shBlur, shadowOffsetX: shOffX, shadowOffsetY: shOffY)
                                         }
                                         showTextComposer = false
                                         editingStampId = nil
@@ -3434,6 +3494,10 @@ struct DrawScreen: View {
                             let hasContent = !drawingLayers.isEmpty || !placedStamps.isEmpty || canvasBackgroundImage != nil
                             if hasContent, let data = saveSkadoodleData() {
                                 try? data.write(to: FileManager.currentSkadoodleURL)
+                            } else {
+                                // Canvas is empty — delete any stale auto-save so it won't
+                                // be offered for resume (e.g. user deleted the only stamp).
+                                try? FileManager.default.removeItem(at: FileManager.currentSkadoodleURL)
                             }
                             isPresented = false
                         }
@@ -4027,6 +4091,10 @@ struct StampItemView: View {
                 .frame(width: stamp.size, height: stamp.size)
                 .background(stamp.textBgColor == .clear ? Color.clear : stamp.textBgColor)
                 .cornerRadius(stamp.textBgColor == .clear ? 0 : 8)
+                .shadow(color: stamp.shadowEnabled ? stamp.shadowColor : .clear,
+                        radius: stamp.shadowBlur,
+                        x: stamp.shadowOffsetX,
+                        y: stamp.shadowOffsetY)
         } else {
             Text(stamp.emoji)
                 .font(.system(size: stamp.size))

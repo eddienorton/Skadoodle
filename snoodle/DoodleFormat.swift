@@ -125,7 +125,8 @@ struct SkadoodleDocument: Codable {
     var placedStamps: [PlacedStamp]
     var layerOrder: [LayerEntry]
     var hiddenLayerIds: [UUID]           // Set<UUID> isn't Codable; store as array
-    var canvasColorIndex: Int
+    var canvasColorIndex: Int = 0        // Legacy — kept for backward-compat decode only
+    var canvasColorRGBA: CodableColor?   // v2.3+: full RGBA canvas color; preferred over index
     var backgroundImageData: Data?       // JPEG of the background photo, nil if none
     var backgroundOffsetX: Double
     var backgroundOffsetY: Double
@@ -166,6 +167,7 @@ extension PlacedStamp: Codable {
         case stampText, fontName, fontStyle, textAlignment
         case textColor, textBgColor, stampWidth, stampHeight
         case snugWidthRatio, snugHeightRatio
+        case shadowEnabled, shadowColor, shadowBlur, shadowOffsetX, shadowOffsetY
     }
 
     func encode(to encoder: Encoder) throws {
@@ -192,6 +194,11 @@ extension PlacedStamp: Codable {
         try c.encode(Double(stampHeight),   forKey: .stampHeight)
         try c.encode(Double(snugWidthRatio),  forKey: .snugWidthRatio)
         try c.encode(Double(snugHeightRatio), forKey: .snugHeightRatio)
+        try c.encode(shadowEnabled,               forKey: .shadowEnabled)
+        try c.encode(CodableColor(shadowColor),   forKey: .shadowColor)
+        try c.encode(shadowBlur,                  forKey: .shadowBlur)
+        try c.encode(shadowOffsetX,               forKey: .shadowOffsetX)
+        try c.encode(shadowOffsetY,               forKey: .shadowOffsetY)
     }
 
     init(from decoder: Decoder) throws {
@@ -223,5 +230,11 @@ extension PlacedStamp: Codable {
         stampHeight    = CGFloat(try c.decode(Double.self, forKey: .stampHeight))
         snugWidthRatio  = CGFloat(try c.decode(Double.self, forKey: .snugWidthRatio))
         snugHeightRatio = CGFloat(try c.decode(Double.self, forKey: .snugHeightRatio))
+        // Shadow — decodeIfPresent so older .skadoodle files without shadow fields still load
+        shadowEnabled  = try c.decodeIfPresent(Bool.self,         forKey: .shadowEnabled)  ?? false
+        shadowColor    = (try c.decodeIfPresent(CodableColor.self, forKey: .shadowColor))?.color ?? .black
+        shadowBlur     = try c.decodeIfPresent(Double.self,        forKey: .shadowBlur)     ?? 4.0
+        shadowOffsetX  = try c.decodeIfPresent(Double.self,        forKey: .shadowOffsetX)  ?? 2.0
+        shadowOffsetY  = try c.decodeIfPresent(Double.self,        forKey: .shadowOffsetY)  ?? 2.0
     }
 }

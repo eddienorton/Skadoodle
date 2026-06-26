@@ -110,6 +110,13 @@ struct PlacedStamp: Identifiable {
     var textColor: Color = .black   // color for text stamp
     var textBgColor: Color = .clear // background color for text stamp
 
+    // Shadow settings for text stamps
+    var shadowEnabled: Bool = false
+    var shadowColor: Color = .black
+    var shadowBlur: Double = 4.0
+    var shadowOffsetX: Double = 2.0
+    var shadowOffsetY: Double = 2.0
+
     var isTextStamp: Bool { stampText != nil }
 
     // For text stamps: natural content dimensions (honors line breaks, content-sized).
@@ -1123,6 +1130,10 @@ func renderCanvasWithStamps(drawingLayers: [DrawingLayer], stamps: [PlacedStamp]
                                 .clipped()
                                 .background(stamp.textBgColor == .clear ? Color.clear : stamp.textBgColor)
                                 .cornerRadius(stamp.textBgColor == .clear ? 0 : 8)
+                                .shadow(color: stamp.shadowEnabled ? stamp.shadowColor : .clear,
+                                        radius: stamp.shadowBlur,
+                                        x: stamp.shadowOffsetX,
+                                        y: stamp.shadowOffsetY)
                         } else {
                             Text(stamp.emoji)
                                 .font(.system(size: stamp.size))
@@ -1507,19 +1518,21 @@ struct TextStampComposer: View {
     @Binding var selectedFontId: String
     @Binding var selectedFontStyle: String       // "regular", "bold", "italic", "bolditalic"
     @Binding var selectedAlignment: String       // "left", "center", "right"
-    @Binding var selectedTextColorIndex: Int
-    @Binding var selectedTextBgColorIndex: Int   // -1 = clear
-    var onPlace: (String, String, String, String, Color, Color) -> Void
+    @Binding var selectedTextColor: Color
+    @Binding var selectedTextBgColor: Color      // .clear = no background
+    // Shadow
+    @Binding var shadowEnabled: Bool
+    @Binding var shadowColor: Color
+    @Binding var shadowBlur: Double
+    @Binding var shadowOffsetX: Double
+    @Binding var shadowOffsetY: Double
+    var onPlace: (String, String, String, String, Color, Color, Bool, Color, Double, Double, Double) -> Void
 
     @FocusState private var isFocused: Bool
-
-    var selectedTextColor: Color {
-        selectedTextColorIndex < paletteColors.count ? paletteColors[selectedTextColorIndex] : .black
-    }
-    var selectedBgColor: Color {
-        selectedTextBgColorIndex < 0 ? .clear :
-            (selectedTextBgColorIndex < paletteColors.count ? paletteColors[selectedTextBgColorIndex] : .clear)
-    }
+    @State private var recentColors: [Color] = RecentColors.load()
+    @State private var showTextColorPicker = false
+    @State private var showBgColorPicker = false
+    @State private var showShadowColorPicker = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1528,9 +1541,9 @@ struct TextStampComposer: View {
             // TextEditor styled to match stamp output — what you type IS the preview
             ZStack(alignment: .topLeading) {
                 RoundedRectangle(cornerRadius: 12)
-                    .fill(selectedBgColor == .clear
+                    .fill(selectedTextBgColor == .clear
                           ? Color(UIColor.secondarySystemBackground)
-                          : selectedBgColor)
+                          : selectedTextBgColor)
 
                 if textInput.isEmpty {
                     Text("Type your text...")
@@ -1677,18 +1690,33 @@ struct TextStampComposer: View {
                             .padding(.horizontal, 16)
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 10) {
-                                ForEach(Array(paletteColors.enumerated()), id: \.offset) { idx, color in
-                                    Button { selectedTextColorIndex = idx } label: {
-                                        Circle()
-                                            .fill(color)
+                                // + button opens system ColorPicker
+                                Button {
+                                    showTextColorPicker = true
+                                } label: {
+                                    ZStack {
+                                        Circle().fill(Color(UIColor.secondarySystemBackground))
                                             .frame(width: 32, height: 32)
-                                            .overlay(Circle().stroke(Color.white, lineWidth: selectedTextColorIndex == idx ? 3 : 0))
-                                            .overlay(Circle().stroke(Color.gray.opacity(0.3), lineWidth: 1))
-                                            .shadow(color: .black.opacity(selectedTextColorIndex == idx ? 0.3 : 0), radius: 3)
+                                        Image(systemName: "plus.circle.fill")
+                                            .font(.system(size: 22))
+                                            .foregroundColor(.blue)
+                                    }
+                                }
+                                .colorPickerSheet(isPresented: $showTextColorPicker, color: $selectedTextColor) { picked in
+                                    recentColors = RecentColors.add(picked)
+                                }
+                                ForEach(recentColors, id: \.self) { color in
+                                    Button {
+                                        selectedTextColor = color
+                                    } label: {
+                                        ColorSwatchView(color: color, size: 32,
+                                                        isSelected: selectedTextColor.isApproximatelyEqual(to: color),
+                                                        selectionColor: .blue)
                                     }
                                 }
                             }
                             .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
                         }
                     }
 
@@ -1700,7 +1728,8 @@ struct TextStampComposer: View {
                             .padding(.horizontal, 16)
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 10) {
-                                Button { selectedTextBgColorIndex = -1 } label: {
+                                // None (clear)
+                                Button { selectedTextBgColor = .clear } label: {
                                     ZStack {
                                         Circle()
                                             .fill(Color(UIColor.secondarySystemBackground))
@@ -1709,18 +1738,95 @@ struct TextStampComposer: View {
                                             .font(.system(size: 20))
                                             .foregroundColor(.secondary)
                                     }
-                                    .overlay(Circle().stroke(Color.purple, lineWidth: selectedTextBgColorIndex == -1 ? 3 : 0))
-                                    .overlay(Circle().stroke(Color.gray.opacity(0.3), lineWidth: selectedTextBgColorIndex == -1 ? 0 : 1))
+                                    .overlay(Circle().stroke(Color.purple,
+                                        lineWidth: selectedTextBgColor == .clear ? 3 : 0))
+                                    .overlay(Circle().stroke(Color.gray.opacity(0.3),
+                                        lineWidth: selectedTextBgColor == .clear ? 0 : 1))
                                 }
-                                ForEach(Array(paletteColors.enumerated()), id: \.offset) { idx, color in
-                                    Button { selectedTextBgColorIndex = idx } label: {
-                                        Circle()
-                                            .fill(color)
+                                // + button
+                                Button {
+                                    showBgColorPicker = true
+                                } label: {
+                                    ZStack {
+                                        Circle().fill(Color(UIColor.secondarySystemBackground))
                                             .frame(width: 32, height: 32)
-                                            .overlay(Circle().stroke(Color.white, lineWidth: selectedTextBgColorIndex == idx ? 3 : 0))
-                                            .overlay(Circle().stroke(Color.gray.opacity(0.3), lineWidth: 1))
-                                            .shadow(color: .black.opacity(selectedTextBgColorIndex == idx ? 0.3 : 0), radius: 3)
+                                        Image(systemName: "plus.circle.fill")
+                                            .font(.system(size: 22))
+                                            .foregroundColor(.blue)
                                     }
+                                }
+                                .colorPickerSheet(isPresented: $showBgColorPicker, color: $selectedTextBgColor) { picked in
+                                    recentColors = RecentColors.add(picked)
+                                }
+                                ForEach(recentColors, id: \.self) { color in
+                                    Button { selectedTextBgColor = color } label: {
+                                        ColorSwatchView(color: color, size: 32,
+                                                        isSelected: selectedTextBgColor.isApproximatelyEqual(to: color),
+                                                        selectionColor: .purple)
+                                    }
+                                }
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                        }
+                    }
+
+                    // Shadow
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Shadow")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Toggle("", isOn: $shadowEnabled)
+                                .labelsHidden()
+                                .tint(.purple)
+                        }
+                        .padding(.horizontal, 16)
+
+                        if shadowEnabled {
+                            // Shadow color row
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 10) {
+                                    Button { showShadowColorPicker = true } label: {
+                                        ZStack {
+                                            Circle().fill(Color(UIColor.secondarySystemBackground))
+                                                .frame(width: 32, height: 32)
+                                            Image(systemName: "plus.circle.fill")
+                                                .font(.system(size: 22))
+                                                .foregroundColor(.blue)
+                                        }
+                                    }
+                                    .colorPickerSheet(isPresented: $showShadowColorPicker, color: $shadowColor) { picked in
+                                        recentColors = RecentColors.add(picked)
+                                    }
+                                    ForEach(recentColors, id: \.self) { color in
+                                        Button { shadowColor = color } label: {
+                                            ColorSwatchView(color: color, size: 32,
+                                                            isSelected: shadowColor.isApproximatelyEqual(to: color),
+                                                            selectionColor: .gray)
+                                        }
+                                    }
+                                }
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 8)
+                            }
+
+                            VStack(spacing: 10) {
+                                HStack {
+                                    Text("Blur").font(.system(size: 12)).foregroundColor(.secondary).frame(width: 52, alignment: .leading)
+                                    Slider(value: $shadowBlur, in: 0...20, step: 0.5)
+                                    Text(String(format: "%.1f", shadowBlur)).font(.system(size: 12)).foregroundColor(.secondary).frame(width: 28)
+                                }
+                                HStack {
+                                    Text("Offset X").font(.system(size: 12)).foregroundColor(.secondary).frame(width: 52, alignment: .leading)
+                                    Slider(value: $shadowOffsetX, in: -15...15, step: 0.5)
+                                    Text(String(format: "%.1f", shadowOffsetX)).font(.system(size: 12)).foregroundColor(.secondary).frame(width: 28)
+                                }
+                                HStack {
+                                    Text("Offset Y").font(.system(size: 12)).foregroundColor(.secondary).frame(width: 52, alignment: .leading)
+                                    Slider(value: $shadowOffsetY, in: -15...15, step: 0.5)
+                                    Text(String(format: "%.1f", shadowOffsetY)).font(.system(size: 12)).foregroundColor(.secondary).frame(width: 28)
                                 }
                             }
                             .padding(.horizontal, 16)
@@ -1734,7 +1840,9 @@ struct TextStampComposer: View {
         .safeAreaInset(edge: .bottom) {
             // Place button — always visible above keyboard
             Button {
-                onPlace(textInput, selectedFontId, selectedFontStyle, selectedAlignment, selectedTextColor, selectedBgColor)
+                onPlace(textInput, selectedFontId, selectedFontStyle, selectedAlignment,
+                        selectedTextColor, selectedTextBgColor,
+                        shadowEnabled, shadowColor, shadowBlur, shadowOffsetX, shadowOffsetY)
             } label: {
                 Text("Place Text Stamp")
                     .font(.system(size: 17, weight: .semibold))
@@ -1778,29 +1886,161 @@ struct TextStampComposer: View {
 
 }
 
+// MARK: - colorPickerSheet modifier + presenter
+
+/// Presents UIColorPickerViewController directly from the window's topmost VC.
+/// No SwiftUI sheet container — single animation, no white flash.
+/// Usage: `.colorPickerSheet(isPresented: $show, color: $color) { picked in ... }`
+extension View {
+    func colorPickerSheet(
+        isPresented: Binding<Bool>,
+        color: Binding<Color>,
+        onCommit: @escaping (Color) -> Void = { _ in }
+    ) -> some View {
+        self.background(
+            _ColorPickerPresenter(isPresented: isPresented, color: color, onCommit: onCommit)
+                .frame(width: 0, height: 0)
+                .allowsHitTesting(false)
+        )
+    }
+}
+
+private struct _ColorPickerPresenter: UIViewRepresentable {
+    @Binding var isPresented: Bool
+    @Binding var color: Color
+    var onCommit: (Color) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeUIView(context: Context) -> UIView {
+        let v = UIView()
+        v.isHidden = true
+        return v
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.parent = self
+        if isPresented {
+            DispatchQueue.main.async {
+                context.coordinator.presentIfNeeded(from: uiView)
+            }
+        }
+    }
+
+    final class Coordinator: NSObject, UIColorPickerViewControllerDelegate, UIAdaptivePresentationControllerDelegate {
+        var parent: _ColorPickerPresenter
+        private var picker: UIColorPickerViewController?
+        private var originalColor: Color?
+        private var interactiveDismiss = false
+
+        init(_ parent: _ColorPickerPresenter) { self.parent = parent }
+
+        func presentIfNeeded(from view: UIView) {
+            guard picker == nil,
+                  let root = view.window?.rootViewController else { return }
+            let top = topmostVC(root)
+            // Guard against the previous picker still mid-dismiss animation.
+            // UIKit refuses to present on a VC that already has a presentedViewController.
+            guard top.presentedViewController == nil else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self, weak view] in
+                    guard let self, let view else { return }
+                    self.presentIfNeeded(from: view)
+                }
+                return
+            }
+            originalColor = parent.color
+            interactiveDismiss = false
+            let p = UIColorPickerViewController()
+            p.selectedColor = UIColor(parent.color)
+            p.supportsAlpha = true
+            p.delegate = self
+            picker = p
+            // Set presentation controller delegate in completion so it's available after present.
+            top.present(p, animated: true) { [weak self, weak p] in
+                p?.presentationController?.delegate = self
+            }
+        }
+
+        private func topmostVC(_ vc: UIViewController) -> UIViewController {
+            // Skip VCs that are currently being dismissed so we land on a valid presenter.
+            if let presented = vc.presentedViewController, !presented.isBeingDismissed {
+                return topmostVC(presented)
+            }
+            if let nav = vc as? UINavigationController {
+                return nav.visibleViewController.map { topmostVC($0) } ?? vc
+            }
+            return vc
+        }
+
+        // MARK: UIColorPickerViewControllerDelegate
+
+        func colorPickerViewControllerDidSelectColor(_ viewController: UIColorPickerViewController) {
+            // Live preview — update color as the user moves the picker.
+            parent.color = Color(viewController.selectedColor)
+        }
+
+        func colorPickerViewControllerDidFinish(_ viewController: UIColorPickerViewController) {
+            // May not fire at all for swipe/outside dismissal — those go through
+            // presentationControllerDidDismiss instead. Guard against double-cleanup.
+            guard picker != nil, !interactiveDismiss else { return }
+            // X button — clean up BEFORE calling onCommit. If onCommit triggers a SwiftUI
+            // re-render while isPresented is still true, the queued presentIfNeeded would
+            // fire and re-present the picker. Clearing first prevents that.
+            let finalColor = parent.color
+            originalColor = nil
+            picker = nil
+            parent.isPresented = false
+            parent.onCommit(finalColor)
+        }
+
+        // MARK: UIAdaptivePresentationControllerDelegate
+
+        func presentationControllerWillDismiss(_ presentationController: UIPresentationController) {
+            // Fires when interactive dismissal begins (swipe-down, tap-outside).
+            // Does NOT fire for the X button (programmatic dismiss).
+            interactiveDismiss = true
+        }
+
+        func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+            // Fires after interactive dismissal completes. colorPickerViewControllerDidFinish
+            // may not fire for this path, so we do full cleanup here.
+            guard picker != nil else { return }
+            if let orig = originalColor { parent.color = orig }
+            originalColor = nil
+            interactiveDismiss = false
+            picker = nil
+            parent.isPresented = false
+        }
+    }
+}
+
 // MARK: - Text Composer Sheet (standalone, accessed via T button)
 
 struct TextComposerSheet: View {
     var initialText: String? = nil
     var initialFontStyle: String? = nil
     var initialAlignment: String? = nil
-    var onPlace: (String, String, String, String, Color, Color) -> Void
+    var initialTextColor: Color? = nil
+    var initialTextBgColor: Color? = nil
+    var initialShadowEnabled: Bool = false
+    var initialShadowColor: Color = .black
+    var initialShadowBlur: Double = 4.0
+    var initialShadowOffsetX: Double = 2.0
+    var initialShadowOffsetY: Double = 2.0
+    var onPlace: (String, String, String, String, Color, Color, Bool, Color, Double, Double, Double) -> Void
 
-    @AppStorage("lastTextStampText") private var textInput: String = ""
-    @AppStorage("lastTextStampFontId") private var selectedFontId: String = "system"
+    @AppStorage("lastTextStampText")      private var textInput: String = ""
+    @AppStorage("lastTextStampFontId")    private var selectedFontId: String = "system"
     @AppStorage("lastTextStampFontStyle") private var selectedFontStyle: String = "regular"
     @AppStorage("lastTextStampAlignment") private var selectedAlignment: String = "center"
-    @AppStorage("lastTextStampColorIndex") private var selectedTextColorIndex: Int = 0
-    @AppStorage("lastTextStampBgColorIndex") private var selectedTextBgColorIndex: Int = -1
+    @State private var selectedTextColor: Color = .black
+    @State private var selectedTextBgColor: Color = .clear
+    @State private var shadowEnabled: Bool = false
+    @State private var shadowColor: Color = .black
+    @State private var shadowBlur: Double = 4.0
+    @State private var shadowOffsetX: Double = 2.0
+    @State private var shadowOffsetY: Double = 2.0
     @Environment(\.dismiss) private var dismiss
-
-    var selectedTextColor: Color {
-        selectedTextColorIndex < paletteColors.count ? paletteColors[selectedTextColorIndex] : .black
-    }
-    var selectedBgColor: Color {
-        selectedTextBgColorIndex < 0 ? .clear :
-            (selectedTextBgColorIndex < paletteColors.count ? paletteColors[selectedTextBgColorIndex] : .clear)
-    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1816,25 +2056,31 @@ struct TextComposerSheet: View {
                 selectedFontId: $selectedFontId,
                 selectedFontStyle: $selectedFontStyle,
                 selectedAlignment: $selectedAlignment,
-                selectedTextColorIndex: $selectedTextColorIndex,
-                selectedTextBgColorIndex: $selectedTextBgColorIndex,
-                onPlace: { text, fontId, fontStyle, alignment, color, bgColor in
-                    onPlace(text, fontId, fontStyle, alignment, color, bgColor)
+                selectedTextColor: $selectedTextColor,
+                selectedTextBgColor: $selectedTextBgColor,
+                shadowEnabled: $shadowEnabled,
+                shadowColor: $shadowColor,
+                shadowBlur: $shadowBlur,
+                shadowOffsetX: $shadowOffsetX,
+                shadowOffsetY: $shadowOffsetY,
+                onPlace: { text, fontId, fontStyle, alignment, color, bgColor, shEnabled, shColor, shBlur, shOffX, shOffY in
+                    onPlace(text, fontId, fontStyle, alignment, color, bgColor, shEnabled, shColor, shBlur, shOffX, shOffY)
                 }
             )
         }
         .presentationDetents([.large])
         .presentationDragIndicator(.hidden)
         .onAppear {
-            if let initial = initialText {
-                textInput = initial
-            }
-            if let style = initialFontStyle {
-                selectedFontStyle = style
-            }
-            if let align = initialAlignment {
-                selectedAlignment = align
-            }
+            if let initial = initialText      { textInput       = initial }
+            if let style  = initialFontStyle  { selectedFontStyle = style }
+            if let align  = initialAlignment  { selectedAlignment = align }
+            if let color  = initialTextColor  { selectedTextColor = color }
+            if let bgCol  = initialTextBgColor { selectedTextBgColor = bgCol }
+            shadowEnabled  = initialShadowEnabled
+            shadowColor    = initialShadowColor
+            shadowBlur     = initialShadowBlur
+            shadowOffsetX  = initialShadowOffsetX
+            shadowOffsetY  = initialShadowOffsetY
         }
     }
 }

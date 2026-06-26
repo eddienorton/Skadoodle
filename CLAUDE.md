@@ -12,12 +12,63 @@ Eddie Brayman, 72, independent iOS developer, East Village NYC. 50+ years coding
 **App Store URL:** https://apps.apple.com/us/app/skadoodle/id6771497563  
 **Bundle ID:** maxsdad.skadoodle  
 **Firebase project:** snoodle-68bfc  
-**Current version at last session:** 2.1 build 17 (June 2026) — in review
+**Current version at last session:** 2.2 (in review, not yet released)
 **Last released to App Store:** 2.1 build 4 (June 2026)
 
 ---
 
-## In Progress — v2.2 (not yet submitted)
+## In Progress — v2.3 b1 (not yet submitted)
+
+### New Features
+
+#### Recent Colors System (all color pickers)
+Every horizontal color picker now uses a shared persistent recent-colors list instead of the fixed palette.
+
+- **`RecentColors`** (DrawingEngine.swift) — static struct; key `"recentColors_v1"`; max 20; seeded from `paletteColors` on first run; `load()` / `add(_:)` / `save(_:)`; `add` deduplicates with 0.002 RGBA tolerance before prepending.
+- **`RecentCanvasColors`** (DrawingEngine.swift) — same pattern for canvas background; key `"recentCanvasColors_v1"` + separate `"selectedCanvasColor_v1"` for the most-recently-chosen canvas color. `loadSelected()` migrates from old `"lastCanvasColorIndex"` AppStorage key on first run.
+- **`Color.isApproximatelyEqual(to:)`** (DrawingEngine.swift) — 0.002 RGBA tolerance; used for dedup and swatch selection highlighting.
+- **`ColorSwatchView`** (DrawingEngine.swift) — circular swatch of given size; shows `CheckerboardView` behind color when alpha < 1 (standard iOS transparency convention); draws selection ring when `isSelected`.
+- **`CheckerboardView`** (DrawingEngine.swift) — `Canvas`-based gray/white tiled checkerboard; was previously duplicated in `CustomStampViews.swift` (removed there).
+
+Color pickers upgraded to recent-colors + `+` button:
+- **Pen color row** (DrawScreen.swift) — `+` → `ColorPickerSheet`; `ColorSwatchView` replaces raw `Circle`; `isApproximatelyEqual` for selection.
+- **Pen studio second color** (DrawScreen.swift `PenStudioSheet`) — same upgrade.
+- **Canvas background color row** (`CanvasColorPickerView` in DrawScreen.swift) — `+` → `ColorPickerSheet`; `ColorSwatchView` with 42pt size; `RecentCanvasColors` list.
+- **Text stamp foreground, background, shadow color rows** (StampTools.swift `TextStampComposer`) — all three rows upgraded.
+- **Doodle stamp canvas pen color row** (CustomStampViews.swift `DoodleStampCreatorView`) — upgraded; `colorCircle()` rewritten to use `ColorSwatchView` + `isApproximatelyEqual`; `+` button added.
+
+#### `ColorPickerSheet` (StampTools.swift)
+Wraps SwiftUI's `ColorPicker` in a sheet with a large tappable row ("Open Color Wheel / Tap to pick any color"). Uses SwiftUI's internal `ColorPicker` — **not** `UIColorPickerViewController` directly (attempting to present `UIColorPickerViewController` as sheet content crashes with "tried to present a nil modal view controller" because it tries to present sub-controllers on SwiftUI's presentation host). The `ColorPicker` row shows the current color swatch + instructions + chevron. Done button commits and dismisses.
+
+#### Text Stamp Shadow (PlacedStamp)
+- **`PlacedStamp` new fields** (StampTools.swift): `shadowEnabled: Bool = false`, `shadowColor: Color = .black`, `shadowBlur: Double = 4.0`, `shadowOffsetX: Double = 2.0`, `shadowOffsetY: Double = 2.0`.
+- **Shadow in all 4 render paths:**
+  - **Live canvas** (`StampTextRenderView.updateUIView` in StampCanvas.swift) — `label.layer.shadowColor/Opacity/Radius/Offset`; `container.layer.masksToBounds = false` when shadow enabled (must not clip shadow).
+  - **UIKit image cache** (`StampCanvas.emojiImage(for:)`) — `NSShadow` added to `NSAttributedString` attrs; cache key includes shadow params; `fmt.opaque = false` when shadow enabled.
+  - **Export** (`renderCanvasWithStamps` in StampTools.swift) — SwiftUI `.shadow()` modifier on text stamp view.
+  - **Layers panel / StampRenderView** (StampCanvas.swift) — SwiftUI `.shadow()` modifier on `StampTextRenderView`.
+- **Shadow UI in `TextStampComposer`** — Toggle (on/off) + color row + Blur slider (0–20) + Offset X/Y sliders (−15 to 15) appear when enabled.
+- **`DoodleFormat.swift`** — 5 new `CodingKeys` (`shadowEnabled/Color/Blur/OffsetX/OffsetY`); encode writes all 5; decode uses `decodeIfPresent` with defaults for backward compat with old `.skadoodle` files.
+
+#### Canvas Background Color — Color-based (not index-based)
+- Removed `@AppStorage("lastCanvasColorIndex")` and dead `lastNonWhiteColorIndex` from DrawScreen.
+- Added `@State private var selectedCanvasColor: Color = RecentCanvasColors.loadSelected()`.
+- `var canvasColor: Color { selectedCanvasColor }`.
+- `SkadoodleDocument` (DoodleFormat.swift) — added `canvasColorRGBA: CodableColor? = nil`; `canvasColorIndex: Int = 0` kept with default for backward-compat decode. New saves write `canvasColorRGBA`; old files fall back to `canvasColorOptions[canvasColorIndex]`.
+- `CanvasColorPickerView` interface changed: `currentIndex: Int` / `onSelect: (Int)` → `currentColor: Color` / `onSelectColor: (Color)`.
+
+### Compiler fixes (v2.3 b1)
+- **`CheckerboardView` redeclaration** — removed duplicate from `CustomStampViews.swift`; canonical definition in `DrawingEngine.swift`.
+- **`DoodleStampCreatorView` type-check timeouts** — extracted `doodleToolbarRow2()` `@ViewBuilder` func and `handleDoodleTextPlace(...)` + `doodleTextComposerSheet()` helpers to break up expressions the Swift compiler couldn't type-check in reasonable time.
+- **`ColorPickerSheet(selection:)` wrong param name** — correct param is `color:`.
+
+### Pending — v2.3 b1
+- **`ColorPickerSheet` UX — BROKEN, must fix** — History: first attempt used SwiftUI `ColorPicker` in a sheet that showed just a small swatch circle; user couldn't tell what to tap. Second attempt tried `UIColorPickerViewController` as sheet root content — crashed with "tried to present a nil modal view controller" because UIColorPickerViewController internally presents sub-controllers on SwiftUI's hosting layer. Third attempt (current, broken): a sheet with a large "Open Color Wheel" row AND a "Done" button — user correctly pointed out this makes no sense (done does nothing useful if you haven't opened the wheel; if you have, you already committed). **Current state of `ColorPickerSheet` in StampTools.swift is this broken two-step design.** Goal for next session: tap `+` → color wheel opens immediately → pick color → single done. No intermediate sheet with confusing choices. Key constraint: `UIColorPickerViewController` cannot be the root content of a SwiftUI `.sheet`.
+- **Website git push** — Skadoodle website (skadoodle.nyc, Firebase Hosting) was updated this session with v2.2 marketing content and committed to GitHub (username: `eddienorton`, repo: `skadoodle-website`). Firebase deploy must be run from Eddie's terminal (`npx firebase deploy --only hosting` from `/Users/edwardbrayman/Development/Website/skadoodle`).
+
+---
+
+## In Progress — v2.2 (in review, not yet released)
 
 ### New Features
 - **6 new Dual Tone pen styles** — Braid, Hairy, Thorns, Zigzag, Bubble, Stars. All pressure-sensitive. Added to `DualToneStyle` enum in `DrawingEngine.swift`; icons in `DualToneStyleChip` in `DrawScreen.swift`.
@@ -430,9 +481,12 @@ Investigated and tested extensively. Pen lines and stamp positions are geometric
 
 ---
 
-## Outstanding Items (for next version)
+## Outstanding Items
 
-### Bugs
+### v2.3 b1 — must fix before submit
+- **`ColorPickerSheet` UX** — the two-step "open wheel then hit Done" flow is confusing. Need a single-tap flow: tap `+` → color wheel immediately → done. Options to explore: (a) use SwiftUI `ColorPicker` as a full-row button that auto-fires on appear, (b) find a way to present `UIColorPickerViewController` via UIKit without crashing (key constraint: cannot present it as SwiftUI sheet root content — it crashes with nil modal presentation). This is the top priority for the next session.
+
+### Carry-forward bugs (from v2.2 work)
 - **`consolidateDrawingLayers()` still called in delete paths** — `deleteLayerEntry` and `removeStampFromLayerOrder` both call it, so deleting a stamp between two drawing layers merges them. Should be removed from both paths; adjacent drawing layers are valid state everywhere.
 - **Empty layers** — mechanism not yet confirmed. Suspected paths: eraser removing all lines from a layer (layer stays), or `onBeforeDraw` creating a layer that gets cancelled before any point lands. Needs repro to confirm.
 

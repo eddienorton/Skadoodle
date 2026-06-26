@@ -1917,3 +1917,165 @@ let paletteColors: [Color] = [
 // Canvas uses same palette as pen colors for consistency
 let canvasColorOptions: [Color] = paletteColors
 
+// MARK: - Recent Colors
+
+/// Shared persistent recent-colors list, seeded from paletteColors on first run.
+/// Every color picker's "+" button calls RecentColors.add(_:) to prepend the
+/// picked color and keep the list trimmed to 20.
+struct RecentColors {
+    static let key = "recentColors_v1"
+    static let max = 20
+
+    static func load() -> [Color] {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let list = try? JSONDecoder().decode([CodableColor].self, from: data),
+              !list.isEmpty else {
+            save(paletteColors)
+            return paletteColors
+        }
+        return list.map { $0.color }
+    }
+
+    @discardableResult
+    static func add(_ color: Color) -> [Color] {
+        var colors = load()
+        let c = CodableColor(color)
+        colors.removeAll {
+            let e = CodableColor($0)
+            return abs(e.r - c.r) < 0.002 && abs(e.g - c.g) < 0.002 &&
+                   abs(e.b - c.b) < 0.002 && abs(e.a - c.a) < 0.002
+        }
+        colors.insert(color, at: 0)
+        if colors.count > max { colors = Array(colors.prefix(max)) }
+        save(colors)
+        return colors
+    }
+
+    static func save(_ colors: [Color]) {
+        if let data = try? JSONEncoder().encode(colors.map { CodableColor($0) }) {
+            UserDefaults.standard.set(data, forKey: key)
+        }
+    }
+}
+
+// MARK: - Recent Canvas Colors
+
+/// Persistent recent-colors list for the canvas background color picker.
+/// Seeded from canvasColorOptions on first run; also tracks the last-selected color
+/// so it survives app restarts without needing an index into a fixed array.
+struct RecentCanvasColors {
+    static let listKey     = "recentCanvasColors_v1"
+    static let selectedKey = "selectedCanvasColor_v1"
+    static let max = 20
+
+    static func load() -> [Color] {
+        guard let data = UserDefaults.standard.data(forKey: listKey),
+              let list = try? JSONDecoder().decode([CodableColor].self, from: data),
+              !list.isEmpty else {
+            save(canvasColorOptions)
+            return canvasColorOptions
+        }
+        return list.map { $0.color }
+    }
+
+    /// Load the most-recently chosen canvas color, migrating from the old index-based key.
+    static func loadSelected() -> Color {
+        if let data = UserDefaults.standard.data(forKey: selectedKey),
+           let cc = try? JSONDecoder().decode(CodableColor.self, from: data) {
+            return cc.color
+        }
+        // Migrate: old AppStorage key "lastCanvasColorIndex" (default 11 = gray)
+        if UserDefaults.standard.object(forKey: "lastCanvasColorIndex") != nil {
+            let idx = UserDefaults.standard.integer(forKey: "lastCanvasColorIndex")
+            return canvasColorOptions[min(idx, canvasColorOptions.count - 1)]
+        }
+        return canvasColorOptions[11] // gray — original default
+    }
+
+    static func saveSelected(_ color: Color) {
+        if let data = try? JSONEncoder().encode(CodableColor(color)) {
+            UserDefaults.standard.set(data, forKey: selectedKey)
+        }
+    }
+
+    @discardableResult
+    static func add(_ color: Color) -> [Color] {
+        var colors = load()
+        colors.removeAll { $0.isApproximatelyEqual(to: color) }
+        colors.insert(color, at: 0)
+        if colors.count > max { colors = Array(colors.prefix(max)) }
+        save(colors)
+        return colors
+    }
+
+    static func save(_ colors: [Color]) {
+        if let data = try? JSONEncoder().encode(colors.map { CodableColor($0) }) {
+            UserDefaults.standard.set(data, forKey: listKey)
+        }
+    }
+}
+
+// MARK: - Color equality helper
+
+extension Color {
+    /// Approximate RGBA equality (tolerates floating-point round-trip drift).
+    func isApproximatelyEqual(to other: Color) -> Bool {
+        let a = CodableColor(self), b = CodableColor(other)
+        return abs(a.r - b.r) < 0.002 && abs(a.g - b.g) < 0.002 &&
+               abs(a.b - b.b) < 0.002 && abs(a.a - b.a) < 0.002
+    }
+}
+
+// MARK: - Color Swatch (checkerboard for alpha < 1)
+
+/// Circular color swatch. Shows a gray checkerboard behind colors with
+/// opacity < 1 — the standard iOS convention for transparency.
+struct ColorSwatchView: View {
+    let color: Color
+    let size: CGFloat
+    var isSelected: Bool = false
+    var selectionColor: Color = .blue
+
+    private var hasAlpha: Bool { CodableColor(color).a < 0.995 }
+
+    var body: some View {
+        ZStack {
+            if hasAlpha {
+                CheckerboardView(tileSize: max(3, size / 8))
+                    .frame(width: size, height: size)
+                    .clipShape(Circle())
+            }
+            Circle().fill(color)
+            if isSelected {
+                Circle().stroke(Color.white,        lineWidth: 2.5).padding(-2.5)
+                Circle().stroke(selectionColor,     lineWidth: 2.5).padding(-5.5)
+            } else {
+                Circle().stroke(
+                    color.isApproximatelyEqual(to: .white)
+                        ? Color.black.opacity(0.25) : Color.gray.opacity(0.2),
+                    lineWidth: 1)
+            }
+        }
+        .frame(width: size, height: size)
+    }
+}
+
+struct CheckerboardView: View {
+    var tileSize: CGFloat = 6
+    var body: some View {
+        Canvas { context, size in
+            let cols = Int(ceil(size.width  / tileSize))
+            let rows = Int(ceil(size.height / tileSize))
+            for row in 0..<rows {
+                for col in 0..<cols {
+                    let light = (row + col) % 2 == 0
+                    let rect = CGRect(x: CGFloat(col) * tileSize,
+                                     y: CGFloat(row) * tileSize,
+                                     width: tileSize, height: tileSize)
+                    context.fill(Path(rect), with: .color(light ? .white : Color(white: 0.78)))
+                }
+            }
+        }
+    }
+}
+
