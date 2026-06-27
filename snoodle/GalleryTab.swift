@@ -188,6 +188,9 @@ struct SnoodleDetailView: View {
                         .foregroundColor(.white.opacity(0.8))
                 }
 
+                // Timelapse video export (v2.3+)
+                TimelapseButton(entry: entry)
+
                 // Submit to world gallery
                 SubmitButton(entry: entry)
 
@@ -258,6 +261,12 @@ struct SnoodleTile: View {
                                         .background(Color.green.opacity(0.85))
                                         .clipShape(Circle())
                                         .padding(4)
+                                }
+                            }
+                            .overlay(alignment: .bottomTrailing) {
+                                if entry.hasSkadoodleFile {
+                                    TilePlayBadge(entry: entry)
+                                        .padding(6)
                                 }
                             }
                     } else {

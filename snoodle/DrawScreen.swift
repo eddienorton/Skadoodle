@@ -1096,6 +1096,7 @@ struct DrawScreen: View {
     @State private var currentLine: DrawingLine? = nil   // live preview during active stroke
 
     @State private var lineWidth: CGFloat = CGFloat(UserDefaults.standard.double(forKey: "lastLineWidth") == 0 ? 4 : UserDefaults.standard.double(forKey: "lastLineWidth"))
+    @State private var otherWidth: CGFloat = CGFloat(UserDefaults.standard.double(forKey: "lastEraserWidth") == 0 ? 20 : UserDefaults.standard.double(forKey: "lastEraserWidth"))
     @State private var isEraser: Bool = false
     @State private var showLayersPanel: Bool = false
     @State private var userSelectedLayerId: UUID? = nil
@@ -1162,19 +1163,8 @@ struct DrawScreen: View {
     var allDrawingLines: [DrawingLine] { drawingLayers.filter { !hiddenLayerIds.contains($0.id) }.flatMap { $0.lines } }
 
     /// The layer that should receive the live eraser preview.
-    /// Normally the active layer; falls through to the topmost non-empty layer when the active layer
-    /// has no real drawing content (so the preview is visible while the user drags).
     var eraserTargetLayerId: UUID? {
         guard isEraser, currentLine != nil else { return activeDrawingLayerId }
-        let activeIdx = activeDrawingLayerIndex
-        let hasRealContent = drawingLayers[activeIdx].lines.contains { !$0.isEraser }
-        if hasRealContent { return activeDrawingLayerId }
-        for entry in layerOrder.reversed() {
-            guard case .drawing(let id) = entry, id != activeDrawingLayerId else { continue }
-            guard let idx = drawingLayers.firstIndex(where: { $0.id == id }),
-                  !drawingLayers[idx].lines.isEmpty else { continue }
-            return id
-        }
         return activeDrawingLayerId
     }
 
@@ -1365,7 +1355,14 @@ struct DrawScreen: View {
 
                 if case .drawing(let id) = entry,
                    let layer = drawingLayers.first(where: { $0.id == id }) {
-                    drawingLayerCanvas(lines: layer.lines, chipW: chipW, chipH: chipH)
+                    if !layer.lines.isEmpty && layer.lines.allSatisfy({ $0.isEraser }) {
+                        // Eraser-only layer — show eraser icon so user knows what it is
+                        Image(systemName: "eraser.fill")
+                            .font(.system(size: 22))
+                            .foregroundColor(.gray.opacity(0.5))
+                    } else {
+                        drawingLayerCanvas(lines: layer.lines, chipW: chipW, chipH: chipH)
+                    }
                 } else if case .stamp(let id) = entry {
                     stampChipContent(id: id, chipW: chipW, chipH: chipH)
                 }
@@ -2063,6 +2060,8 @@ struct DrawScreen: View {
         } else {
             layerOrder.append(.stamp(stamp.id))
         }
+        // Clear drawing layer selection so the next stroke creates a new layer above the stamp
+        userSelectedLayerId = nil
     }
 
     // Lazy binding to the active drawing layer's lines. Evaluates activeDrawingLayerIndex
@@ -2264,6 +2263,7 @@ struct DrawScreen: View {
                 if let i = recentColors.firstIndex(where: { $0.isApproximatelyEqual(to: color) }) {
                     selectedColorIndex = i
                 }
+                if isEraser { swap(&lineWidth, &otherWidth) }
                 isEraser = false
             }
     }
@@ -2883,22 +2883,7 @@ struct DrawScreen: View {
                                     showStampMagicMenu = false
                                 }
                             },
-                            onEraserCommitted: { eraserLine in
-                                let activeIdx = activeDrawingLayerIndex
-                                // If the active layer has no real drawing content, the eraser did nothing useful.
-                                // Move the stroke to the topmost non-empty drawing layer instead.
-                                let hasRealContent = drawingLayers[activeIdx].lines.contains { !$0.isEraser }
-                                guard !hasRealContent else { return }
-                                drawingLayers[activeIdx].lines.removeLast()
-                                let activeId = activeDrawingLayerId
-                                for entry in layerOrder.reversed() {
-                                    guard case .drawing(let id) = entry, id != activeId else { continue }
-                                    guard let idx = drawingLayers.firstIndex(where: { $0.id == id }),
-                                          !drawingLayers[idx].lines.isEmpty else { continue }
-                                    drawingLayers[idx].lines.append(eraserLine)
-                                    break
-                                }
-                            },
+                            onEraserCommitted: { _ in },
                             currentLine: $currentLine
                         )
                             .contentShape(Rectangle())
@@ -3023,6 +3008,7 @@ struct DrawScreen: View {
                                     .foregroundColor(isEraser ? .blue : .gray)
                             }
                             .onTapGesture {
+                                if !isEraser { swap(&lineWidth, &otherWidth) }
                                 isEraser = true
                             }
 
@@ -3044,6 +3030,7 @@ struct DrawScreen: View {
                                     .colorPickerSheet(isPresented: $showPenColorPicker, color: $penPickerColor) { picked in
                                         recentColors = RecentColors.add(picked)
                                         selectedColorIndex = 0
+                                        if isEraser { swap(&lineWidth, &otherWidth) }
                                         isEraser = false
                                     }
                                     ForEach(recentColors, id: \.self) { color in
@@ -3472,7 +3459,7 @@ struct DrawScreen: View {
                         Spacer()
                         HStack {
                             Spacer()
-                            ThicknessPanel(lineWidth: $lineWidth, onSelect: { showThicknessPicker = false })
+                            ThicknessPanel(lineWidth: $lineWidth, storageKey: isEraser ? "lastEraserWidth" : "lastLineWidth", onSelect: { showThicknessPicker = false })
                                 .frame(width: 160)
                             Spacer()
                         }

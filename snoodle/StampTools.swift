@@ -1173,6 +1173,7 @@ func renderCanvasWithStamps(lines: [DrawingLine], stamps: [PlacedStamp], size: C
 // ThicknessPanel — rendered as an overlay in DrawScreen, no popover
 struct ThicknessPanel: View {
     @Binding var lineWidth: CGFloat
+    var storageKey: String = "lastLineWidth"
     var onSelect: () -> Void
 
     var sizes: [CGFloat] {
@@ -1188,7 +1189,7 @@ struct ThicknessPanel: View {
             ForEach(sizes, id: \.self) { size in
                 Button {
                     lineWidth = size
-                    UserDefaults.standard.set(Double(size), forKey: "lastLineWidth")
+                    UserDefaults.standard.set(Double(size), forKey: storageKey)
                     onSelect()
                 } label: {
                     HStack(spacing: 16) {

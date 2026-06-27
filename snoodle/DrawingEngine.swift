@@ -291,6 +291,40 @@ struct DrawingLayerCanvas: View {
     }
 }
 
+// MARK: - Eraser Solid View
+// Used for eraser-only drawing layers. Unlike DrawingLayerCanvas, this has a transparent
+// background and paints eraser paths as solid canvasColor strokes (normal blend mode).
+// This lets the eraser visually cover stamps below without a solid white rectangle blocking them.
+struct EraserSolidView: View {
+    let lines: [DrawingLine]
+    let currentLine: DrawingLine?
+    let canvasColor: Color
+    var body: some View {
+        Canvas { context, _ in
+            let allLines = lines + (currentLine.map { [$0] } ?? [])
+            for line in allLines {
+                let count = line.points.count
+                let baseW = line.lineWidth
+                if count == 1 {
+                    let pt = line.points[0]
+                    let rect = CGRect(x: pt.x - baseW/2, y: pt.y - baseW/2, width: baseW, height: baseW)
+                    context.fill(Path(ellipseIn: rect), with: .color(canvasColor))
+                } else {
+                    for i in 1..<count {
+                        var seg = Path()
+                        seg.move(to: line.points[i-1])
+                        seg.addLine(to: line.points[i])
+                        context.stroke(seg, with: .color(canvasColor),
+                                       style: StrokeStyle(lineWidth: baseW, lineCap: .round, lineJoin: .round))
+                    }
+                }
+            }
+        }
+        .drawingGroup()
+        .allowsHitTesting(false)
+    }
+}
+
 // MARK: - Two Finger Pan Overlay (for background repositioning)
 /// Passes through pencil touches and single-finger touches — only intercepts 2-finger finger touch
 class TwoFingerOnlyView: UIView {
@@ -576,22 +610,21 @@ private func strokeTaper(i: Int, count: Int, taperFraction: CGFloat) -> CGFloat 
 private func drawEraserLine(_ line: DrawingLine, in context: inout GraphicsContext, canvasColor: Color) {
     let baseW = line.lineWidth
     let count = line.points.count
-    // Use .clear blend mode — punches transparent holes revealing background/photo below
-    context.blendMode = .clear
+    // Paint canvasColor as solid opaque strokes — identical to drawing with a color pen,
+    // so the eraser covers stamps and other layers below just like a pen would.
     if count == 1 {
         let pt = line.points[0]
         let rect = CGRect(x: pt.x - baseW/2, y: pt.y - baseW/2, width: baseW, height: baseW)
-        context.fill(Path(ellipseIn: rect), with: .color(.white))
+        context.fill(Path(ellipseIn: rect), with: .color(canvasColor))
     } else {
         for i in 1..<count {
             var seg = Path()
             seg.move(to: line.points[i-1])
             seg.addLine(to: line.points[i])
-            context.stroke(seg, with: .color(.white),
+            context.stroke(seg, with: .color(canvasColor),
                            style: StrokeStyle(lineWidth: baseW, lineCap: .round, lineJoin: .round))
         }
     }
-    context.blendMode = .normal
 }
 
 private func drawTaperedLine(_ line: DrawingLine, color: Color, in context: inout GraphicsContext,

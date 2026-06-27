@@ -12,12 +12,12 @@ Eddie Brayman, 72, independent iOS developer, East Village NYC. 50+ years coding
 **App Store URL:** https://apps.apple.com/us/app/skadoodle/id6771497563  
 **Bundle ID:** maxsdad.skadoodle  
 **Firebase project:** snoodle-68bfc  
-**Current version at last session:** 2.2 (in review, not yet released)
-**Last released to App Store:** 2.1 build 4 (June 2026)
+**Current version at last session:** 2.3 b3 (in development)
+**Last released to App Store:** 2.2 (June 26, 2026 — Ready for Distribution)
 
 ---
 
-## In Progress — v2.3 b1 (not yet submitted)
+## In Progress — v2.3 b3 (not yet submitted)
 
 ### New Features
 
@@ -62,8 +62,43 @@ Wraps SwiftUI's `ColorPicker` in a sheet with a large tappable row ("Open Color 
 - **`DoodleStampCreatorView` type-check timeouts** — extracted `doodleToolbarRow2()` `@ViewBuilder` func and `handleDoodleTextPlace(...)` + `doodleTextComposerSheet()` helpers to break up expressions the Swift compiler couldn't type-check in reasonable time.
 - **`ColorPickerSheet(selection:)` wrong param name** — correct param is `color:`.
 
-### Pending — v2.3 b1
-- **`ColorPickerSheet` UX — BROKEN, must fix** — History: first attempt used SwiftUI `ColorPicker` in a sheet that showed just a small swatch circle; user couldn't tell what to tap. Second attempt tried `UIColorPickerViewController` as sheet root content — crashed with "tried to present a nil modal view controller" because UIColorPickerViewController internally presents sub-controllers on SwiftUI's hosting layer. Third attempt (current, broken): a sheet with a large "Open Color Wheel" row AND a "Done" button — user correctly pointed out this makes no sense (done does nothing useful if you haven't opened the wheel; if you have, you already committed). **Current state of `ColorPickerSheet` in StampTools.swift is this broken two-step design.** Goal for next session: tap `+` → color wheel opens immediately → pick color → single done. No intermediate sheet with confusing choices. Key constraint: `UIColorPickerViewController` cannot be the root content of a SwiftUI `.sheet`.
+#### Doodle Timelapse Video Export (new file: `DoodleVideoExport.swift`)
+Fully self-contained. Reads `SkadoodleDocument`, generates an MP4 timelapse, and presents it via share sheet or inline player. No changes to any other existing file except two additive lines in `GalleryTab.swift`.
+
+**Video structure:**
+1. Drawing revealed stroke-by-stroke (point-by-point in chunks of `pointsPerFrame = max(3, totalPoints/300)` — ~300 render steps; simple doodles are short, complex ones longer)
+2. Stamps fade in over 8 frames each
+3. 2-second hold on finished doodle (60 frames)
+4. Outro: dark overlay dissolves in (24f), branding card holds centered (45f) — app icon + "Skadoodle" + "skadoodle.nyc" + doodle date — then shrinks/slides to small footer at bottom (36f), footer zooms from scale 0.28 → 0.44 over 15f then holds (30f total)
+
+**Key classes/structs:**
+- `DoodleTimelapseExporter` (`@MainActor` class) — builds state list, drives AVAssetWriter loop, yields every 10 frames to avoid watchdog kill
+- `OutroFrameView` — SwiftUI view rendered via `ImageRenderer` for each outro frame; uses `smoothstep` easing for shrink animation
+- `TimelapseButton` — in `SnoodleDetailView` action bar (film icon); exports → iOS share sheet
+- `TilePlayBadge` — in `SnoodleTile` bottom-right corner (play circle); exports → full-screen `AVPlayerViewController` auto-play
+- `VideoPlayerView` — `UIViewControllerRepresentable` wrapping `AVPlayerViewController`
+
+**Canvas size:** saved JPEG has `scale=1`, so `img.size` is physical pixels. Divide by `currentScreenScale()` to get point size for `renderCanvasWithStamps`; multiply back for pixel buffer dimensions.
+
+**Pixel buffer:** `kCVPixelFormatType_32BGRA` + `noneSkipFirst | byteOrder32Little`. No coordinate flip — CVPixelBuffer-backed CGBitmapContext stores row 0 at the top of the visual frame; `ctx.draw(cgImage, in:)` maps correctly without any additional transform.
+
+**`UIScreen.main` deprecation fixed** — uses `currentScreenScale()` / `currentScreenBounds()` helpers that go through `UIWindowScene`.
+
+**GalleryTab.swift changes (additive only):**
+- `SnoodleTile`: `.overlay(alignment: .bottomTrailing)` with `TilePlayBadge` when `entry.hasSkadoodleFile`
+- `SnoodleDetailView.card(for:)`: `TimelapseButton(entry: entry)` added to action bar HStack
+
+### Fixes — v2.3 b2
+- **Timelapse outro zoom pop** — after branding card shrinks to footer position (scale 0.28), it zooms to 0.44 over 15 frames with smoothstep easing, then holds. (`DoodleVideoExport.swift`)
+- **Eraser thickness independent from pen** — `otherWidth: CGFloat` state (persisted as `"lastEraserWidth"`, default 20) swaps with `lineWidth` when toggling eraser on/off. `ThicknessPanel` gains `storageKey` param and saves to the correct key. (`DrawScreen.swift`, `StampTools.swift`)
+- **Eraser chip in layers panel** — drawing layers whose lines are all eraser strokes show a faded `eraser.fill` icon in their chip thumbnail instead of a blank white rectangle. (`DrawScreen.swift`)
+
+### Fixes — v2.3 b3
+- **Eraser now covers stamps** — `drawEraserLine` changed from `.clear` blend mode (punches transparent holes) to normal blend painting solid `canvasColor`. The eraser now works exactly like the pen but paints the canvas background color — covering stamps and anything below. (`DrawingEngine.swift`)
+- **`EraserSolidView`** added to `DrawingEngine.swift` — transparent-background Canvas that renders eraser paths as solid canvasColor strokes. Available for future use.
+- **Drawing after stamp now creates new layer above it** — `appendStampToLayer` now sets `userSelectedLayerId = nil` after placing a stamp. On the next stroke, `needsNewLayer` evaluates true (topIsStamp && userSelectedLayerId == nil) and a fresh drawing layer is created above the stamp. Previously this only worked when the layers panel was open. (`DrawScreen.swift`)
+
+### Pending — v2.3 b3
 - **Website git push** — Skadoodle website (skadoodle.nyc, Firebase Hosting) was updated this session with v2.2 marketing content and committed to GitHub (username: `eddienorton`, repo: `skadoodle-website`). Firebase deploy must be run from Eddie's terminal (`npx firebase deploy --only hosting` from `/Users/edwardbrayman/Development/Website/skadoodle`).
 
 ---
