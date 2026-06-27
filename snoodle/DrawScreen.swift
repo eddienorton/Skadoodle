@@ -3080,7 +3080,10 @@ struct DrawScreen: View {
                                 )
                                 backgroundOffset = clampedBackgroundOffset(newOffset)
                             } : nil,
-                            onBackgroundDoubleTap: { extractAllLayersAsStamps() }
+                            onBackgroundDoubleTap: { extractAllLayersAsStamps() },
+                            blockGestures: showTextComposer || showPenStudio || showBgEditor ||
+                                showOpacitySheet || showCanvasBgSheet || showCanvasImagePicker ||
+                                showSignInForPost || showPenColorPicker || showCanvasColorPicker
                         )
                         } // end stamps ZStack
                         .coordinateSpace(name: "stampCanvas")
@@ -3701,6 +3704,7 @@ struct WindowPinchView: UIViewRepresentable {
     var onBackgroundPanBegan: (() -> Void)? = nil
     var onBackgroundPan: ((CGSize) -> Void)? = nil
     var onBackgroundDoubleTap: (() -> Void)? = nil
+    var blockGestures: Bool = false     // true when any sheet/picker is open over the canvas
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -3838,10 +3842,8 @@ struct WindowPinchView: UIViewRepresentable {
         // or render-cycle timing involved; shouldReceive fires before the gesture begins.
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
             guard touch.type != .pencil && touch.type != .stylus else { return false }
-            // Block all window-level gestures when any modal sheet or picker is presented.
-            // This prevents canvas gestures from firing through the text composer, color picker, etc.
-            if let window = gestureRecognizer.view as? UIWindow,
-               window.rootViewController?.presentedViewController != nil { return false }
+            // Block all window-level gestures when a sheet or picker is open over the canvas.
+            if parent.blockGestures { return false }
             var view: UIView? = touch.view
             while let v = view {
                 // UICollectionView / UITableView are the concrete backing views for SwiftUI List.
