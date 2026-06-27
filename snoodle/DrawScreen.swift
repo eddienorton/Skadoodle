@@ -1100,6 +1100,9 @@ struct DrawScreen: View {
     @State private var isEraser: Bool = false
     @State private var showLayersPanel: Bool = false
     @State private var userSelectedLayerId: UUID? = nil
+    /// True only when the user has explicitly tapped a drawing layer chip in the panel.
+    /// Cleared on stamp placement and canvas tap so the next draw creates a new layer above any top stamp.
+    @State private var explicitLayerSelection: Bool = false
     /// When set, onBeforeDraw inserts the new drawing layer just above this stamp id
     /// instead of appending to the top of the stack.
     @State private var pendingInsertAboveStampId: UUID? = nil
@@ -1407,6 +1410,7 @@ struct DrawScreen: View {
                 }
                 if case .drawing(let id) = entry {
                     userSelectedLayerId = id
+                    explicitLayerSelection = true
                     selectedStampId = nil
                     showStampMagicMenu = false
                 } else if case .stamp(let id) = entry {
@@ -1807,6 +1811,7 @@ struct DrawScreen: View {
                                 activateStamp(id: id)
                             case .drawing(let id):
                                 userSelectedLayerId = id
+                                explicitLayerSelection = true
                                 selectedStampId = nil
                                 showStampMagicMenu = false
                             }
@@ -2060,8 +2065,8 @@ struct DrawScreen: View {
         } else {
             layerOrder.append(.stamp(stamp.id))
         }
-        // Clear drawing layer selection so the next stroke creates a new layer above the stamp
-        userSelectedLayerId = nil
+        // Clear explicit selection so the next stroke creates a new layer above the stamp
+        explicitLayerSelection = false
     }
 
     // Lazy binding to the active drawing layer's lines. Evaluates activeDrawingLayerIndex
@@ -2140,11 +2145,14 @@ struct DrawScreen: View {
     @State private var stampResizeStartSize: CGFloat = 0
     @State private var showStampMagicMenu: Bool = false
     @State private var showMenuTweak: Bool = false
-    @AppStorage("stampPanelOffsetX") private var savedMenuOffsetX: Double = 0
-    @AppStorage("stampPanelOffsetY") private var savedMenuOffsetY: Double = 0
+    @AppStorage("stampPanelOffsetX_v3") private var savedMenuOffsetX: Double = 0
+    @AppStorage("stampPanelOffsetY_v3") private var savedMenuOffsetY: Double = 0
     @State private var showTextComposer: Bool = false
     @State private var editingStampId: UUID? = nil
     @State private var selectedStampId: UUID? = nil
+    @State private var isStampMode: Bool = false           // hand tool toggle: disables drawing, enables direct stamp drag
+    @State private var showSnugDuringDrag: Bool = false    // true only if stamp was already selected when long-press drag began
+    @State private var suppressCanvasTapAfterPlace: Bool = false
     @State private var stampResizeTargetId: UUID? = nil
     @State private var stampRotatingId: UUID? = nil
     @State private var draggingStampId: UUID? = nil
@@ -2324,7 +2332,8 @@ struct DrawScreen: View {
     func drawingLayerView(layer: DrawingLayer) -> some View {
         let liveLine: DrawingLine? = layer.id == eraserTargetLayerId ? currentLine : nil
         let bgColor: Color = canvasBackgroundImage != nil ? .clear : canvasColor
-        DrawingLayerCanvas(lines: layer.lines, currentLine: liveLine, canvasColor: bgColor)
+        DrawingLayerCanvas(lines: layer.lines, currentLine: liveLine, canvasColor: bgColor,
+                           backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset)
     }
 
     // Extracted into its own function so the compiler can type-check the callbacks independently
@@ -2347,7 +2356,7 @@ struct DrawScreen: View {
                     case .rotate90: placedStamps[idx].rotation = (placedStamps[idx].rotation + 90).truncatingRemainder(dividingBy: 360)
                     }
                 }
-                showStampMagicMenu = false
+                // Keep selection + strip active after transform
             },
             onDelete: {
                 undoStack.append(CanvasSnapshot(drawingLayers: drawingLayers, stamps: placedStamps, layerOrder: layerOrder, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation))
@@ -2399,6 +2408,9 @@ struct DrawScreen: View {
                 placedStamps[idx].rotation = (placedStamps[idx].rotation + degrees)
                     .truncatingRemainder(dividingBy: 360)
             },
+            onMoveLayer: { forward, toExtreme in
+                moveStampLayer(id: id, forward: forward, toExtreme: toExtreme)
+            },
             showTweak: $showMenuTweak,
             initialOffset: CGSize(width: savedMenuOffsetX, height: savedMenuOffsetY),
             onOffsetSaved: { offset in
@@ -2406,11 +2418,34 @@ struct DrawScreen: View {
                 savedMenuOffsetY = offset.height
             }
         )
+        // Centered vertically; x anchors the right edge of the panel (strip or strip+tweak)
+        // 6pt from canvas right. Offset from accDrag/liveDrag moves it from here.
         .position(
-            x: canvasSize.width / 2,
-            y: showMenuTweak ? canvasSize.height - 114 : canvasSize.height - 96
+            x: showMenuTweak
+                ? canvasSize.width - (300 + 6 + 54) / 2 - 6   // strip + gap + tweak panel
+                : canvasSize.width - 54 / 2 - 6,               // strip only
+            y: canvasSize.height / 2
         )
         .zIndex(1000)
+    }
+
+    /// Move a stamp one step forward/backward in layerOrder.
+    /// `forward` = toward front (higher index); `toExtreme` = jump all the way.
+    func moveStampLayer(id: UUID, forward: Bool, toExtreme: Bool) {
+        guard let currentIdx = layerOrder.firstIndex(where: { $0.id == id }) else { return }
+        let targetIdx: Int
+        if toExtreme {
+            targetIdx = forward ? layerOrder.count - 1 : 0
+        } else {
+            targetIdx = forward ? min(currentIdx + 1, layerOrder.count - 1)
+                                : max(currentIdx - 1, 0)
+        }
+        guard targetIdx != currentIdx else { return }
+        pushUndoSnapshot()
+        var newOrder = layerOrder
+        let item = newOrder.remove(at: currentIdx)
+        newOrder.insert(item, at: targetIdx)
+        layerOrder = newOrder
     }
 
     // Auto-place the current stamp centered on the canvas when selected from picker
@@ -2428,23 +2463,58 @@ struct DrawScreen: View {
         }
     }
 
+    /// Computes default placement size for a stamp.
+    /// Target: visual height = 25% of canvas height.
+    /// Cap: visual width must not exceed 25% of canvas width (prevents absurdly wide stamps).
+    /// imageSize: actual pixel dimensions of the image (nil for emoji/square stamps).
+    func defaultStampSize(imageSize: CGSize? = nil) -> CGFloat {
+        let targetH = canvasSize.height * 0.25
+        let maxW    = canvasSize.width  * 0.65   // generous cap — only clips very wide panoramics
+        guard let img = imageSize, img.height > 0 else {
+            // Emoji / unknown: square bounding box
+            return min(targetH, maxW)
+        }
+        let ar = img.width / img.height   // aspect ratio
+        if ar <= 1 {
+            // Portrait or square: visual height = size, visual width = size * ar
+            let size = targetH
+            return (size * ar > maxW) ? maxW / ar : size
+        } else {
+            // Landscape: visual width = size, visual height = size / ar
+            // To hit targetH visual height: size = targetH * ar
+            let size = targetH * ar
+            return min(size, maxW)
+        }
+    }
+
+    /// Briefly suppress the window-level canvas-tap handler so sheet-dismiss touches
+    /// don't deselect a stamp that was just placed from the picker.
+    func suppressNextCanvasTap() {
+        suppressCanvasTapAfterPlace = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            suppressCanvasTapAfterPlace = false
+        }
+    }
+
     func autoPlaceStamp() {
         let center = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
         pushUndoSnapshot()
         if isCustomStampMode, let customId = UUID(uuidString: lastCustomStampIdString) {
-            var stamp = PlacedStamp(emoji: "📷", position: center, size: 158)
+            let img = CustomStampManager.shared.stamps.first(where: { $0.id == customId })?.image
+            let size = defaultStampSize(imageSize: img?.size)
+            var stamp = PlacedStamp(emoji: "📷", position: center, size: size)
             stamp.customImageId = customId
             appendStampToLayer(stamp)
             selectedStampId = stamp.id
-            if let img = CustomStampManager.shared.stamps.first(where: { $0.id == customId })?.image {
-                scheduleSnugScan(for: stamp.id, image: img)
-            }
+            if let img { scheduleSnugScan(for: stamp.id, image: img) }
         } else {
-            let stamp = PlacedStamp(emoji: selectedStamp, position: center, size: 126)
+            let stamp = PlacedStamp(emoji: selectedStamp, position: center, size: defaultStampSize())
             appendStampToLayer(stamp)
             selectedStampId = stamp.id
         }
+        isStampMode = true
         showStampMagicMenu = true
+        suppressNextCanvasTap()
     }
 
     // Places multiple full-photo stamps staggered from canvas center (20pt cascade per stamp).
@@ -2458,16 +2528,17 @@ struct DrawScreen: View {
         for (i, customId) in ids.enumerated() {
             let pos = CGPoint(x: center.x + offset + CGFloat(i) * stagger,
                               y: center.y + offset + CGFloat(i) * stagger)
-            var stamp = PlacedStamp(emoji: "📷", position: pos, size: 158)
+            let img = CustomStampManager.shared.stamps.first(where: { $0.id == customId })?.image
+            let size = defaultStampSize(imageSize: img?.size)
+            var stamp = PlacedStamp(emoji: "📷", position: pos, size: size)
             stamp.customImageId = customId
             appendStampToLayer(stamp)
             selectedStampId = stamp.id  // last one ends up selected
-            // Alpha scan for each placed photo
-            if let img = CustomStampManager.shared.stamps.first(where: { $0.id == customId })?.image {
-                scheduleSnugScan(for: stamp.id, image: img)
-            }
+            if let img { scheduleSnugScan(for: stamp.id, image: img) }
         }
+        isStampMode = true
         showStampMagicMenu = true
+        suppressNextCanvasTap()
     }
 
     // Places multiple emoji stamps staggered from canvas center.
@@ -2480,11 +2551,13 @@ struct DrawScreen: View {
         for (i, emoji) in emojis.enumerated() {
             let pos = CGPoint(x: center.x + offset + CGFloat(i) * stagger,
                               y: center.y + offset + CGFloat(i) * stagger)
-            let stamp = PlacedStamp(emoji: emoji, position: pos, size: 126)
+            let stamp = PlacedStamp(emoji: emoji, position: pos, size: defaultStampSize())
             appendStampToLayer(stamp)
             selectedStampId = stamp.id
         }
+        isStampMode = true
         showStampMagicMenu = true
+        suppressNextCanvasTap()
     }
 
     func placeTextStamp(text: String, fontId: String, fontStyle: String, alignment: String, color: Color, bgColor: Color,
@@ -2516,6 +2589,7 @@ struct DrawScreen: View {
         appendStampToLayer(stamp)
         selectedStampId = stamp.id
         showStampMagicMenu = true
+        suppressNextCanvasTap()
     }
 
     /// Measure text at a good starting font size, respecting ONLY explicit line breaks.
@@ -2854,6 +2928,7 @@ struct DrawScreen: View {
                             isLongPressing: isLongPressing,
                             stampResizeTargetId: stampResizeTargetId,
                             isStampSelected: selectedStampId != nil,
+                            drawingEnabled: !isStampMode,
                             onBeforeDraw: {
                                 if showLegacyImportBanner { withAnimation { showLegacyImportBanner = false } }
                                 pushUndoSnapshot()
@@ -2865,7 +2940,7 @@ struct DrawScreen: View {
                                 //    neighbor above is another stamp; new layer inserts between them.
                                 let topIsStamp = layerOrder.last.map { if case .stamp = $0 { return true } else { return false } } ?? false
                                 let needsNewLayer = drawingLayers.isEmpty ||
-                                    (topIsStamp && (userSelectedLayerId == nil || selectedStampId != nil)) ||
+                                    (topIsStamp && !explicitLayerSelection) ||
                                     pendingInsertAboveStampId != nil
                                 if needsNewLayer {
                                     let newLayer = DrawingLayer()
@@ -2879,11 +2954,20 @@ struct DrawScreen: View {
                                     }
                                     pendingInsertAboveStampId = nil
                                     userSelectedLayerId = newLayer.id
+                                    explicitLayerSelection = true   // prevent another new layer on the very next stroke
                                     selectedStampId = nil
                                     showStampMagicMenu = false
                                 }
                             },
                             onEraserCommitted: { _ in },
+                            onStampModeDragOnEmpty: { startPoint in
+                                // Auto-switch to draw mode only when dragging on empty canvas in stamp mode.
+                                // Returns true so the caller can start drawing immediately (without waiting
+                                // for SwiftUI to re-render isStampMode change).
+                                let hit = topmostStampHit(at: startPoint, layerOrder: layerOrder, stamps: placedStamps)
+                                if hit == nil { isStampMode = false; return true }
+                                return false
+                            },
                             currentLine: $currentLine
                         )
                             .contentShape(Rectangle())
@@ -2950,11 +3034,29 @@ struct DrawScreen: View {
                             onLongPress: { _ in },
                             isLongPressing: $isLongPressing,
                             showLayersPanel: showLayersPanel,
+                            suppressCanvasTap: suppressCanvasTapAfterPlace,
+                            isStampMode: isStampMode,
                             layerOrder: layerOrder,
                             selectedStampId: selectedStampId,
                             onLongPressStamp: { id in
+                                // Only keep the snug rect during drag if the stamp was already selected
+                                showSnugDuringDrag = (selectedStampId == id && showStampMagicMenu)
                                 selectedStampId = id
                                 showStampMagicMenu = false
+                            },
+                            onStampDragEnd: { id in
+                                // Only restore selection+strip if stamp was already selected
+                                // when the drag started (showSnugDuringDrag captures this).
+                                if showSnugDuringDrag {
+                                    selectedStampId = id
+                                    showStampMagicMenu = true
+                                } else {
+                                    // Draw mode: clear the selectedStampId that onLongPressStamp set.
+                                    // Without this, the stamp stays "selected" for hitTest and its
+                                    // UIPanGestureRecognizer can drag it on the next single-finger touch.
+                                    selectedStampId = nil
+                                }
+                                showSnugDuringDrag = false
                             },
                             onStampTap: { id in
                                 activateStamp(id: id)
@@ -2963,6 +3065,7 @@ struct DrawScreen: View {
                                 selectedStampId = nil
                                 showStampMagicMenu = false
                                 pendingInsertAboveStampId = nil
+                                explicitLayerSelection = false
                                 ensureLayerSelection()
                             },
                             onBeforeStampChange: { pushUndoSnapshot() },
@@ -3492,6 +3595,21 @@ struct DrawScreen: View {
                     .disabled(isGeneratingCaption)
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
+                    if !isGeneratingCaption && !showResultCard {
+                        Button {
+                            isStampMode.toggle()
+                            if isStampMode {
+                                // Entering stamp mode — deselect any active stamp to start clean
+                                selectedStampId = nil
+                                showStampMagicMenu = false
+                            }
+                        } label: {
+                            Image(systemName: isStampMode ? "hand.point.up.left.fill" : "pencil.and.scribble")
+                                .foregroundStyle(isStampMode ? Color.accentColor : .primary)
+                        }
+                    }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
                     if isGeneratingCaption {
                         ProgressView().scaleEffect(0.8)
                     } else if !showResultCard {
@@ -3572,9 +3690,11 @@ struct WindowPinchView: UIViewRepresentable {
     @Binding var isLongPressing: Bool
     var showLayersPanel: Bool = false
     var suppressCanvasTap: Bool = false
+    var isStampMode: Bool = false          // hand tool — longpress delay collapses to near-zero
     var layerOrder: [LayerEntry] = []
     var selectedStampId: UUID? = nil
     var onLongPressStamp: ((UUID) -> Void)? = nil
+    var onStampDragEnd: ((UUID) -> Void)? = nil   // called after long-press drag ends; re-shows menu
     var onStampTap: ((UUID) -> Void)? = nil
     var onCanvasTap: (() -> Void)? = nil
     var onBeforeStampChange: (() -> Void)? = nil
@@ -3655,6 +3775,8 @@ struct WindowPinchView: UIViewRepresentable {
 
     func updateUIView(_ uiView: UIView, context: Context) {
         context.coordinator.parent = self
+        // In stamp/hand mode, collapse longpress delay so stamps drag immediately.
+        context.coordinator.longPressRecognizer?.minimumPressDuration = isStampMode ? 0.05 : 0.4
     }
 
     static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
@@ -3752,28 +3874,22 @@ struct WindowPinchView: UIViewRepresentable {
             switch g.state {
             case .began:
                 let c = centroid(g)
-                // If a stamp is already selected, operate on it directly regardless of
-                // what's visually on top — selected stamp "owns" all two-finger gestures.
-                let target: PlacedStamp?
-                if let selId = parent.selectedStampId,
-                   let stamp = parent.placedStamps.first(where: { $0.id == selId }) {
-                    target = stamp
-                } else {
-                    var touchPoints: [CGPoint] = []
-                    for i in 0..<g.numberOfTouches {
-                        let wp = g.location(ofTouch: i, in: nil)
-                        touchPoints.append(CGPoint(x: wp.x - parent.canvasOrigin.x,
-                                                   y: wp.y - parent.canvasOrigin.y))
-                    }
-                    var votes: [UUID: Int] = [:]
-                    for pt in touchPoints {
-                        if let winner = topmostStampHit(at: pt, layerOrder: parent.layerOrder, stamps: parent.placedStamps) {
-                            votes[winner.id, default: 0] += 1
-                        }
-                    }
-                    let targetId2 = votes.max(by: { $0.value < $1.value })?.key
-                    target = parent.placedStamps.first(where: { $0.id == targetId2 })
+                // Always use alpha-aware hit testing — even for the selected stamp.
+                // This prevents transparent padding around a stamp from being targetable.
+                var touchPoints: [CGPoint] = []
+                for i in 0..<g.numberOfTouches {
+                    let wp = g.location(ofTouch: i, in: nil)
+                    touchPoints.append(CGPoint(x: wp.x - parent.canvasOrigin.x,
+                                               y: wp.y - parent.canvasOrigin.y))
                 }
+                var votes: [UUID: Int] = [:]
+                for pt in touchPoints {
+                    if let winner = topmostStampHit(at: pt, layerOrder: parent.layerOrder, stamps: parent.placedStamps) {
+                        votes[winner.id, default: 0] += 1
+                    }
+                }
+                let targetId2 = votes.max(by: { $0.value < $1.value })?.key
+                let target = parent.placedStamps.first(where: { $0.id == targetId2 })
                 if let stamp = target {
                     cancelAllStampPans()
                     targetId = stamp.id
@@ -3826,27 +3942,21 @@ struct WindowPinchView: UIViewRepresentable {
             switch g.state {
             case .began:
                 let c = rotationCentroid(g)
-                // Same priority rule as pinch: selected stamp owns two-finger gestures.
-                let target: PlacedStamp?
-                if let selId = parent.selectedStampId,
-                   let stamp = parent.placedStamps.first(where: { $0.id == selId }) {
-                    target = stamp
-                } else {
-                    var touchPoints: [CGPoint] = []
-                    for i in 0..<g.numberOfTouches {
-                        let wp = g.location(ofTouch: i, in: nil)
-                        touchPoints.append(CGPoint(x: wp.x - parent.canvasOrigin.x,
-                                                   y: wp.y - parent.canvasOrigin.y))
-                    }
-                    var votes: [UUID: Int] = [:]
-                    for pt in touchPoints {
-                        if let winner = topmostStampHit(at: pt, layerOrder: parent.layerOrder, stamps: parent.placedStamps) {
-                            votes[winner.id, default: 0] += 1
-                        }
-                    }
-                    let targetId2 = votes.max(by: { $0.value < $1.value })?.key
-                    target = parent.placedStamps.first(where: { $0.id == targetId2 })
+                // Always use alpha-aware hit testing (same as pinch).
+                var touchPoints: [CGPoint] = []
+                for i in 0..<g.numberOfTouches {
+                    let wp = g.location(ofTouch: i, in: nil)
+                    touchPoints.append(CGPoint(x: wp.x - parent.canvasOrigin.x,
+                                               y: wp.y - parent.canvasOrigin.y))
                 }
+                var votes: [UUID: Int] = [:]
+                for pt in touchPoints {
+                    if let winner = topmostStampHit(at: pt, layerOrder: parent.layerOrder, stamps: parent.placedStamps) {
+                        votes[winner.id, default: 0] += 1
+                    }
+                }
+                let targetId2 = votes.max(by: { $0.value < $1.value })?.key
+                let target = parent.placedStamps.first(where: { $0.id == targetId2 })
                 if let stamp = target {
                     cancelAllStampPans()
                     targetId = stamp.id
@@ -3906,13 +4016,14 @@ struct WindowPinchView: UIViewRepresentable {
             // prevents long-pressing UI elements (e.g. TweakRepeatButton) from
             // dismissing the magic menu when the press is released.
             if g.state == .ended || g.state == .cancelled {
-                let wasDraggingStamp = longPressStampId != nil
+                let draggedStampId = longPressStampId
                 parent.isLongPressing = false
                 longPressStampId = nil
                 longPressStartLocation = nil
                 longPressDragStartPos = nil
                 longPressDragStarted = false
-                if wasDraggingStamp { parent.onCanvasTap?() }
+                // Re-show the magic strip for the stamp that was dragged (don't deselect).
+                if let stampId = draggedStampId { parent.onStampDragEnd?(stampId) }
                 return
             }
 

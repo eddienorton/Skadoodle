@@ -12,12 +12,12 @@ Eddie Brayman, 72, independent iOS developer, East Village NYC. 50+ years coding
 **App Store URL:** https://apps.apple.com/us/app/skadoodle/id6771497563  
 **Bundle ID:** maxsdad.skadoodle  
 **Firebase project:** snoodle-68bfc  
-**Current version at last session:** 2.3 b3 (in development)
+**Current version at last session:** 2.3 b4 (submitted June 28, 2026)
 **Last released to App Store:** 2.2 (June 26, 2026 — Ready for Distribution)
 
 ---
 
-## In Progress — v2.3 b3 (not yet submitted)
+## In Progress — v2.3 b4 (submitted)
 
 ### New Features
 
@@ -98,8 +98,19 @@ Fully self-contained. Reads `SkadoodleDocument`, generates an MP4 timelapse, and
 - **`EraserSolidView`** added to `DrawingEngine.swift` — transparent-background Canvas that renders eraser paths as solid canvasColor strokes. Available for future use.
 - **Drawing after stamp now creates new layer above it** — `appendStampToLayer` now sets `userSelectedLayerId = nil` after placing a stamp. On the next stroke, `needsNewLayer` evaluates true (topIsStamp && userSelectedLayerId == nil) and a fresh drawing layer is created above the stamp. Previously this only worked when the layers panel was open. (`DrawScreen.swift`)
 
-### Pending — v2.3 b3
-- **Website git push** — Skadoodle website (skadoodle.nyc, Firebase Hosting) was updated this session with v2.2 marketing content and committed to GitHub (username: `eddienorton`, repo: `skadoodle-website`). Firebase deploy must be run from Eddie's terminal (`npx firebase deploy --only hosting` from `/Users/edwardbrayman/Development/Website/skadoodle`).
+### Fixes — v2.3 b4
+- **Two-finger gestures no longer target stamp outside its content** — removed selected-stamp priority from `handlePinch` and `handleRotation`; all stamps now use pure alpha-aware `topmostStampHit`. (`DrawScreen.swift`)
+- **Eraser on image background paints image pixels** — `drawEraserLine` uses `GraphicsContext.Shading.tiledImage` with cover-fit math matching the SwiftUI background layer exactly. (`DrawingEngine.swift`)
+- **Auto-switch to draw mode when dragging on empty canvas in stamp mode** — `onStampModeDragOnEmpty` callback on `DrawingCanvas` returns `Bool`; first stroke draws immediately without waiting for SwiftUI re-render, via `DrawGestureState` reference-type class. (`DrawingEngine.swift`, `DrawScreen.swift`)
+- **Auto-switch to stamp mode when placing from tray** — `autoPlaceStamp()`, `placeFullPhotoStamps()`, `placeMultipleEmojis()` set `isStampMode = true`. (`DrawScreen.swift`)
+- **`needsNewLayer` no longer creates a new layer on every stroke** — `onBeforeDraw` sets `explicitLayerSelection = true` after auto-creating a layer. (`DrawScreen.swift`)
+- **iPad stamp-mode auto-switch** — `PencilInputView` overlay always shown on iPad (was `isIPad && drawingEnabled`); `drawingEnabled` guards inside callbacks handle pen-vs-stamp routing. (`DrawingEngine.swift`)
+- **Long press drag in draw mode shows snug rect** — `snugRectOverlay` condition simplified from `isLongPressing && showSnugDuringDrag` to `isLongPressing`. (`DrawScreen.swift`)
+- **After long press drag in draw mode, single-finger touch no longer drags stamp** — `onStampDragEnd` clears `selectedStampId` when `showSnugDuringDrag` is false, preventing `StampContainerView.hitTest` from handing the stamp to its `UIPanGestureRecognizer` on the next touch. (`DrawScreen.swift`)
+- **`consolidateDrawingLayers()` confirmed not called in any delete path** — dead code; comment documents it as available for a future "Merge Layers" feature. No code change needed.
+
+### Pending
+- **Website Firebase deploy** — Skadoodle website (skadoodle.nyc, Firebase Hosting) was updated with v2.2 marketing content and committed to GitHub (username: `eddienorton`, repo: `skadoodle-website`). Firebase deploy must be run from Eddie's terminal (`npx firebase deploy --only hosting` from `/Users/edwardbrayman/Development/Website/skadoodle`).
 
 ---
 
@@ -518,11 +529,7 @@ Investigated and tested extensively. Pen lines and stamp positions are geometric
 
 ## Outstanding Items
 
-### v2.3 b1 — must fix before submit
-- **`ColorPickerSheet` UX** — the two-step "open wheel then hit Done" flow is confusing. Need a single-tap flow: tap `+` → color wheel immediately → done. Options to explore: (a) use SwiftUI `ColorPicker` as a full-row button that auto-fires on appear, (b) find a way to present `UIColorPickerViewController` via UIKit without crashing (key constraint: cannot present it as SwiftUI sheet root content — it crashes with nil modal presentation). This is the top priority for the next session.
-
-### Carry-forward bugs (from v2.2 work)
-- **`consolidateDrawingLayers()` still called in delete paths** — `deleteLayerEntry` and `removeStampFromLayerOrder` both call it, so deleting a stamp between two drawing layers merges them. Should be removed from both paths; adjacent drawing layers are valid state everywhere.
+### Carry-forward bugs
 - **Empty layers** — mechanism not yet confirmed. Suspected paths: eraser removing all lines from a layer (layer stays), or `onBeforeDraw` creating a layer that gets cancelled before any point lands. Needs repro to confirm.
 
 ### Low priority / style

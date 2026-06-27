@@ -800,6 +800,10 @@ struct DoodleStampCreatorView: View {
                                     selectedStampId = id
                                     showStampMagicMenu = false
                                 },
+                                onStampDragEnd: { _ in
+                                    // Doodle canvas: tap to select; drag never auto-selects
+                                    showStampMagicMenu = false
+                                },
                                 onStampTap: { id in
                                     selectedStampId = id
                                     showStampMagicMenu = true
@@ -837,7 +841,7 @@ struct DoodleStampCreatorView: View {
                                         case .rotate90: placedStamps[idx].rotation = (placedStamps[idx].rotation + 90).truncatingRemainder(dividingBy: 360)
                                         }
                                     }
-                                    showStampMagicMenu = false
+                                    // Keep selection + strip active after transform
                                 },
                                 onDelete: {
                                     undoStack.append(makeDoodleSnapshot())

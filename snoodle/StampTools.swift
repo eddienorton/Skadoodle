@@ -1283,6 +1283,8 @@ struct StampMagicMenu: View {
     var onNudge: ((CGSize) -> Void)? = nil
     var onResizeBy: ((CGFloat) -> Void)? = nil
     var onRotateBy: ((CGFloat) -> Void)? = nil
+    /// Move stamp one step forward/backward in layer order; `toExtreme` jumps to front/back.
+    var onMoveLayer: ((_ forward: Bool, _ toExtreme: Bool) -> Void)? = nil
 
     /// Toggled by the Precision Tweak / back-chevron buttons; owned by the parent so
     /// the parent can pick the correct base-Y for each mode.
@@ -1297,106 +1299,73 @@ struct StampMagicMenu: View {
     @State private var liveDrag: CGSize = .zero
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Header
-            HStack {
-                if showTweak {
-                    Button { showTweak = false } label: {
-                        Image(systemName: "chevron.left")
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundColor(.white.opacity(0.7))
-                            .frame(width: 28, height: 28)
-                    }
-                } else {
-                    Spacer().frame(width: 28)
-                }
-                Spacer()
-                if showTweak {
-                    Text("Precision Tweak")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(.white.opacity(0.85))
-                } else if stamp.isTextStamp {
-                    Text("✏️ Text")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(.white.opacity(0.85))
-                } else if let img = stamp.inlineImage {
-                    Image(uiImage: img)
-                        .resizable().scaledToFit()
-                        .frame(width: 28, height: 28)
-                        .clipShape(RoundedRectangle(cornerRadius: 4))
-                } else if let customId = stamp.customImageId,
-                          let cs = CustomStampManager.shared.stamps.first(where: { $0.id == customId }),
-                          let img = cs.image {
-                    Image(uiImage: img)
-                        .resizable().scaledToFit()
-                        .frame(width: 28, height: 28)
-                        .clipShape(RoundedRectangle(cornerRadius: 4))
-                } else {
-                    Text(stamp.emoji).font(.system(size: 20))
-                }
-                Spacer()
-                Button(action: onDismiss) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundColor(.white.opacity(0.7))
-                        .frame(width: 28, height: 28)
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 10)
+        HStack(alignment: .top, spacing: 6) {
 
-            Divider()
-
+            // ── Precision Tweak panel — appears to the LEFT of the strip when open ──
             if showTweak {
-                tweakPanel
-            } else {
-                let columns = stamp.isTextStamp
-                    ? Array(repeating: GridItem(.flexible()), count: 6)
-                    : Array(repeating: GridItem(.flexible()), count: 5)
-                LazyVGrid(columns: columns, spacing: 0) {
-                    magicButton("↔️", "Flip H",  "↔️ swipe") { onTransform(.flipH) }
-                    magicButton("↕️", "Flip V",  "↕️ swipe") { onTransform(.flipV) }
-                    magicButton("🔄", "Rotate",  "↻ pinch")  { onTransform(.rotate90) }
-                    magicButton("📋", "Dupe",    "copy")      { onDupe?() }
-                    if stamp.isTextStamp {
-                        magicButton("✏️", "Edit", "")         { onEdit?() }
-                    }
-                    magicButton("🗑️", "Delete",  "tap tap")  { onDelete?() }
+                VStack(spacing: 0) {
+                    Text("Precision Tweak")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.7))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                    Divider()
+                    tweakPanel
                 }
-                .padding(.bottom, 2)
+                .frame(width: 300)
+                .background(Color.black.opacity(0.78), in: RoundedRectangle(cornerRadius: 14))
+                .shadow(color: .black.opacity(0.25), radius: 10, x: -2, y: 2)
+            }
 
-                Divider()
+            // ── Narrow strip — always visible while stamp is selected ──
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: 0) {
+                    stampThumb
+                        .padding(.top, 10)
+                        .padding(.bottom, 8)
 
-                Button {
-                    showTweak = true
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "slider.horizontal.3")
-                            .font(.system(size: 13))
-                        Text("Precision Tweak")
-                            .font(.system(size: 13, weight: .medium))
+                    Divider()
+
+                    sideButton("arrow.left.and.right")  { onTransform(.flipH) }
+                    sideButton("arrow.up.and.down")     { onTransform(.flipV) }
+                    sideButton("rotate.right")          { onTransform(.rotate90) }
+                    sideButton("plus.square.on.square") { onDupe?() }
+                    sideButtonLP("arrow.up.square",
+                                 onTap:       { onMoveLayer?(true, false) },
+                                 onLongPress: { onMoveLayer?(true, true)  })
+                    sideButtonLP("arrow.down.square",
+                                 onTap:       { onMoveLayer?(false, false) },
+                                 onLongPress: { onMoveLayer?(false, true)  })
+                    if stamp.isTextStamp {
+                        sideButton("pencil")            { onEdit?() }
                     }
-                    .foregroundColor(.white.opacity(0.8))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 9)
+                    // Settings button: tinted blue when tweak panel is open; tap toggles it
+                    sideButton("slider.horizontal.3",
+                               color: showTweak ? Color.accentColor : Color.white) {
+                        showTweak.toggle()
+                    }
+
+                    Divider()
+
+                    sideButton("trash", color: Color.red.opacity(0.85)) { onDelete?() }
+
+                    Divider()
+
+                    sideButton("xmark", color: Color.white.opacity(0.45)) { onDismiss() }
+                    Spacer().frame(height: 10)  // match top breathing room
                 }
             }
+            .frame(width: 54)
+            .frame(maxHeight: canvasSize.height - 80)  // leave ~70pt clear at canvas bottom
+            .background(Color.black.opacity(0.78), in: RoundedRectangle(cornerRadius: 14))
+            .shadow(color: .black.opacity(0.25), radius: 10, x: -2, y: 2)
         }
-        .background(Color.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 16))
-        .shadow(color: .black.opacity(0.2), radius: 12, x: 0, y: 4)
-        .frame(width: 300)
         // Apply the drag offset with .offset() — purely local @State, no binding writes
-        // during the gesture, so no parent re-render occurs mid-drag (which was the flicker cause).
-        // .animation(.none) on the offset itself is the final backstop: even if a surrounding
-        // view injects an animation transaction, the offset change is always instant.
+        // during the gesture, so no parent re-render occurs mid-drag.
         .offset(x: accDrag.width + liveDrag.width, y: accDrag.height + liveDrag.height)
         .animation(.none, value: liveDrag)
         .animation(.none, value: accDrag)
-        // Restore saved position when the panel appears.
         .onAppear { withAnimation(.none) { accDrag = initialOffset } }
-        // Drag anywhere on the panel that isn't a button (buttons consume their own taps).
-        // Both the normal menu and precision tweak share the same accDrag so switching
-        // between them keeps the panel in place.
         .gesture(
             DragGesture(minimumDistance: 4)
                 .onChanged { value in withAnimation(.none) { liveDrag = value.translation } }
@@ -1409,7 +1378,55 @@ struct StampMagicMenu: View {
                     onOffsetSaved?(accDrag)
                 }
         )
-        // Base position is applied by the parent via .position() — no .position() here.
+    }
+
+    // Stamp identity shown at top of narrow panel
+    @ViewBuilder
+    var stampThumb: some View {
+        if stamp.isTextStamp {
+            Text("T")
+                .font(.system(size: 20, weight: .bold))
+                .foregroundColor(.white)
+        } else if let img = stamp.inlineImage {
+            Image(uiImage: img)
+                .resizable().scaledToFit()
+                .frame(width: 30, height: 30)
+                .clipShape(RoundedRectangle(cornerRadius: 5))
+        } else if let customId = stamp.customImageId,
+                  let cs = CustomStampManager.shared.stamps.first(where: { $0.id == customId }),
+                  let img = cs.image {
+            Image(uiImage: img)
+                .resizable().scaledToFit()
+                .frame(width: 30, height: 30)
+                .clipShape(RoundedRectangle(cornerRadius: 5))
+        } else {
+            Text(stamp.emoji).font(.system(size: 22))
+        }
+    }
+
+    // Icon-only button with long-press for the narrow side panel (used for layer-move buttons)
+    // Short tap: onTap; long press (≥0.5s): onLongPress
+    func sideButtonLP(_ icon: String, color: Color = .white,
+                      onTap: @escaping () -> Void,
+                      onLongPress: @escaping () -> Void) -> some View {
+        Image(systemName: icon)
+            .font(.system(size: 17))
+            .foregroundColor(color)
+            .frame(maxWidth: .infinity, minHeight: 44)
+            .contentShape(Rectangle())
+            .onTapGesture { onTap() }
+            .onLongPressGesture(minimumDuration: 0.5) { onLongPress() }
+    }
+
+    // Icon-only button for the narrow side panel
+    func sideButton(_ icon: String, color: Color = .white, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 17))
+                .foregroundColor(color)
+                .frame(width: 54, height: 44)
+                .contentShape(Rectangle())
+        }
     }
 
     // MARK: — Precision tweak panel
@@ -1493,22 +1510,6 @@ struct StampMagicMenu: View {
         .fixedSize(horizontal: false, vertical: true)
     }
 
-    @ViewBuilder
-    func magicButton(_ icon: String, _ label: String, _ hint: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            VStack(spacing: 2) {
-                Text(icon).font(.system(size: 22))
-                Text(label)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(.white)
-                Text(hint)
-                    .font(.system(size: 11))
-                    .foregroundColor(.white.opacity(0.75))
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 10)
-        }
-    }
 
 }
 

@@ -44,7 +44,7 @@ class StampItemUIView: UIView, UIGestureRecognizerDelegate {
     var hitImage: UIImage?
 
     var onDrag: (CGPoint) -> Void = { _ in }
-    var onDragEnd: (CGPoint, CGVector) -> Void = { _, _ in }
+    var onDragEnd: (CGPoint, CGPoint, CGVector) -> Void = { _, _, _ in }  // (startPos, finalPos, velocity)
     var onTap: () -> Void = {}
     var onDoubleTap: () -> Void = {}
 
@@ -210,7 +210,7 @@ class StampItemUIView: UIView, UIGestureRecognizerDelegate {
         case .ended, .cancelled:
             let vel = g.velocity(in: superview)
             let finalPos = center
-            onDragEnd(finalPos, CGVector(dx: vel.x, dy: vel.y))
+            onDragEnd(dragStartStampPos, finalPos, CGVector(dx: vel.x, dy: vel.y))
         default: break
         }
     }
@@ -237,7 +237,7 @@ class StampContainerView: UIView {
     var selectedStampId: UUID? = nil
     private var itemViews: [UUID: StampItemUIView] = [:]
     var onStampDrag: (UUID, CGPoint) -> Void = { _, _ in }
-    var onStampDragEnd: (UUID, CGPoint, CGVector) -> Void = { _, _, _ in }
+    var onStampDragEnd: (UUID, CGPoint, CGPoint, CGVector) -> Void = { _, _, _, _ in }  // (id, startPos, finalPos, velocity)
     var onStampTap: (UUID) -> Void = { _ in }
     var onStampDoubleTap: (UUID) -> Void = { _ in }
     var onStampDupe: (UUID) -> Void = { _ in }
@@ -308,7 +308,7 @@ class StampContainerView: UIView {
             } else {
                 view = StampItemUIView(stamp: stamp)
                 view.onDrag         = { [weak self] pos in self?.onStampDrag(stamp.id, pos) }
-                view.onDragEnd      = { [weak self] pos, vel in self?.onStampDragEnd(stamp.id, pos, vel) }
+                view.onDragEnd      = { [weak self] startPos, pos, vel in self?.onStampDragEnd(stamp.id, startPos, pos, vel) }
                 view.onTap          = { [weak self] in self?.onStampTap(stamp.id) }
                 view.onDoubleTap    = { [weak self] in self?.onStampDoubleTap(stamp.id) }
                 view.onDupe         = { [weak self] in self?.onStampDupe(stamp.id) }
@@ -359,7 +359,7 @@ struct StampCanvasView: UIViewRepresentable {
     func makeUIView(context: Context) -> StampContainerView {
         let container = StampContainerView(frame: CGRect(origin: .zero, size: canvasSize))
         container.onStampDrag      = { id, pos in context.coordinator.handleDrag(id: id, pos: pos) }
-        container.onStampDragEnd   = { id, pos, vel in context.coordinator.handleDragEnd(id: id, pos: pos, velocity: vel) }
+        container.onStampDragEnd   = { id, startPos, pos, vel in context.coordinator.handleDragEnd(id: id, startPos: startPos, pos: pos, velocity: vel) }
         container.onStampTap       = { id in context.coordinator.handleTap(id: id) }
         container.onStampDoubleTap = { id in context.coordinator.handleDoubleTap(id: id) }
         container.onStampDupe      = { id in context.coordinator.handleDupe(id: id) }
@@ -486,13 +486,15 @@ struct StampCanvasView: UIViewRepresentable {
             parent.stamps[idx].position = pos
         }
 
-        func handleDragEnd(id: UUID, pos: CGPoint, velocity: CGVector) {
+        func handleDragEnd(id: UUID, startPos: CGPoint, pos: CGPoint, velocity: CGVector) {
             guard let idx = parent.stamps.firstIndex(where: { $0.id == id }) else {
                 draggingId = nil
                 return
             }
             let speed = hypot(velocity.dx, velocity.dy)
             if speed > 800 {
+                // Flip in place — restore to drag-start position so stamp doesn't jump
+                parent.stamps[idx].position = startPos
                 if abs(velocity.dx) > abs(velocity.dy) {
                     parent.stamps[idx].flipX.toggle()
                 } else {

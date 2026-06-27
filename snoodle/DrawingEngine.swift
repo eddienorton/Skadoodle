@@ -123,6 +123,13 @@ struct DrawingLine {
     var colorB: Color = .blue   // second color for dualTone pens
 }
 
+// Holds mutable gesture flags that must be visible synchronously across events
+// within a single gesture — @State value semantics would give stale snapshots.
+private class DrawGestureState {
+    var modeSwitch: Bool = false  // true after auto-switching from stamp mode mid-gesture
+    var fired: Bool = false       // true after onStampModeDragOnEmpty was called this gesture
+}
+
 struct DrawingCanvas: View {
     @Binding var lines: [DrawingLine]           // active layer's lines; DrawingCanvas appends here
     var currentColor: Color
@@ -138,15 +145,18 @@ struct DrawingCanvas: View {
     var isLongPressing: Bool = false
     var stampResizeTargetId: UUID? = nil
     var isStampSelected: Bool = false          // true when a stamp is selected; raises pencil movement threshold to suppress deselect-tap dots
+    var drawingEnabled: Bool = true            // false in stamp/hand mode — disables all pen and finger drawing input
     var renderLines: Bool = false              // true = self-renders (DoodleStampCreatorView); false = external layer canvases render
     var onBeforeDraw: (() -> Void)? = nil      // called once at stroke start; caller should push undo snapshot
     var onEraserCommitted: ((DrawingLine) -> Void)? = nil  // called when an eraser stroke lands; caller may redirect to another layer
+    var onStampModeDragOnEmpty: ((CGPoint) -> Bool)? = nil // called when stamp mode is on and drag starts; return true = switched to draw mode
     @Binding var currentLine: DrawingLine?     // live preview; updated during stroke, nil when idle
 
     @State private var lastPoint: CGPoint? = nil
     @State private var lastTime: Date? = nil
     @State private var lastSpeed: CGFloat? = nil
     @State private var redrawTrigger: Int = 0
+    @State private var gestureState = DrawGestureState()  // class: mutations visible immediately across events
 
     var body: some View {
         let isIPad = UIDevice.current.userInterfaceIdiom == .pad
@@ -161,8 +171,23 @@ struct DrawingCanvas: View {
         .allowsHitTesting(false)
         .background(canvasColor)
         .contentShape(Rectangle())
+        // On iPhone, always attach a DragGesture so single-finger touches are consumed
+        // by SwiftUI and can't escape to the sheet's interactive-dismissal recognizer.
+        // When drawingEnabled is false (stamp/hand mode), the gesture exists but is a no-op.
         .gesture(isIPad ? nil : DragGesture(minimumDistance: 0)
             .onChanged { value in
+                // canDraw is true if either drawing is normally enabled, or we auto-switched
+                // from stamp mode mid-gesture (gestureState is class-based so mutations are
+                // immediately visible to the next read, unlike @State value snapshots).
+                if !drawingEnabled && !gestureState.modeSwitch && !gestureState.fired {
+                    let moved = hypot(value.translation.width, value.translation.height)
+                    if moved > 8 {
+                        gestureState.fired = true
+                        let didSwitch = onStampModeDragOnEmpty?(value.startLocation) ?? false
+                        if didSwitch { gestureState.modeSwitch = true }
+                    }
+                }
+                guard drawingEnabled || gestureState.modeSwitch else { return }
                 guard !isLongPressing && stampResizeTargetId == nil else {
                     currentLine = nil; lastPoint = nil; lastTime = nil; lastSpeed = nil
                     return
@@ -194,6 +219,9 @@ struct DrawingCanvas: View {
                 lastTime = Date()
             }
             .onEnded { _ in
+                let wasSwitched = gestureState.modeSwitch
+                gestureState.modeSwitch = false; gestureState.fired = false  // reset for next gesture
+                guard drawingEnabled || wasSwitched else { return }
                 if let line = currentLine, line.points.count > 1 {
                     lines.append(line)
                     if line.isEraser { onEraserCommitted?(line) }
@@ -207,6 +235,21 @@ struct DrawingCanvas: View {
                 stampResizeTargetId: stampResizeTargetId,
                 isStampSelected: isStampSelected,
                 onBegan: { point, pressure, isPencil in
+                    guard drawingEnabled else {
+                        // Stamp mode: check once whether to auto-switch to draw mode
+                        if !gestureState.fired {
+                            gestureState.fired = true
+                            let didSwitch = onStampModeDragOnEmpty?(point) ?? false
+                            if didSwitch {
+                                gestureState.modeSwitch = true
+                                // Set up drawing start point so onMoved can draw immediately
+                                lastPoint = point
+                                lastTime = Date()
+                                onBeforeDraw?()
+                            }
+                        }
+                        return
+                    }
                     guard !isLongPressing && stampResizeTargetId == nil else { return }
                     lastPoint = point
                     lastTime = Date()
@@ -214,6 +257,7 @@ struct DrawingCanvas: View {
                     onBeforeDraw?()
                 },
                 onMoved: { point, pressure, isPencil in
+                    guard drawingEnabled || gestureState.modeSwitch else { return }
                     guard !isLongPressing && stampResizeTargetId == nil else {
                         currentLine = nil; lastPoint = nil; lastTime = nil; lastSpeed = nil
                         return
@@ -250,6 +294,8 @@ struct DrawingCanvas: View {
                     lastTime = Date()
                 },
                 onEnded: {
+                    defer { gestureState.modeSwitch = false; gestureState.fired = false }
+                    guard drawingEnabled || gestureState.modeSwitch else { return }
                     if let line = currentLine, line.points.count > 1 {
                         let finalLine = line
                         DispatchQueue.main.async {
@@ -282,10 +328,12 @@ struct DrawingLayerCanvas: View {
     let lines: [DrawingLine]
     let currentLine: DrawingLine?
     let canvasColor: Color
+    var backgroundImage: UIImage? = nil
+    var backgroundOffset: CGSize = .zero
     var body: some View {
         Canvas { context, size in
-            for line in lines { renderLine(line, in: &context, canvasColor: canvasColor) }
-            if let c = currentLine { renderLine(c, in: &context, canvasColor: canvasColor) }
+            for line in lines { renderLine(line, in: &context, canvasColor: canvasColor, backgroundImage: backgroundImage, backgroundOffset: backgroundOffset, canvasSize: size) }
+            if let c = currentLine { renderLine(c, in: &context, canvasColor: canvasColor, backgroundImage: backgroundImage, backgroundOffset: backgroundOffset, canvasSize: size) }
         }
         .allowsHitTesting(false)
     }
@@ -568,11 +616,11 @@ class PencilTouchView: UIView {
 
 /// Single rendering function used by both the live SwiftUI Canvas and the UIImage export.
 /// All pen types are implemented here so they stay in sync.
-func renderLine(_ line: DrawingLine, in context: inout GraphicsContext, canvasColor: Color) {
+func renderLine(_ line: DrawingLine, in context: inout GraphicsContext, canvasColor: Color, backgroundImage: UIImage? = nil, backgroundOffset: CGSize = .zero, canvasSize: CGSize = .zero) {
     guard line.points.count > 0 else { return }
 
     if line.isEraser {
-        drawEraserLine(line, in: &context, canvasColor: canvasColor)
+        drawEraserLine(line, in: &context, canvasColor: canvasColor, backgroundImage: backgroundImage, backgroundOffset: backgroundOffset, canvasSize: canvasSize)
         return
     }
 
@@ -607,21 +655,44 @@ private func strokeTaper(i: Int, count: Int, taperFraction: CGFloat) -> CGFloat 
     return 1.0
 }
 
-private func drawEraserLine(_ line: DrawingLine, in context: inout GraphicsContext, canvasColor: Color) {
+private func drawEraserLine(_ line: DrawingLine, in context: inout GraphicsContext, canvasColor: Color, backgroundImage: UIImage? = nil, backgroundOffset: CGSize = .zero, canvasSize: CGSize = .zero) {
     let baseW = line.lineWidth
     let count = line.points.count
-    // Paint canvasColor as solid opaque strokes — identical to drawing with a color pen,
-    // so the eraser covers stamps and other layers below just like a pen would.
+
+    // Determine what the eraser paints:
+    //   - Solid background: paint canvasColor (covers stamps and layers below, same as pen)
+    //   - Image background: paint the background image pixels at the correct canvas position
+    //     using tiledImage shading — identical mechanism to canvasColor, just image-sourced
+    let shading: GraphicsContext.Shading
+    if canvasColor != Color.clear {
+        shading = .color(canvasColor)
+    } else if let bgImg = backgroundImage, canvasSize.width > 0, canvasSize.height > 0,
+              bgImg.size.width > 0, bgImg.size.height > 0 {
+        // Cover-fit the image to canvas, matching the SwiftUI background layer rendering exactly.
+        // bgImg.size is in points (UIImage.size always returns points regardless of image scale).
+        let coverScale = max(canvasSize.width / bgImg.size.width, canvasSize.height / bgImg.size.height)
+        let scaledW = bgImg.size.width * coverScale
+        let scaledH = bgImg.size.height * coverScale
+        // Center then apply user pan offset — same as the SwiftUI layer
+        let originX = (canvasSize.width - scaledW) / 2 + backgroundOffset.width
+        let originY = (canvasSize.height - scaledH) / 2 + backgroundOffset.height
+        shading = .tiledImage(Image(uiImage: bgImg),
+                              origin: CGPoint(x: originX, y: originY),
+                              scale: coverScale)
+    } else {
+        return  // canvas is clear with no background — nothing to erase to
+    }
+
     if count == 1 {
         let pt = line.points[0]
         let rect = CGRect(x: pt.x - baseW/2, y: pt.y - baseW/2, width: baseW, height: baseW)
-        context.fill(Path(ellipseIn: rect), with: .color(canvasColor))
+        context.fill(Path(ellipseIn: rect), with: shading)
     } else {
         for i in 1..<count {
             var seg = Path()
             seg.move(to: line.points[i-1])
             seg.addLine(to: line.points[i])
-            context.stroke(seg, with: .color(canvasColor),
+            context.stroke(seg, with: shading,
                            style: StrokeStyle(lineWidth: baseW, lineCap: .round, lineJoin: .round))
         }
     }
