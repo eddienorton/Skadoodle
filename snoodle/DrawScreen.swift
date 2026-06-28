@@ -3080,7 +3080,7 @@ struct DrawScreen: View {
                                 )
                                 backgroundOffset = clampedBackgroundOffset(newOffset)
                             } : nil,
-                            onBackgroundDoubleTap: { extractAllLayersAsStamps() },
+                            onBackgroundDoubleTap: nil,  // extract moved to BG chip ··· menu
                             blockGestures: showTextComposer || showPenStudio || showBgEditor ||
                                 showOpacitySheet || showCanvasBgSheet || showCanvasImagePicker ||
                                 showSignInForPost || showPenColorPicker || showCanvasColorPicker

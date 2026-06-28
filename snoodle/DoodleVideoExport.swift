@@ -57,67 +57,100 @@ final class DoodleTimelapseExporter: ObservableObject {
     // MARK: - State Builder
 
     private func buildStates(document: SkadoodleDocument) -> [TimelapseState] {
-        let totalPoints = document.drawingLayers
-            .flatMap { $0.lines }
-            .reduce(0) { $0 + $1.points.count }
-
+        let totalPoints = document.drawingLayers.flatMap { $0.lines }.reduce(0) { $0 + $1.points.count }
         let pointsPerFrame = max(3, totalPoints / 300)   // ~300 render steps for drawing
         let fadeSteps = 8
 
+        // ── 1. Flatten all strokes and stamps into a sorted timeline ──────────
+        // Stroke timestamps: set at commit time in DrawingEngine (new files).
+        // Old files: timestamp == epoch → stable sort preserves layer/insertion order.
+        struct StrokeEntry { let line: DrawingLine; let layerId: UUID }
+        enum Event {
+            case stroke(StrokeEntry)
+            case stamp(PlacedStamp)
+            var timestamp: Date {
+                switch self {
+                case .stroke(let s): return s.line.timestamp
+                case .stamp(let p):  return p.createdAt
+                }
+            }
+        }
+
+        var events: [Event] = []
+        for layer in document.drawingLayers {
+            for line in layer.lines { events.append(.stroke(StrokeEntry(line: line, layerId: layer.id))) }
+        }
+        for stamp in document.placedStamps { events.append(.stamp(stamp)) }
+        events.sort { $0.timestamp < $1.timestamp }   // stable: equal timestamps keep insertion order
+
+        // ── 2. Z-order stays as-authored (layerOrder); only playback order changes ─
+        let zLayerOrder = document.layerOrder
+
+        // Track accumulated lines per layer and stamps that have finished fading in
+        var layerLines: [UUID: [DrawingLine]] = [:]
+        var doneStamps: [PlacedStamp] = []
+
+        // Build a renderable snapshot from current accumulated state.
+        // overrideLines: substitute for layerLines while drawing a partial stroke.
+        // fadingStamp:   in-progress stamp (not yet in doneStamps).
+        func makeState(
+            overrideLines: [UUID: [DrawingLine]]? = nil,
+            fadingStamp: PlacedStamp? = nil
+        ) -> TimelapseState {
+            let ll = overrideLines ?? layerLines
+            let layers: [DrawingLayer] = document.drawingLayers.compactMap { tmpl in
+                guard let lines = ll[tmpl.id] else { return nil }
+                return DrawingLayer(id: tmpl.id, lines: lines, opacity: tmpl.opacity, createdAt: tmpl.createdAt)
+            }
+            var stamps = doneStamps
+            if let fs = fadingStamp { stamps.append(fs) }
+            let activeIds   = Set(ll.keys)
+            let doneIds     = Set(doneStamps.map { $0.id })
+            let fadingId    = fadingStamp?.id
+            let order = zLayerOrder.filter { entry in
+                switch entry {
+                case .drawing(let id): return activeIds.contains(id)
+                case .stamp(let id):   return id == fadingId || doneIds.contains(id)
+                }
+            }
+            return TimelapseState(drawingLayers: layers, stamps: stamps, layerOrder: order)
+        }
+
+        // ── 3. Process each event into frames ────────────────────────────────
         var states: [TimelapseState] = []
-        var completedLayers: [DrawingLayer] = []
-        var completedStamps: [PlacedStamp] = []
-        var completedOrder: [LayerEntry] = []
 
-        for entry in document.layerOrder {
-            switch entry {
+        for event in events {
+            switch event {
 
-            case .drawing(let id):
-                guard let layer = document.drawingLayers.first(where: { $0.id == id }) else { continue }
-                guard !layer.lines.isEmpty else {
-                    completedLayers.append(layer)
-                    completedOrder.append(.drawing(id))
+            case .stroke(let entry):
+                let line = entry.line
+                let layerId = entry.layerId
+                guard !line.points.isEmpty else {
+                    layerLines[layerId, default: []].append(line)
                     continue
                 }
-                var drawnLines: [DrawingLine] = []
-                for line in layer.lines {
-                    guard !line.points.isEmpty else { drawnLines.append(line); continue }
-                    var cursor = 0
-                    while cursor < line.points.count {
-                        let end = min(cursor + pointsPerFrame, line.points.count)
-                        var partial = line
-                        partial.points = Array(line.points[0..<end])
-                        partial.widths  = Array(line.widths.prefix(end))
-                        let partialLayer = DrawingLayer(
-                            id: layer.id,
-                            lines: drawnLines + [partial],
-                            opacity: layer.opacity
-                        )
-                        states.append(TimelapseState(
-                            drawingLayers: completedLayers + [partialLayer],
-                            stamps: completedStamps,
-                            layerOrder: completedOrder + [.drawing(id)]
-                        ))
-                        cursor = end
-                    }
-                    drawnLines.append(line)
+                // Reveal this stroke point-by-point (chunked for ~300 total frames)
+                var cursor = 0
+                while cursor < line.points.count {
+                    let end = min(cursor + pointsPerFrame, line.points.count)
+                    var partial = line
+                    partial.points = Array(line.points[0..<end])
+                    partial.widths = Array(line.widths.prefix(end))
+                    var tempLines = layerLines
+                    tempLines[layerId, default: []].append(partial)
+                    states.append(makeState(overrideLines: tempLines))
+                    cursor = end
                 }
-                completedLayers.append(layer)
-                completedOrder.append(.drawing(id))
+                layerLines[layerId, default: []].append(line)
 
-            case .stamp(let id):
-                guard let stamp = document.placedStamps.first(where: { $0.id == id }) else { continue }
+            case .stamp(let stamp):
+                // Fade stamp in over fadeSteps frames
                 for step in 1...fadeSteps {
                     var faded = stamp
                     faded.opacity = (Double(step) / Double(fadeSteps)) * stamp.opacity
-                    states.append(TimelapseState(
-                        drawingLayers: completedLayers,
-                        stamps: completedStamps + [faded],
-                        layerOrder: completedOrder + [.stamp(id)]
-                    ))
+                    states.append(makeState(fadingStamp: faded))
                 }
-                completedStamps.append(stamp)
-                completedOrder.append(.stamp(id))
+                doneStamps.append(stamp)
             }
         }
 

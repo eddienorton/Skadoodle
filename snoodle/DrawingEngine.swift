@@ -79,14 +79,16 @@ enum PenType: Equatable {
 
 // MARK: - Layer Model
 
-struct DrawingLayer: Identifiable, Codable {
+struct DrawingLayer: Identifiable {
     var id: UUID
     var lines: [DrawingLine]
     var opacity: Double = 1.0
-    init(id: UUID = UUID(), lines: [DrawingLine] = [], opacity: Double = 1.0) {
+    var createdAt: Date = Date()
+    init(id: UUID = UUID(), lines: [DrawingLine] = [], opacity: Double = 1.0, createdAt: Date = Date()) {
         self.id = id
         self.lines = lines
         self.opacity = opacity
+        self.createdAt = createdAt
     }
 }
 
@@ -121,6 +123,7 @@ struct DrawingLine {
     var isEraser: Bool
     var penType: PenType = .pencil
     var colorB: Color = .blue   // second color for dualTone pens
+    var timestamp: Date = Date()  // set at stroke commit; used for timelapse chronological ordering
 }
 
 // Holds mutable gesture flags that must be visible synchronously across events
@@ -222,7 +225,8 @@ struct DrawingCanvas: View {
                 let wasSwitched = gestureState.modeSwitch
                 gestureState.modeSwitch = false; gestureState.fired = false  // reset for next gesture
                 guard drawingEnabled || wasSwitched else { return }
-                if let line = currentLine, line.points.count > 1 {
+                if var line = currentLine, line.points.count > 1 {
+                    line.timestamp = Date()
                     lines.append(line)
                     if line.isEraser { onEraserCommitted?(line) }
                 }
@@ -297,7 +301,8 @@ struct DrawingCanvas: View {
                     defer { gestureState.modeSwitch = false; gestureState.fired = false }
                     guard drawingEnabled || gestureState.modeSwitch else { return }
                     if let line = currentLine, line.points.count > 1 {
-                        let finalLine = line
+                        var finalLine = line
+                        finalLine.timestamp = Date()
                         DispatchQueue.main.async {
                             var updated = lines
                             updated.append(finalLine)

@@ -93,6 +93,7 @@ struct IdentifiableInt: Identifiable, Equatable {
 
 struct PlacedStamp: Identifiable {
     var id: UUID = UUID()
+    var createdAt: Date = Date()
     var emoji: String
     var position: CGPoint
     var size: CGFloat
@@ -1272,6 +1273,36 @@ private struct TweakRepeatButton: View {
     }
 }
 
+// Layer-move button: tap → selection haptic + action; long press → jump to top/bottom.
+// Separate struct so it can hold @State for press-dimming without polluting StampMagicMenu.
+private struct _SideLPButton: View {
+    let icon: String
+    let color: Color
+    let onTap: () -> Void
+    let onLongPress: () -> Void
+    @State private var isPressed = false
+
+    var body: some View {
+        Image(systemName: icon)
+            .font(.system(size: 17))
+            .foregroundColor(color)
+            .frame(maxWidth: .infinity, minHeight: 44)
+            .contentShape(Rectangle())
+            .opacity(isPressed ? 0.35 : 1.0)
+            .animation(.easeOut(duration: 0.12), value: isPressed)
+            .onTapGesture {
+                UISelectionFeedbackGenerator().selectionChanged()
+                onTap()
+            }
+            .onLongPressGesture(minimumDuration: 0.5) { onLongPress() }
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in if !isPressed { isPressed = true } }
+                    .onEnded   { _ in isPressed = false }
+            )
+    }
+}
+
 struct StampMagicMenu: View {
     let stamp: PlacedStamp
     let canvasSize: CGSize
@@ -1405,17 +1436,12 @@ struct StampMagicMenu: View {
     }
 
     // Icon-only button with long-press for the narrow side panel (used for layer-move buttons)
-    // Short tap: onTap; long press (≥0.5s): onLongPress
+    // Short tap: onTap + selection haptic; long press (≥0.5s): onLongPress
+    // Extracted to _SideLPButton so it can carry @State for press-dimming.
     func sideButtonLP(_ icon: String, color: Color = .white,
                       onTap: @escaping () -> Void,
                       onLongPress: @escaping () -> Void) -> some View {
-        Image(systemName: icon)
-            .font(.system(size: 17))
-            .foregroundColor(color)
-            .frame(maxWidth: .infinity, minHeight: 44)
-            .contentShape(Rectangle())
-            .onTapGesture { onTap() }
-            .onLongPressGesture(minimumDuration: 0.5) { onLongPress() }
+        _SideLPButton(icon: icon, color: color, onTap: onTap, onLongPress: onLongPress)
     }
 
     // Icon-only button for the narrow side panel

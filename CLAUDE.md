@@ -12,10 +12,21 @@ Eddie Brayman, 72, independent iOS developer, East Village NYC. 50+ years coding
 **App Store URL:** https://apps.apple.com/us/app/skadoodle/id6771497563  
 **Bundle ID:** maxsdad.skadoodle  
 **Firebase project:** snoodle-68bfc  
-**Current version at last session:** 2.3 b4 (submitted June 28, 2026)
+**Current version at last session:** 2.3 b5 (submitted June 28, 2026)
 **Last released to App Store:** 2.2 (June 26, 2026 — Ready for Distribution)
 
 ---
+
+## In Progress — v2.3 b5 (submitted)
+
+### Fixes — v2.3 b5
+- **Canvas gestures bleed through text composer and color pickers** — `WindowPinchView.shouldReceive` now checks `blockGestures` flag (passed from DrawScreen); true whenever any sheet/picker is open over the canvas. (`DrawScreen.swift`)
+- **Layer up/down buttons dim on press + selection haptic** — `sideButtonLP` extracted to private `_SideLPButton` struct with `@State isPressed` + `DragGesture(minimumDistance:0)` for press state; `UISelectionFeedbackGenerator` fires on each tap. (`StampTools.swift`)
+- **extractAllLayersAsStamps firing accidentally on rapid layer-button taps** — disconnected `onBackgroundDoubleTap` from `extractAllLayersAsStamps`; now accessible only via BG chip `···` menu in layers panel. (`DrawScreen.swift`)
+- **Timelapse plays in creation order, not z-order** — `createdAt: Date` added to `DrawingLayer` and `PlacedStamp`; encoded as `timeIntervalSince1970` with `decodeIfPresent` fallback to epoch for old files (stable sort preserves z-order for them). `DoodleVideoExport` sorts `layerOrder` by `createdAt` before building state list. (`DrawingEngine.swift`, `StampTools.swift`, `DoodleFormat.swift`, `DoodleVideoExport.swift`)
+
+### Notes — v2.3 b5
+- Timelapse creation-order playback requires strategic layer creation to work well — especially around erasing. Acceptable as a power-user quirk for now; video feature is additive, not core. Will revisit.
 
 ## In Progress — v2.3 b4 (submitted)
 

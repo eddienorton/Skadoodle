@@ -69,7 +69,7 @@ extension PenType: Codable {
 
 extension DrawingLine: Codable {
     private enum CodingKeys: String, CodingKey {
-        case px, py, widths, color, colorB, lineWidth, isEraser, penType
+        case px, py, widths, color, colorB, lineWidth, isEraser, penType, timestamp
     }
 
     func encode(to encoder: Encoder) throws {
@@ -83,6 +83,7 @@ extension DrawingLine: Codable {
         try c.encode(Double(lineWidth),            forKey: .lineWidth)
         try c.encode(isEraser,                     forKey: .isEraser)
         try c.encode(penType,                      forKey: .penType)
+        try c.encode(timestamp.timeIntervalSince1970, forKey: .timestamp)
     }
 
     init(from decoder: Decoder) throws {
@@ -96,10 +97,37 @@ extension DrawingLine: Codable {
         lineWidth = CGFloat(try c.decode(Double.self, forKey: .lineWidth))
         isEraser  = try c.decode(Bool.self, forKey: .isEraser)
         penType   = try c.decode(PenType.self, forKey: .penType)
+        let ts    = try c.decodeIfPresent(Double.self, forKey: .timestamp)
+        timestamp = ts.map { Date(timeIntervalSince1970: $0) } ?? Date(timeIntervalSince1970: 0)
     }
 }
 
 // MARK: - Notification Names
+
+// MARK: - DrawingLayer Codable
+// Custom (not synthesized) so createdAt can use decodeIfPresent for old files.
+// Old files fall back to Date(timeIntervalSince1970: 0); stable sort preserves z-order for them.
+
+extension DrawingLayer: Codable {
+    private enum CodingKeys: String, CodingKey { case id, lines, opacity, createdAt }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id,        forKey: .id)
+        try c.encode(lines,     forKey: .lines)
+        try c.encode(opacity,   forKey: .opacity)
+        try c.encode(createdAt.timeIntervalSince1970, forKey: .createdAt)
+    }
+
+    init(from decoder: Decoder) throws {
+        let c   = try decoder.container(keyedBy: CodingKeys.self)
+        id      = try c.decode(UUID.self,         forKey: .id)
+        lines   = try c.decode([DrawingLine].self, forKey: .lines)
+        opacity = (try? c.decode(Double.self,     forKey: .opacity)) ?? 1.0
+        let ts  = try c.decodeIfPresent(Double.self, forKey: .createdAt)
+        createdAt = ts.map { Date(timeIntervalSince1970: $0) } ?? Date(timeIntervalSince1970: 0)
+    }
+}
 
 extension Notification.Name {
     static let snoodleReEditEntry = Notification.Name("snoodleReEditEntry")
@@ -168,6 +196,7 @@ extension PlacedStamp: Codable {
         case textColor, textBgColor, stampWidth, stampHeight
         case snugWidthRatio, snugHeightRatio
         case shadowEnabled, shadowColor, shadowBlur, shadowOffsetX, shadowOffsetY
+        case createdAt
     }
 
     func encode(to encoder: Encoder) throws {
@@ -199,6 +228,7 @@ extension PlacedStamp: Codable {
         try c.encode(shadowBlur,                  forKey: .shadowBlur)
         try c.encode(shadowOffsetX,               forKey: .shadowOffsetX)
         try c.encode(shadowOffsetY,               forKey: .shadowOffsetY)
+        try c.encode(createdAt.timeIntervalSince1970, forKey: .createdAt)
     }
 
     init(from decoder: Decoder) throws {
@@ -236,5 +266,7 @@ extension PlacedStamp: Codable {
         shadowBlur     = try c.decodeIfPresent(Double.self,        forKey: .shadowBlur)     ?? 4.0
         shadowOffsetX  = try c.decodeIfPresent(Double.self,        forKey: .shadowOffsetX)  ?? 2.0
         shadowOffsetY  = try c.decodeIfPresent(Double.self,        forKey: .shadowOffsetY)  ?? 2.0
+        let ts         = try c.decodeIfPresent(Double.self,        forKey: .createdAt)
+        createdAt      = ts.map { Date(timeIntervalSince1970: $0) } ?? Date(timeIntervalSince1970: 0)
     }
 }
