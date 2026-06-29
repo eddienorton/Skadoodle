@@ -12,8 +12,16 @@ Eddie Brayman, 72, independent iOS developer, East Village NYC. 50+ years coding
 **App Store URL:** https://apps.apple.com/us/app/skadoodle/id6771497563  
 **Bundle ID:** maxsdad.skadoodle  
 **Firebase project:** snoodle-68bfc  
-**Current version at last session:** 2.3 b7 (in progress June 28, 2026)
+**Current version at last session:** 2.4 b1 (in progress June 29, 2026)
 **Last released to App Store:** 2.2 (June 26, 2026 — Ready for Distribution)
+**In Review:** 2.3 b8
+
+---
+
+## In Progress — v2.4 b1
+
+### Fixes — v2.4 b1
+- **Timelapse needsFull path now O(all_layers) + O(current_layer × chunks)** — Previously, strokes on non-topmost layers called `rebuildComposite(overrideLines:)` per chunk: O(all_layers × chunks), ~130ms/chunk. Now pre-renders `belowComp` (opaque: canvas + bg + everything below the layer) and `aboveComp` (transparent: everything above the layer) once per stroke, then per chunk renders only the current layer in isolation with `canvasColor=.clear, backgroundImage=nil` and composites `belowComp → currentLayer → aboveComp`. Eraser with `.clear` canvas color punches transparent holes → `belowComp` shows through correctly. `aboveComp` always stays on top. (`DoodleVideoExport.swift`)
 
 ---
 

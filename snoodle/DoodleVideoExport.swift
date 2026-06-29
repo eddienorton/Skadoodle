@@ -417,55 +417,139 @@ final class DoodleTimelapseExporter: ObservableObject {
                     continue
                 }
 
-                // When this layer has drawn content above it in z-order, incremental
-                // compositing would incorrectly place new pixels on top. Fall back to
-                // rebuildComposite per chunk so z-order is always correct.
                 let needsFull = hasContentAbove(layerId: layerId)
 
-                if line.isEraser {
+                if needsFull {
+                    // Optimized z-order–correct path — O(all_layers) setup, O(1) per chunk:
+                    //
+                    // 1. Pre-render belowComp (opaque) and aboveComp (transparent) once per stroke.
+                    // 2. Pre-render prevLayerImg (all accumulated strokes for this layer) once per stroke.
+                    // 3. Per chunk:
+                    //    • Regular stroke: composite belowComp + prevLayerImg + partialDelta + aboveComp
+                    //    • Eraser: punch the partial eraser path as a .destinationOut mask into
+                    //      prevLayerImg → holeyImg; composite belowComp + holeyImg + aboveComp.
+                    //      Holes in holeyImg are transparent → belowComp shows through (correct reveal).
+
+                    guard let layerIdxInOrder = zLayerOrder.firstIndex(where: { $0.id == layerId }),
+                          let layerTmpl = document.drawingLayers.first(where: { $0.id == layerId }) else {
+                        layerLines[layerId, default: []].append(line); continue
+                    }
+
+                    let belowEntries = Array(zLayerOrder[0..<layerIdxInOrder])
+                    let aboveEntries = Array(zLayerOrder[(layerIdxInOrder + 1)...])
+                    let doneIds = Set(doneStamps.map { $0.id })
+
+                    func splitLayers(_ entries: [LayerEntry]) -> [DrawingLayer] {
+                        entries.compactMap { e -> DrawingLayer? in
+                            guard case .drawing(let id) = e,
+                                  let lines = layerLines[id],
+                                  let tmpl  = document.drawingLayers.first(where: { $0.id == id })
+                            else { return nil }
+                            return DrawingLayer(id: id, lines: lines, opacity: tmpl.opacity, createdAt: tmpl.createdAt)
+                        }
+                    }
+                    func splitStamps(_ entries: [LayerEntry]) -> [PlacedStamp] {
+                        doneStamps.filter { s in entries.contains(where: { $0.id == s.id }) }
+                    }
+                    func splitOrder(_ entries: [LayerEntry]) -> [LayerEntry] {
+                        entries.filter { e in
+                            switch e {
+                            case .drawing(let id): return layerLines[id] != nil
+                            case .stamp(let id):   return doneIds.contains(id)
+                            }
+                        }
+                    }
+
+                    // Below: opaque — canvas + bg + all content below this layer
+                    let belowComp = renderCanvasWithStamps(
+                        drawingLayers: splitLayers(belowEntries), stamps: splitStamps(belowEntries),
+                        layerOrder: splitOrder(belowEntries), size: pointSize,
+                        canvasColor: canvasUIColor, backgroundImage: bgImage,
+                        backgroundOffset: bgOffset,
+                        bgOpacity: document.bgOpacity, bgBlur: document.bgBlur,
+                        bgBrightness: document.bgBrightness, bgSaturation: document.bgSaturation
+                    )
+                    // Above: transparent — all content above this layer
+                    let aboveComp = renderCanvasWithStamps(
+                        drawingLayers: splitLayers(aboveEntries), stamps: splitStamps(aboveEntries),
+                        layerOrder: splitOrder(aboveEntries), size: pointSize,
+                        canvasColor: .clear, backgroundImage: nil, backgroundOffset: .zero,
+                        bgOpacity: 1.0, bgBlur: 0.0, bgBrightness: 0.0, bgSaturation: 1.0
+                    )
+
+                    // prevLayerImg: all previously accumulated strokes in this layer, transparent bg.
+                    // Pre-rendered once — per chunk only adds the small delta on top.
+                    let prevLines = layerLines[layerId, default: []]
+                    let prevLayerImg: UIImage = {
+                        guard !prevLines.isEmpty else {
+                            return UIGraphicsImageRenderer(size: pointSize, format: eraserDeltaFormat).image { _ in }
+                        }
+                        let prevLayer = DrawingLayer(id: layerId, lines: prevLines,
+                                                     opacity: layerTmpl.opacity, createdAt: layerTmpl.createdAt)
+                        return renderCanvasWithStamps(
+                            drawingLayers: [prevLayer], stamps: [], layerOrder: [.drawing(layerId)],
+                            size: pointSize, canvasColor: .clear, backgroundImage: nil,
+                            backgroundOffset: .zero,
+                            bgOpacity: 1.0, bgBlur: 0.0, bgBrightness: 0.0, bgSaturation: 1.0
+                        )
+                    }()
+
                     let eraserWidth = line.lineWidth
                     var cursor = 0
                     while cursor < line.points.count {
                         let end = min(cursor + pointsPerFrame, line.points.count)
-                        let segStart = cursor == 0 ? 0 : cursor - 1
-                        let segPoints = Array(line.points[segStart..<end])
 
                         let composited: UIImage
-                        if needsFull {
-                            // Build partial eraser line to include in rebuildComposite
-                            var partialEraser = line
-                            partialEraser.points = Array(line.points[0..<end])
-                            partialEraser.widths  = Array(line.widths.prefix(end))
-                            var tempLines = layerLines
-                            tempLines[layerId, default: []].append(partialEraser)
-                            composited = rebuildComposite(overrideLines: tempLines)
-                        } else {
-                            // Incremental eraser delta: O(1) per chunk
-                            let eraserDelta = UIGraphicsImageRenderer(size: pointSize, format: eraserDeltaFormat).image { ctx in
-                                guard !segPoints.isEmpty else { return }
+                        if line.isEraser {
+                            // Build an opaque mask for the partial eraser path (points[0..<end]).
+                            // .destinationOut will punch transparent holes into prevLayerImg at the
+                            // eraser shape — holes then show belowComp when composited below.
+                            let partialPts = Array(line.points[0..<end])
+                            let eraserMask = UIGraphicsImageRenderer(size: pointSize, format: eraserDeltaFormat).image { ctx in
                                 let cgCtx = ctx.cgContext
-                                cgCtx.saveGState()
-                                if segPoints.count == 1 {
-                                    let pt = segPoints[0]
-                                    let r = eraserWidth / 2
+                                UIColor.black.setFill()
+                                if partialPts.count == 1 {
+                                    let pt = partialPts[0]; let r = eraserWidth / 2
                                     cgCtx.addEllipse(in: CGRect(x: pt.x - r, y: pt.y - r,
                                                                  width: eraserWidth, height: eraserWidth))
-                                    cgCtx.clip()
+                                    cgCtx.fillPath()
                                 } else {
-                                    cgCtx.move(to: segPoints[0])
-                                    for pt in segPoints.dropFirst() { cgCtx.addLine(to: pt) }
+                                    cgCtx.move(to: partialPts[0])
+                                    for pt in partialPts.dropFirst() { cgCtx.addLine(to: pt) }
                                     cgCtx.setLineWidth(eraserWidth)
                                     cgCtx.setLineCap(.round)
                                     cgCtx.setLineJoin(.round)
                                     cgCtx.replacePathWithStrokedPath()
-                                    cgCtx.clip()
+                                    cgCtx.fillPath()
                                 }
-                                bgBaseImage.draw(at: .zero)
-                                cgCtx.restoreGState()
+                            }
+                            let holeyImg = UIGraphicsImageRenderer(size: pointSize, format: eraserDeltaFormat).image { _ in
+                                prevLayerImg.draw(at: .zero)
+                                eraserMask.draw(at: .zero, blendMode: .destinationOut, alpha: 1.0)
                             }
                             composited = UIGraphicsImageRenderer(size: pointSize, format: imgFormat).image { _ in
-                                runningComposite.draw(at: .zero)
-                                eraserDelta.draw(at: .zero)
+                                belowComp.draw(at: .zero)
+                                holeyImg.draw(at: .zero)
+                                aboveComp.draw(at: .zero)
+                            }
+                        } else {
+                            // Render only the growing partial stroke on transparent bg — O(1).
+                            var partial = line
+                            partial.points = Array(line.points[0..<end])
+                            partial.widths = Array(line.widths.prefix(end))
+                            let partialLayer = DrawingLayer(id: layerId, lines: [partial],
+                                                            opacity: layerTmpl.opacity, createdAt: layerTmpl.createdAt)
+                            let partialDelta = renderCanvasWithStamps(
+                                drawingLayers: [partialLayer], stamps: [], layerOrder: [.drawing(layerId)],
+                                size: pointSize, canvasColor: .clear, backgroundImage: nil,
+                                backgroundOffset: .zero,
+                                bgOpacity: 1.0, bgBlur: 0.0, bgBrightness: 0.0, bgSaturation: 1.0
+                            )
+                            composited = UIGraphicsImageRenderer(size: pointSize, format: imgFormat).image { _ in
+                                belowComp.draw(at: .zero)
+                                prevLayerImg.draw(at: .zero)
+                                partialDelta.draw(at: .zero)
+                                aboveComp.draw(at: .zero)
                             }
                         }
 
@@ -485,46 +569,82 @@ final class DoodleTimelapseExporter: ObservableObject {
                     }
                     layerLines[layerId, default: []].append(line)
 
-                } else {
-                    let layerOpacity   = document.drawingLayers.first(where: { $0.id == layerId })?.opacity   ?? 1.0
-                    let layerCreatedAt = document.drawingLayers.first(where: { $0.id == layerId })?.createdAt ?? Date()
-
+                } else if line.isEraser {
+                    // Fast incremental eraser delta: O(1) per chunk.
+                    // Clips stroke path, paints bgBaseImage pixels inside → composites onto runningComposite.
+                    let eraserWidth = line.lineWidth
                     var cursor = 0
                     while cursor < line.points.count {
                         let end = min(cursor + pointsPerFrame, line.points.count)
+                        let segStart = cursor == 0 ? 0 : cursor - 1
+                        let segPoints = Array(line.points[segStart..<end])
 
+                        let eraserDelta = UIGraphicsImageRenderer(size: pointSize, format: eraserDeltaFormat).image { ctx in
+                            guard !segPoints.isEmpty else { return }
+                            let cgCtx = ctx.cgContext
+                            cgCtx.saveGState()
+                            if segPoints.count == 1 {
+                                let pt = segPoints[0]
+                                let r = eraserWidth / 2
+                                cgCtx.addEllipse(in: CGRect(x: pt.x - r, y: pt.y - r,
+                                                             width: eraserWidth, height: eraserWidth))
+                                cgCtx.clip()
+                            } else {
+                                cgCtx.move(to: segPoints[0])
+                                for pt in segPoints.dropFirst() { cgCtx.addLine(to: pt) }
+                                cgCtx.setLineWidth(eraserWidth)
+                                cgCtx.setLineCap(.round)
+                                cgCtx.setLineJoin(.round)
+                                cgCtx.replacePathWithStrokedPath()
+                                cgCtx.clip()
+                            }
+                            bgBaseImage.draw(at: .zero)
+                            cgCtx.restoreGState()
+                        }
+                        let composited = UIGraphicsImageRenderer(size: pointSize, format: imgFormat).image { _ in
+                            runningComposite.draw(at: .zero)
+                            eraserDelta.draw(at: .zero)
+                        }
+                        runningComposite = composited
+                        guard let buf = pixelBuffer(from: composited, pixelSize: pixelSize, pool: pool) else {
+                            cursor = end; continue
+                        }
+                        holdBuffer = buf
+                        await append(buf, at: frameIndex)
+                        frameIndex += 1
+                        cursor = end
+
+                        if frameIndex % 50 == 0 {
+                            progress = Double(frameIndex) / Double(totalFrames)
+                            await Task.yield()
+                        }
+                    }
+                    layerLines[layerId, default: []].append(line)
+
+                } else {
+                    // Fast incremental stroke delta: render only this partial stroke, composite on top.
+                    let layerOpacity   = document.drawingLayers.first(where: { $0.id == layerId })?.opacity   ?? 1.0
+                    let layerCreatedAt = document.drawingLayers.first(where: { $0.id == layerId })?.createdAt ?? Date()
+                    var cursor = 0
+                    while cursor < line.points.count {
+                        let end = min(cursor + pointsPerFrame, line.points.count)
                         var partial = line
                         partial.points = Array(line.points[0..<end])
                         partial.widths = Array(line.widths.prefix(end))
 
-                        let composited: UIImage
-                        if needsFull {
-                            // Full rebuild so content above this layer stays on top
-                            var tempLines = layerLines
-                            tempLines[layerId, default: []].append(partial)
-                            composited = rebuildComposite(overrideLines: tempLines)
-                        } else {
-                            // Incremental delta: render only this partial stroke, composite on top
-                            let deltaLayer = DrawingLayer(
-                                id: layerId, lines: [partial],
-                                opacity: layerOpacity, createdAt: layerCreatedAt
-                            )
-                            let deltaImg = renderCanvasWithStamps(
-                                drawingLayers: [deltaLayer],
-                                stamps: [],
-                                layerOrder: [.drawing(layerId)],
-                                size: pointSize,
-                                canvasColor: UIColor.clear,
-                                backgroundImage: nil,
-                                backgroundOffset: .zero,
-                                bgOpacity: 1.0, bgBlur: 0.0, bgBrightness: 0.0, bgSaturation: 1.0
-                            )
-                            composited = UIGraphicsImageRenderer(size: pointSize, format: imgFormat).image { _ in
-                                runningComposite.draw(at: .zero)
-                                deltaImg.draw(at: .zero)
-                            }
+                        let deltaLayer = DrawingLayer(id: layerId, lines: [partial],
+                                                      opacity: layerOpacity, createdAt: layerCreatedAt)
+                        let deltaImg = renderCanvasWithStamps(
+                            drawingLayers: [deltaLayer], stamps: [],
+                            layerOrder: [.drawing(layerId)],
+                            size: pointSize, canvasColor: UIColor.clear,
+                            backgroundImage: nil, backgroundOffset: .zero,
+                            bgOpacity: 1.0, bgBlur: 0.0, bgBrightness: 0.0, bgSaturation: 1.0
+                        )
+                        let composited = UIGraphicsImageRenderer(size: pointSize, format: imgFormat).image { _ in
+                            runningComposite.draw(at: .zero)
+                            deltaImg.draw(at: .zero)
                         }
-
                         runningComposite = composited
                         guard let buf = pixelBuffer(from: composited, pixelSize: pixelSize, pool: pool) else {
                             cursor = end; continue
