@@ -12,10 +12,17 @@ Eddie Brayman, 72, independent iOS developer, East Village NYC. 50+ years coding
 **App Store URL:** https://apps.apple.com/us/app/skadoodle/id6771497563  
 **Bundle ID:** maxsdad.skadoodle  
 **Firebase project:** snoodle-68bfc  
-**Current version at last session:** 2.3 b5 (submitted June 28, 2026)
+**Current version at last session:** 2.3 b7 (in progress June 28, 2026)
 **Last released to App Store:** 2.2 (June 26, 2026 — Ready for Distribution)
 
 ---
+
+## In Progress — v2.3 b7
+
+### Fixes — v2.3 b7
+- **Text stamp composer colors/shadow not persisting** — `selectedTextColor`, `selectedTextBgColor`, `shadowEnabled`, `shadowColor`, `shadowBlur`, `shadowOffsetX/Y` were all `@State` in `TextComposerSheet`, resetting to defaults on every open. Fix: added `_tcLoadColor`/`_tcSaveColor` private helpers (RGBA stored as `[Double]` in UserDefaults). State vars now load from UserDefaults at init. Values are written back to UserDefaults in the `onPlace` closure. Edit-stamp path (`onAppear` overrides) unchanged. (`StampTools.swift`)
+- **Eraser opacity ignored on live canvas** — When a background image was set at opacity < 1, the eraser painted a semi-transparent version of the image onto the drawing layer, which then double-composited with the background image layer below in the ZStack, making erased areas appear more opaque than undrawn regions. Fix: `_BgEffectsImageCache` now produces a **fully opaque** pre-composited image (image at bgOpacity over the base canvas color) instead of a semi-transparent one. `DrawingLayerCanvas` gains a `baseCanvasColor` param (the actual selected canvas color, not `.clear`); `renderLine` and `drawEraserLine` gain the same param and forward it to the cache. (`DrawingEngine.swift`, `DrawScreen.swift`)
+- **Video shows black in erased areas** — In the export/video path, `renderLine` was called with `canvasColor = canvasSwiftUI` (solid, e.g., black). `drawEraserLine`'s condition checked `canvasColor != .clear` first, so it painted the solid canvas color instead of the background image. Fix: `drawEraserLine` now checks for `backgroundImage` first (before `canvasColor`), so the image path is always used when a background image is present regardless of `canvasColor`. `renderCanvasWithStamps` computes `eraserBgImage` — a fully opaque pre-composited image — and passes it as `backgroundImage` to `renderLine` for drawing layers, fixing the double-opacity issue in the export path too. (`DrawingEngine.swift`, `StampTools.swift`)
 
 ## In Progress — v2.3 b5 (submitted)
 
@@ -122,6 +129,7 @@ Fully self-contained. Reads `SkadoodleDocument`, generates an MP4 timelapse, and
 
 ### Pending
 - **Website Firebase deploy** — Skadoodle website (skadoodle.nyc, Firebase Hosting) was updated with v2.2 marketing content and committed to GitHub (username: `eddienorton`, repo: `skadoodle-website`). Firebase deploy must be run from Eddie's terminal (`npx firebase deploy --only hosting` from `/Users/edwardbrayman/Development/Website/skadoodle`).
+- ~~**Timelapse eraser optimization**~~ — **Done (v2.3 b8).** Eraser strokes now use incremental delta rendering: `bgBaseImage` (canvas + processed background, captured before the event loop) is painted into a transparent delta image clipped to each new stroke segment, then composited onto `runningComposite` with source-over. O(1) per chunk. `makeFullRender` removed.
 
 ---
 

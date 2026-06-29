@@ -263,10 +263,9 @@ struct SnoodleTile: View {
                                         .padding(4)
                                 }
                             }
-                            .overlay(alignment: .bottomTrailing) {
+                            .overlay(alignment: .bottom) {
                                 if entry.hasSkadoodleFile {
                                     TilePlayBadge(entry: entry)
-                                        .padding(6)
                                 }
                             }
                     } else {

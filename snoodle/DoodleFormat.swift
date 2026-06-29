@@ -143,6 +143,29 @@ extension FileManager {
     }
 }
 
+// MARK: - ChapterBreak
+
+/// A user-placed pause marker in the timelapse video timeline.
+/// Holds on the current frame for `holdDuration` seconds at this point in playback.
+struct ChapterBreak: Codable, Identifiable {
+    var id: UUID = UUID()
+    var timestamp: Date               // when the break was placed (for sorting into the event timeline)
+    var holdDuration: Double = 3.0    // seconds to hold (rendered as frames in the timelapse)
+}
+
+// MARK: - LayerOrderChange
+
+/// Records an explicit user-initiated layer reorder so the timelapse video can reproduce
+/// the effect at the right moment in the timeline.
+/// When encountered during playback, the composite is rebuilt in the new z-order —
+/// e.g. if the user moved a draw layer below a text stamp and then drew behind it,
+/// the video shows exactly that: stamp visible, drawing appearing underneath it.
+struct LayerOrderChange: Codable, Identifiable {
+    var id: UUID = UUID()
+    var timestamp: Date           // when the reorder happened
+    var layerOrder: [LayerEntry]  // complete new order after this change
+}
+
 // MARK: - SkadoodleDocument
 
 /// Top-level serializable snapshot of a complete doodle — everything needed to
@@ -162,6 +185,8 @@ struct SkadoodleDocument: Codable {
     var bgBlur: Double
     var bgBrightness: Double
     var bgSaturation: Double
+    var chapterBreaks: [ChapterBreak] = []          // user-placed pause markers for timelapse video
+    var layerOrderChanges: [LayerOrderChange] = []  // user-initiated reorder events for timelapse video playback
 }
 
 // MARK: - LayerEntry Codable

@@ -1077,6 +1077,20 @@ func renderCanvasWithStamps(drawingLayers: [DrawingLayer], stamps: [PlacedStamp]
         let needsProcessing = bgOpacity < 1.0 || bgBlur > 0 || bgBrightness != 0 || bgSaturation != 1.0
         return needsProcessing ? applyBgEffectsForExport(to: img, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation) : img
     }
+    // Pre-composite the background image against canvas color for eraser strokes in drawing layers.
+    // effectiveBgImage may be semi-transparent (bgOpacity < 1); painting those pixels via tiledImage
+    // onto a drawing layer that sits OVER the bg layer in the ZStack would double the opacity.
+    // eraserBgImage is fully opaque (image at bgOpacity composited over canvasColor) so eraser pixels
+    // exactly match what un-drawn areas look like without any double-opacity effect.
+    let eraserBgImage: UIImage? = effectiveBgImage.flatMap { img -> UIImage? in
+        guard bgOpacity < 1.0 else { return img }
+        UIGraphicsBeginImageContextWithOptions(img.size, true, img.scale)
+        defer { UIGraphicsEndImageContext() }
+        canvasColor.setFill()
+        UIRectFill(CGRect(origin: .zero, size: img.size))
+        img.draw(at: .zero)  // effectiveBgImage already has bgOpacity in its alpha channel
+        return UIGraphicsGetImageFromCurrentImageContext() ?? img
+    }
     let view = ZStack {
         // Canvas background color + background image
         Canvas { context, canvasSize in
@@ -1096,9 +1110,14 @@ func renderCanvasWithStamps(drawingLayers: [DrawingLayer], stamps: [PlacedStamp]
             switch entry {
             case .drawing(let layerId):
                 if let layer = drawingLayers.first(where: { $0.id == layerId }) {
-                    Canvas { context, _ in
+                    Canvas { context, size in
                         for line in layer.lines {
-                            renderLine(line, in: &context, canvasColor: canvasSwiftUI)
+                            // eraserBgImage is fully opaque (pre-composited) so eraser strokes paint
+                            // the correct background pixels without double-opacity.
+                            renderLine(line, in: &context, canvasColor: canvasSwiftUI,
+                                       backgroundImage: eraserBgImage,
+                                       backgroundOffset: backgroundOffset,
+                                       canvasSize: size)
                         }
                     }
                     .opacity(layer.opacity)
@@ -1349,55 +1368,52 @@ struct StampMagicMenu: View {
             }
 
             // ── Narrow strip — always visible while stamp is selected ──
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(spacing: 0) {
-                    stampThumb
-                        .padding(.top, 10)
-                        .padding(.bottom, 8)
+            VStack(spacing: 0) {
+                stampThumb
+                    .padding(.top, 10)
+                    .padding(.bottom, 4)
+                Capsule()
+                    .fill(Color.white.opacity(0.25))
+                    .frame(width: 20, height: 3)
+                    .padding(.bottom, 8)
 
-                    Divider()
+                Divider()
 
-                    sideButton("arrow.left.and.right")  { onTransform(.flipH) }
-                    sideButton("arrow.up.and.down")     { onTransform(.flipV) }
-                    sideButton("rotate.right")          { onTransform(.rotate90) }
-                    sideButton("plus.square.on.square") { onDupe?() }
-                    sideButtonLP("arrow.up.square",
-                                 onTap:       { onMoveLayer?(true, false) },
-                                 onLongPress: { onMoveLayer?(true, true)  })
-                    sideButtonLP("arrow.down.square",
-                                 onTap:       { onMoveLayer?(false, false) },
-                                 onLongPress: { onMoveLayer?(false, true)  })
-                    if stamp.isTextStamp {
-                        sideButton("pencil")            { onEdit?() }
-                    }
-                    // Settings button: tinted blue when tweak panel is open; tap toggles it
-                    sideButton("slider.horizontal.3",
-                               color: showTweak ? Color.accentColor : Color.white) {
-                        showTweak.toggle()
-                    }
-
-                    Divider()
-
-                    sideButton("trash", color: Color.red.opacity(0.85)) { onDelete?() }
-
-                    Divider()
-
-                    sideButton("xmark", color: Color.white.opacity(0.45)) { onDismiss() }
-                    Spacer().frame(height: 10)  // match top breathing room
+                sideButton("arrow.left.and.right")  { onTransform(.flipH) }
+                sideButton("arrow.up.and.down")     { onTransform(.flipV) }
+                sideButton("rotate.right")          { onTransform(.rotate90) }
+                sideButton("plus.square.on.square") { onDupe?() }
+                sideButtonLP("arrow.up.square",
+                             onTap:       { onMoveLayer?(true, false) },
+                             onLongPress: { onMoveLayer?(true, true)  })
+                sideButtonLP("arrow.down.square",
+                             onTap:       { onMoveLayer?(false, false) },
+                             onLongPress: { onMoveLayer?(false, true)  })
+                if stamp.isTextStamp {
+                    sideButton("pencil")            { onEdit?() }
                 }
+                sideButton("slider.horizontal.3",
+                           color: showTweak ? Color.accentColor : Color.white) {
+                    showTweak.toggle()
+                }
+                Divider()
+                sideButton("trash", color: Color.red.opacity(0.85)) { onDelete?() }
+                Divider()
+                sideButton("xmark", color: Color.white.opacity(0.45)) { onDismiss() }
+                Spacer().frame(height: 10)
             }
             .frame(width: 54)
-            .frame(maxHeight: canvasSize.height - 80)  // leave ~70pt clear at canvas bottom
             .background(Color.black.opacity(0.78), in: RoundedRectangle(cornerRadius: 14))
             .shadow(color: .black.opacity(0.25), radius: 10, x: -2, y: 2)
         }
-        // Apply the drag offset with .offset() — purely local @State, no binding writes
-        // during the gesture, so no parent re-render occurs mid-drag.
         .offset(x: accDrag.width + liveDrag.width, y: accDrag.height + liveDrag.height)
         .animation(.none, value: liveDrag)
         .animation(.none, value: accDrag)
         .onAppear { withAnimation(.none) { accDrag = initialOffset } }
-        .gesture(
+        .simultaneousGesture(
+            // simultaneousGesture (not .gesture) so the drag fires alongside child button/LP
+            // gestures instead of being blocked by them — fixes the "jumps on release" bug
+            // when dragging the panel starting from a button rather than the top area.
             DragGesture(minimumDistance: 4)
                 .onChanged { value in withAnimation(.none) { liveDrag = value.translation } }
                 .onEnded { value in
@@ -2044,6 +2060,17 @@ private struct _ColorPickerPresenter: UIViewRepresentable {
 
 // MARK: - Text Composer Sheet (standalone, accessed via T button)
 
+// UserDefaults helpers for persisting Color values (RGBA doubles stored as [Double] array).
+private func _tcLoadColor(_ key: String, default def: Color) -> Color {
+    guard let arr = UserDefaults.standard.array(forKey: key) as? [Double], arr.count == 4 else { return def }
+    return Color(.sRGB, red: arr[0], green: arr[1], blue: arr[2], opacity: arr[3])
+}
+private func _tcSaveColor(_ color: Color, key: String) {
+    var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+    UIColor(color).getRed(&r, green: &g, blue: &b, alpha: &a)
+    UserDefaults.standard.set([Double(r), Double(g), Double(b), Double(a)], forKey: key)
+}
+
 struct TextComposerSheet: View {
     var initialText: String? = nil
     var initialFontStyle: String? = nil
@@ -2061,13 +2088,18 @@ struct TextComposerSheet: View {
     @AppStorage("lastTextStampFontId")    private var selectedFontId: String = "system"
     @AppStorage("lastTextStampFontStyle") private var selectedFontStyle: String = "regular"
     @AppStorage("lastTextStampAlignment") private var selectedAlignment: String = "center"
-    @State private var selectedTextColor: Color = .black
-    @State private var selectedTextBgColor: Color = .clear
-    @State private var shadowEnabled: Bool = false
-    @State private var shadowColor: Color = .black
-    @State private var shadowBlur: Double = 4.0
-    @State private var shadowOffsetX: Double = 2.0
-    @State private var shadowOffsetY: Double = 2.0
+    // Colors and shadow can't use @AppStorage directly — loaded from UserDefaults at init,
+    // saved back to UserDefaults when the user places a stamp.
+    @State private var selectedTextColor: Color = _tcLoadColor("lastTextStampFgColor", default: .black)
+    @State private var selectedTextBgColor: Color = _tcLoadColor("lastTextStampBgColor", default: .clear)
+    @State private var shadowEnabled: Bool = UserDefaults.standard.bool(forKey: "lastTextStampShadowOn")
+    @State private var shadowColor: Color = _tcLoadColor("lastTextStampShadowColor", default: .black)
+    @State private var shadowBlur: Double = {
+        let v = UserDefaults.standard.double(forKey: "lastTextStampShadowBlur")
+        return v > 0 ? v : 4.0
+    }()
+    @State private var shadowOffsetX: Double = UserDefaults.standard.double(forKey: "lastTextStampShadowOffX")
+    @State private var shadowOffsetY: Double = UserDefaults.standard.double(forKey: "lastTextStampShadowOffY")
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -2092,6 +2124,14 @@ struct TextComposerSheet: View {
                 shadowOffsetX: $shadowOffsetX,
                 shadowOffsetY: $shadowOffsetY,
                 onPlace: { text, fontId, fontStyle, alignment, color, bgColor, shEnabled, shColor, shBlur, shOffX, shOffY in
+                    // Persist color/shadow settings so the next fresh stamp open restores them.
+                    _tcSaveColor(color, key: "lastTextStampFgColor")
+                    _tcSaveColor(bgColor, key: "lastTextStampBgColor")
+                    UserDefaults.standard.set(shEnabled, forKey: "lastTextStampShadowOn")
+                    _tcSaveColor(shColor, key: "lastTextStampShadowColor")
+                    UserDefaults.standard.set(shBlur, forKey: "lastTextStampShadowBlur")
+                    UserDefaults.standard.set(shOffX, forKey: "lastTextStampShadowOffX")
+                    UserDefaults.standard.set(shOffY, forKey: "lastTextStampShadowOffY")
                     onPlace(text, fontId, fontStyle, alignment, color, bgColor, shEnabled, shColor, shBlur, shOffX, shOffY)
                 }
             )

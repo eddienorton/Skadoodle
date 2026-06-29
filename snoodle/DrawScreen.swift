@@ -1103,6 +1103,10 @@ struct DrawScreen: View {
     /// True only when the user has explicitly tapped a drawing layer chip in the panel.
     /// Cleared on stamp placement and canvas tap so the next draw creates a new layer above any top stamp.
     @State private var explicitLayerSelection: Bool = false
+    /// Debounce task for periodic auto-save to current.skadoodle.
+    @State private var autoSaveTask: Task<Void, Never>? = nil
+    /// Tracks what the last committed stroke was, so pen↔eraser switches can auto-split layers.
+    @State private var lastStrokeWasEraser: Bool = false
     /// When set, onBeforeDraw inserts the new drawing layer just above this stamp id
     /// instead of appending to the top of the stack.
     @State private var pendingInsertAboveStampId: UUID? = nil
@@ -1272,12 +1276,19 @@ struct DrawScreen: View {
         }
     }
 
+    /// Record a layer reorder event for timelapse video playback.
+    /// Call immediately after any user-initiated change to layerOrder.
+    private func recordLayerOrderChange() {
+        layerOrderChanges.append(LayerOrderChange(timestamp: Date(), layerOrder: layerOrder))
+    }
+
     func moveLayerEntry(_ entry: LayerEntry, by delta: Int) {
         guard let idx = layerOrder.firstIndex(where: { $0.id == entry.id }) else { return }
         let newIdx = idx + delta
         guard newIdx >= 0 && newIdx < layerOrder.count else { return }
         pushUndoSnapshot()
         layerOrder.swapAt(idx, newIdx)
+        recordLayerOrderChange()
     }
 
     func deleteLayerEntry(_ entry: LayerEntry) {
@@ -1319,6 +1330,28 @@ struct DrawScreen: View {
             .frame(width: chipW, height: chipH)
             .clipped()
         }
+    }
+
+    /// Pre-render layer and stamp thumbnails for the video timeline chip strip.
+    /// Uses the same rendering as the layers panel — ImageRenderer at 2× scale for retina.
+    @MainActor
+    func generateTimelineThumbnails() -> [UUID: UIImage] {
+        let chipW: CGFloat = 72
+        let chipH: CGFloat = chipW   // square chips in the timeline
+        var result: [UUID: UIImage] = [:]
+        for layer in drawingLayers {
+            let view = AnyView(drawingLayerCanvas(lines: layer.lines, chipW: chipW, chipH: chipH))
+            let renderer = ImageRenderer(content: view)
+            renderer.scale = 2.0
+            if let img = renderer.uiImage { result[layer.id] = img }
+        }
+        for stamp in placedStamps {
+            let view = AnyView(stampChipContent(id: stamp.id, chipW: chipW, chipH: chipH))
+            let renderer = ImageRenderer(content: view)
+            renderer.scale = 2.0
+            if let img = renderer.uiImage { result[stamp.id] = img }
+        }
+        return result
     }
 
     @ViewBuilder
@@ -1806,6 +1839,7 @@ struct DrawScreen: View {
                             let movedEntry = reversed[source.first!]
                             reversed.move(fromOffsets: source, toOffset: destination)
                             layerOrder = reversed.reversed()
+                            recordLayerOrderChange()
                             switch movedEntry {
                             case .stamp(let id):
                                 activateStamp(id: id)
@@ -1983,10 +2017,10 @@ struct DrawScreen: View {
     /// Push undo snapshot and clear redo.
     // MARK: - .skadoodle save / load
 
-    /// Serialize the current canvas to a SkadoodleDocument and return JSON Data.
-    func saveSkadoodleData() -> Data? {
+    /// Build a SkadoodleDocument from current canvas state.
+    func currentSkadoodleDocument() -> SkadoodleDocument {
         let bgData = canvasBackgroundImage.flatMap { $0.jpegData(compressionQuality: 0.85) }
-        let doc = SkadoodleDocument(
+        return SkadoodleDocument(
             drawingLayers: drawingLayers,
             placedStamps: placedStamps,
             layerOrder: layerOrder,
@@ -1998,9 +2032,28 @@ struct DrawScreen: View {
             bgOpacity: bgOpacity,
             bgBlur: bgBlur,
             bgBrightness: bgBrightness,
-            bgSaturation: bgSaturation
+            bgSaturation: bgSaturation,
+            chapterBreaks: chapterBreaks,
+            layerOrderChanges: layerOrderChanges
         )
-        return try? JSONEncoder().encode(doc)
+    }
+
+    /// Serialize the current canvas to a SkadoodleDocument and return JSON Data.
+    func saveSkadoodleData() -> Data? {
+        return try? JSONEncoder().encode(currentSkadoodleDocument())
+    }
+
+    /// Schedule a save to current.skadoodle 2 seconds after the last stroke.
+    /// Cancels any pending save so rapid strokes only trigger one write.
+    func scheduleAutoSave() {
+        autoSaveTask?.cancel()
+        autoSaveTask = Task {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard !Task.isCancelled else { return }
+            if let data = saveSkadoodleData() {
+                try? data.write(to: FileManager.currentSkadoodleURL)
+            }
+        }
     }
 
     /// Restore canvas state from JSON Data previously produced by saveSkadoodleData().
@@ -2032,6 +2085,9 @@ struct DrawScreen: View {
         bgBlur = doc.bgBlur
         bgBrightness = doc.bgBrightness
         bgSaturation = doc.bgSaturation
+        chapterBreaks = doc.chapterBreaks
+        layerOrderChanges = doc.layerOrderChanges
+        lastStrokeWasEraser = false
         selectedStampId = nil
         showStampMagicMenu = false
         pendingInsertAboveStampId = nil
@@ -2110,6 +2166,10 @@ struct DrawScreen: View {
     @State private var savedBgSaturation: Double = 1.0
 
     @State private var showCanvasImagePicker: Bool = false
+    @State private var showVideoTimeline: Bool = false
+    @State private var chapterBreaks: [ChapterBreak] = []
+    @State private var layerOrderChanges: [LayerOrderChange] = []
+    @State private var timelineThumbnails: [UUID: UIImage] = [:]
     @ObservedObject private var auth = SnoodleAuthManager.shared
     @State private var showSignInForPost: Bool = false
     @State private var currentPenType: PenType = {
@@ -2332,8 +2392,19 @@ struct DrawScreen: View {
     func drawingLayerView(layer: DrawingLayer) -> some View {
         let liveLine: DrawingLine? = layer.id == eraserTargetLayerId ? currentLine : nil
         let bgColor: Color = canvasBackgroundImage != nil ? .clear : canvasColor
+        // Pre-process the background image using the same CIFilter pipeline as the video export path
+        // (renderCanvasWithStamps). Passing default effect params below makes drawEraserLine skip
+        // redundant cache processing (needsProcessing=false) and use the image directly — eliminating
+        // the CIFilter-vs-Metal mismatch that caused the eraser to leave a thin gray film.
+        let eraserBg: UIImage? = canvasBackgroundImage.map {
+            processedBackgroundForEraser($0, bgOpacity: bgOpacity, bgBlur: bgBlur,
+                                         bgBrightness: bgBrightness, bgSaturation: bgSaturation,
+                                         canvasColor: canvasColor)
+        }
         DrawingLayerCanvas(lines: layer.lines, currentLine: liveLine, canvasColor: bgColor,
-                           backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset)
+                           backgroundImage: eraserBg, backgroundOffset: backgroundOffset,
+                           bgOpacity: 1.0, bgBlur: 0.0, bgBrightness: 0.0, bgSaturation: 1.0,
+                           baseCanvasColor: canvasColor)
     }
 
     // Extracted into its own function so the compiler can type-check the callbacks independently
@@ -2446,6 +2517,7 @@ struct DrawScreen: View {
         let item = newOrder.remove(at: currentIdx)
         newOrder.insert(item, at: targetIdx)
         layerOrder = newOrder
+        recordLayerOrderChange()
     }
 
     // Auto-place the current stamp centered on the canvas when selected from picker
@@ -2650,6 +2722,31 @@ struct DrawScreen: View {
             width: min(maxX, max(-maxX, offset.width)),
             height: min(maxY, max(-maxY, offset.height))
         )
+    }
+
+    var videoTimelineButton: some View {
+        ZStack {
+            Circle()
+                .fill(showVideoTimeline ? Color.blue.opacity(0.15) : Color(white: 0.95))
+                .frame(width: 38, height: 38)
+                .overlay(Circle().stroke(showVideoTimeline ? Color.blue : Color.gray.opacity(0.4),
+                                         lineWidth: showVideoTimeline ? 2.5 : 1))
+            Image(systemName: "film")
+                .font(.system(size: 18))
+                .foregroundColor(showVideoTimeline ? .blue : .gray)
+        }
+        .onTapGesture {
+            timelineThumbnails = generateTimelineThumbnails()
+            showVideoTimeline = true
+        }
+        .sheet(isPresented: $showVideoTimeline) {
+            VideoTimelineView(
+                document: currentSkadoodleDocument(),
+                chapterBreaks: $chapterBreaks,
+                thumbnails: timelineThumbnails,
+                canvasSize: canvasSize
+            )
+        }
     }
 
     var canvasColorButton: some View {
@@ -2932,17 +3029,28 @@ struct DrawScreen: View {
                             onBeforeDraw: {
                                 if showLegacyImportBanner { withAnimation { showLegacyImportBanner = false } }
                                 pushUndoSnapshot()
+                                scheduleAutoSave()
                                 // Create a new layer when:
                                 // 1. No drawing layers exist (lazy first-stroke creation), or
                                 // 2. Top of stack is a stamp and no drawing layer is selected / stamp is selected
                                 //    (working at the front edge), or
                                 // 3. pendingInsertAboveStampId is set — user selected a stamp whose immediate
                                 //    neighbor above is another stamp; new layer inserts between them.
+                                // 4. Pen↔eraser switch — eraser and draw strokes live in separate layers so
+                                //    the video timeline can distinguish scenes from transitions.
                                 let topIsStamp = layerOrder.last.map { if case .stamp = $0 { return true } else { return false } } ?? false
+                                let switchingToEraser = isEraser && !lastStrokeWasEraser && !drawingLayers.isEmpty
+                                let switchingToPen    = !isEraser && lastStrokeWasEraser && !drawingLayers.isEmpty
                                 let needsNewLayer = drawingLayers.isEmpty ||
                                     (topIsStamp && !explicitLayerSelection) ||
-                                    pendingInsertAboveStampId != nil
+                                    pendingInsertAboveStampId != nil ||
+                                    switchingToEraser || switchingToPen
                                 if needsNewLayer {
+                                    // Auto-insert a 3s chapter break at draw→erase transitions so the
+                                    // finished scene holds before the wipe. No break on erase→draw.
+                                    if switchingToEraser {
+                                        chapterBreaks.append(ChapterBreak(timestamp: Date(), holdDuration: 3.0))
+                                    }
                                     let newLayer = DrawingLayer()
                                     drawingLayers.append(newLayer)
                                     if let insertAbove = pendingInsertAboveStampId,
@@ -2958,6 +3066,7 @@ struct DrawScreen: View {
                                     selectedStampId = nil
                                     showStampMagicMenu = false
                                 }
+                                lastStrokeWasEraser = isEraser
                             },
                             onEraserCommitted: { _ in },
                             onStampModeDragOnEmpty: { startPoint in
@@ -3083,7 +3192,8 @@ struct DrawScreen: View {
                             onBackgroundDoubleTap: nil,  // extract moved to BG chip ··· menu
                             blockGestures: showTextComposer || showPenStudio || showBgEditor ||
                                 showOpacitySheet || showCanvasBgSheet || showCanvasImagePicker ||
-                                showSignInForPost || showPenColorPicker || showCanvasColorPicker
+                                showSignInForPost || showPenColorPicker || showCanvasColorPicker ||
+                                showVideoTimeline
                         )
                         } // end stamps ZStack
                         .coordinateSpace(name: "stampCanvas")
@@ -3098,9 +3208,12 @@ struct DrawScreen: View {
 
                     VStack(spacing: 10) {
                         HStack(spacing: 8) {
+                            // Video timeline / chapter editor
+                            videoTimelineButton
+                                .padding(.leading, 16)
+
                             // Background color button — slightly larger, clearly different
                             canvasColorButton
-                                .padding(.leading, 16)
 
                             // Eraser — prominently placed next to background button
                             ZStack {
@@ -3340,6 +3453,8 @@ struct DrawScreen: View {
                                         layerOrder = stampEntries
                                         hiddenLayerIds = hiddenLayerIds.intersection(Set(placedStamps.map { $0.id }))
                                         userSelectedLayerId = nil
+                                        lastStrokeWasEraser = false
+                                        chapterBreaks = []
                                     } else if !placedStamps.isEmpty {
                                         // Only stamps — remove all stamps. Canvas is empty; first stroke creates a layer.
                                         placedStamps = []
@@ -3349,6 +3464,8 @@ struct DrawScreen: View {
                                         hiddenLayerIds = []
                                         selectedStampId = nil; showStampMagicMenu = false
                                         userSelectedLayerId = nil
+                                        lastStrokeWasEraser = false
+                                        chapterBreaks = []
                                     }
                                 } else {
                                     showClearSheet = true
@@ -3370,6 +3487,8 @@ struct DrawScreen: View {
                                     hiddenLayerIds = []
                                     selectedStampId = nil; showStampMagicMenu = false
                                     userSelectedLayerId = nil
+                                    lastStrokeWasEraser = false
+                                    chapterBreaks = []
                                 }
                                 if canvasBackgroundImage != nil {
                                     Button("Clear Background", role: .destructive) {
@@ -3388,6 +3507,8 @@ struct DrawScreen: View {
                                         layerOrder = stampEntries
                                         hiddenLayerIds = hiddenLayerIds.intersection(Set(placedStamps.map { $0.id }))
                                         userSelectedLayerId = nil
+                                        lastStrokeWasEraser = false
+                                        chapterBreaks = []
                                     }
                                 }
                                 if !placedStamps.isEmpty {

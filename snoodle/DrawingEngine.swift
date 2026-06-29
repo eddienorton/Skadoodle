@@ -327,6 +327,60 @@ struct DrawingCanvas: View {
     }
 }
 
+// MARK: - Background effects cache for eraser
+// Eraser shading paints the background image with effects applied. Cache the processed result
+// so CIFilters aren't re-applied on every Canvas redraw (which fires at ~60fps during drawing).
+// The cache always produces a FULLY OPAQUE image — when bgOpacity < 1, the image is pre-composited
+// against baseColor so the erased area exactly matches the visual appearance of un-drawn regions,
+// without double-opacity from the background image layer below in the ZStack.
+private final class _BgEffectsImageCache {
+    var sourceImage: UIImage?
+    var opacity: Double = 1; var blur: Double = 0; var brightness: Double = 0; var saturation: Double = 1
+    var baseColor: UIColor = .white
+    var processed: UIImage?
+
+    func get(_ img: UIImage, op: Double, bl: Double, br: Double, sa: Double, base: UIColor = .white) -> UIImage {
+        let needsProcessing = op < 1.0 || bl > 0 || br != 0 || sa != 1.0
+        guard needsProcessing else { return img }
+        if let cached = processed,
+           sourceImage === img,
+           opacity == op, blur == bl, brightness == br, saturation == sa,
+           baseColor == base { return cached }
+        // Apply color/blur effects at full opacity first, then composite against base color.
+        let colorProcessed = (bl > 0 || br != 0 || sa != 1.0)
+            ? applyBgEffectsForExport(to: img, bgOpacity: 1.0, bgBlur: bl, bgBrightness: br, bgSaturation: sa)
+            : img
+        // Always bake into a fully opaque image — CI processing (especially CIGaussianBlur) can
+        // produce a CGImage with an alpha channel even for fully-opaque source images. If the
+        // cached image has any alpha < 1, .tiledImage shading paints semi-transparent eraser
+        // strokes, leaving a gray film over whatever was drawn underneath.
+        UIGraphicsBeginImageContextWithOptions(colorProcessed.size, true, colorProcessed.scale)
+        defer { UIGraphicsEndImageContext() }
+        base.setFill()
+        UIRectFill(CGRect(origin: .zero, size: colorProcessed.size))
+        colorProcessed.draw(at: .zero, blendMode: .normal, alpha: CGFloat(op))
+        let result = UIGraphicsGetImageFromCurrentImageContext() ?? colorProcessed
+        sourceImage = img; opacity = op; blur = bl; brightness = br; saturation = sa; baseColor = base
+        processed = result
+        return result
+    }
+}
+private let _bgEffectsImageCache = _BgEffectsImageCache()
+
+/// Returns the background image pre-processed for eraser use — effects applied via CIFilter pipeline,
+/// result baked fully opaque. Uses the shared cache so repeated calls with same params are free.
+/// Pass the result to DrawingLayerCanvas as `backgroundImage` with default effect params
+/// (bgOpacity:1, bgBlur:0, bgBrightness:0, bgSaturation:1) so drawEraserLine's needsProcessing
+/// check is false and the image is used directly — identical to the video export path.
+func processedBackgroundForEraser(
+    _ img: UIImage,
+    bgOpacity: Double, bgBlur: Double, bgBrightness: Double, bgSaturation: Double,
+    canvasColor: Color
+) -> UIImage {
+    _bgEffectsImageCache.get(img, op: bgOpacity, bl: bgBlur, br: bgBrightness, sa: bgSaturation,
+                             base: UIColor(canvasColor))
+}
+
 // MARK: - Drawing Layer Canvas
 // Renders one drawing layer's committed lines plus the optional live-preview stroke.
 struct DrawingLayerCanvas: View {
@@ -335,10 +389,17 @@ struct DrawingLayerCanvas: View {
     let canvasColor: Color
     var backgroundImage: UIImage? = nil
     var backgroundOffset: CGSize = .zero
+    var bgOpacity: Double = 1.0
+    var bgBlur: Double = 0.0
+    var bgBrightness: Double = 0.0
+    var bgSaturation: Double = 1.0
+    /// The solid canvas color rendered below the background image in the ZStack.
+    /// Used by the eraser to pre-composite the image at bgOpacity → fully opaque pixels.
+    var baseCanvasColor: Color = .white
     var body: some View {
         Canvas { context, size in
-            for line in lines { renderLine(line, in: &context, canvasColor: canvasColor, backgroundImage: backgroundImage, backgroundOffset: backgroundOffset, canvasSize: size) }
-            if let c = currentLine { renderLine(c, in: &context, canvasColor: canvasColor, backgroundImage: backgroundImage, backgroundOffset: backgroundOffset, canvasSize: size) }
+            for line in lines { renderLine(line, in: &context, canvasColor: canvasColor, backgroundImage: backgroundImage, backgroundOffset: backgroundOffset, canvasSize: size, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation, baseCanvasColor: baseCanvasColor) }
+            if let c = currentLine { renderLine(c, in: &context, canvasColor: canvasColor, backgroundImage: backgroundImage, backgroundOffset: backgroundOffset, canvasSize: size, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation, baseCanvasColor: baseCanvasColor) }
         }
         .allowsHitTesting(false)
     }
@@ -621,11 +682,11 @@ class PencilTouchView: UIView {
 
 /// Single rendering function used by both the live SwiftUI Canvas and the UIImage export.
 /// All pen types are implemented here so they stay in sync.
-func renderLine(_ line: DrawingLine, in context: inout GraphicsContext, canvasColor: Color, backgroundImage: UIImage? = nil, backgroundOffset: CGSize = .zero, canvasSize: CGSize = .zero) {
+func renderLine(_ line: DrawingLine, in context: inout GraphicsContext, canvasColor: Color, backgroundImage: UIImage? = nil, backgroundOffset: CGSize = .zero, canvasSize: CGSize = .zero, bgOpacity: Double = 1.0, bgBlur: Double = 0.0, bgBrightness: Double = 0.0, bgSaturation: Double = 1.0, baseCanvasColor: Color = .white) {
     guard line.points.count > 0 else { return }
 
     if line.isEraser {
-        drawEraserLine(line, in: &context, canvasColor: canvasColor, backgroundImage: backgroundImage, backgroundOffset: backgroundOffset, canvasSize: canvasSize)
+        drawEraserLine(line, in: &context, canvasColor: canvasColor, backgroundImage: backgroundImage, backgroundOffset: backgroundOffset, canvasSize: canvasSize, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation, baseCanvasColor: baseCanvasColor)
         return
     }
 
@@ -660,30 +721,33 @@ private func strokeTaper(i: Int, count: Int, taperFraction: CGFloat) -> CGFloat 
     return 1.0
 }
 
-private func drawEraserLine(_ line: DrawingLine, in context: inout GraphicsContext, canvasColor: Color, backgroundImage: UIImage? = nil, backgroundOffset: CGSize = .zero, canvasSize: CGSize = .zero) {
+private func drawEraserLine(_ line: DrawingLine, in context: inout GraphicsContext, canvasColor: Color, backgroundImage: UIImage? = nil, backgroundOffset: CGSize = .zero, canvasSize: CGSize = .zero, bgOpacity: Double = 1.0, bgBlur: Double = 0.0, bgBrightness: Double = 0.0, bgSaturation: Double = 1.0, baseCanvasColor: Color = .white) {
     let baseW = line.lineWidth
     let count = line.points.count
 
-    // Determine what the eraser paints:
-    //   - Solid background: paint canvasColor (covers stamps and layers below, same as pen)
-    //   - Image background: paint the background image pixels at the correct canvas position
-    //     using tiledImage shading — identical mechanism to canvasColor, just image-sourced
+    // Determine what the eraser paints.
+    // Background image takes priority over solid canvas color so eraser works correctly
+    // in both the live canvas (canvasColor=.clear when bg image set) and the export path
+    // (canvasColor=solid but backgroundImage still present).
+    // The cache produces a fully opaque composite (image at bgOpacity over baseCanvasColor)
+    // so erased pixels exactly match undrawn regions without double-opacity from the bg layer below.
     let shading: GraphicsContext.Shading
-    if canvasColor != Color.clear {
-        shading = .color(canvasColor)
-    } else if let bgImg = backgroundImage, canvasSize.width > 0, canvasSize.height > 0,
-              bgImg.size.width > 0, bgImg.size.height > 0 {
+    if let bgImg = backgroundImage, canvasSize.width > 0, canvasSize.height > 0,
+       bgImg.size.width > 0, bgImg.size.height > 0 {
         // Cover-fit the image to canvas, matching the SwiftUI background layer rendering exactly.
         // bgImg.size is in points (UIImage.size always returns points regardless of image scale).
-        let coverScale = max(canvasSize.width / bgImg.size.width, canvasSize.height / bgImg.size.height)
-        let scaledW = bgImg.size.width * coverScale
-        let scaledH = bgImg.size.height * coverScale
+        let effectiveImg = _bgEffectsImageCache.get(bgImg, op: bgOpacity, bl: bgBlur, br: bgBrightness, sa: bgSaturation, base: UIColor(baseCanvasColor))
+        let coverScale = max(canvasSize.width / effectiveImg.size.width, canvasSize.height / effectiveImg.size.height)
+        let scaledW = effectiveImg.size.width * coverScale
+        let scaledH = effectiveImg.size.height * coverScale
         // Center then apply user pan offset — same as the SwiftUI layer
         let originX = (canvasSize.width - scaledW) / 2 + backgroundOffset.width
         let originY = (canvasSize.height - scaledH) / 2 + backgroundOffset.height
-        shading = .tiledImage(Image(uiImage: bgImg),
+        shading = .tiledImage(Image(uiImage: effectiveImg),
                               origin: CGPoint(x: originX, y: originY),
                               scale: coverScale)
+    } else if canvasColor != Color.clear {
+        shading = .color(canvasColor)
     } else {
         return  // canvas is clear with no background — nothing to erase to
     }

@@ -10,6 +10,8 @@
 import AVFoundation
 import AVKit
 import Combine
+import CoreImage
+import Metal
 import SwiftUI
 
 // MARK: - Timelapse Exporter
@@ -17,8 +19,17 @@ import SwiftUI
 @MainActor
 final class DoodleTimelapseExporter: ObservableObject {
     @Published var isExporting = false
+    @Published var progress: Double = 0      // 0.0 → 1.0 while exporting
 
     private var cancelled = false
+
+    // Metal-backed CIContext shared across all frames — avoids per-frame GPU context setup
+    private static let ciContext: CIContext = {
+        if let device = MTLCreateSystemDefaultDevice() {
+            return CIContext(mtlDevice: device, options: [.workingColorSpace: NSNull()])
+        }
+        return CIContext(options: [.useSoftwareRenderer: false])
+    }()
 
     func cancel() { cancelled = true }
 
@@ -31,6 +42,7 @@ final class DoodleTimelapseExporter: ObservableObject {
     ) {
         guard !isExporting else { return }
         isExporting = true
+        progress = 0
         cancelled = false
 
         Task { [weak self] in
@@ -41,6 +53,7 @@ final class DoodleTimelapseExporter: ObservableObject {
                 pixelSize: pixelSize,
                 date: date
             )
+            self.progress = url != nil ? 1 : 0
             self.isExporting = false
             completion(url)
         }
@@ -68,10 +81,14 @@ final class DoodleTimelapseExporter: ObservableObject {
         enum Event {
             case stroke(StrokeEntry)
             case stamp(PlacedStamp)
+            case chapter(ChapterBreak)
+            case reorder(LayerOrderChange)
             var timestamp: Date {
                 switch self {
-                case .stroke(let s): return s.line.timestamp
-                case .stamp(let p):  return p.createdAt
+                case .stroke(let s):   return s.line.timestamp
+                case .stamp(let p):    return p.createdAt
+                case .chapter(let c):  return c.timestamp
+                case .reorder(let r):  return r.timestamp
                 }
             }
         }
@@ -81,10 +98,12 @@ final class DoodleTimelapseExporter: ObservableObject {
             for line in layer.lines { events.append(.stroke(StrokeEntry(line: line, layerId: layer.id))) }
         }
         for stamp in document.placedStamps { events.append(.stamp(stamp)) }
+        for cb in document.chapterBreaks   { events.append(.chapter(cb)) }
+        for rc in document.layerOrderChanges { events.append(.reorder(rc)) }
         events.sort { $0.timestamp < $1.timestamp }   // stable: equal timestamps keep insertion order
 
-        // ── 2. Z-order stays as-authored (layerOrder); only playback order changes ─
-        let zLayerOrder = document.layerOrder
+        // ── 2. Z-order: starts as document.layerOrder, updated by reorder events ──
+        var zLayerOrder = document.layerOrder
 
         // Track accumulated lines per layer and stamps that have finished fading in
         var layerLines: [UUID: [DrawingLine]] = [:]
@@ -151,6 +170,17 @@ final class DoodleTimelapseExporter: ObservableObject {
                     states.append(makeState(fadingStamp: faded))
                 }
                 doneStamps.append(stamp)
+
+            case .chapter(let cb):
+                // Hold on current frame for the chapter break duration
+                let holdFrameCount = max(1, Int(cb.holdDuration * 30))
+                let holdState = makeState()
+                for _ in 0..<holdFrameCount { states.append(holdState) }
+
+            case .reorder(let rc):
+                // User reordered layers — update z-order and emit one frame showing the new arrangement
+                zLayerOrder = rc.layerOrder
+                states.append(makeState())
             }
         }
 
@@ -173,20 +203,67 @@ final class DoodleTimelapseExporter: ObservableObject {
         date: Date
     ) async -> URL? {
 
-        let states = buildStates(document: document)
-        guard !states.isEmpty else { return nil }
+        // Yield immediately so SwiftUI can render isExporting=true before we start blocking work
+        await Task.yield()
+
+        // ── Build sorted event list (same logic as buildStates) ──────────────
+        let totalPoints = document.drawingLayers.flatMap { $0.lines }.reduce(0) { $0 + $1.points.count }
+        let pointsPerFrame = max(3, totalPoints / 300)   // ~300 render steps for drawing
+        let fadeSteps = 8
+
+        struct StrokeEntry { let line: DrawingLine; let layerId: UUID }
+        enum Event {
+            case stroke(StrokeEntry)
+            case stamp(PlacedStamp)
+            case chapter(ChapterBreak)
+            case reorder(LayerOrderChange)
+            var timestamp: Date {
+                switch self {
+                case .stroke(let s):   return s.line.timestamp
+                case .stamp(let p):    return p.createdAt
+                case .chapter(let c):  return c.timestamp
+                case .reorder(let r):  return r.timestamp
+                }
+            }
+        }
+
+        var events: [Event] = []
+        for layer in document.drawingLayers {
+            for line in layer.lines { events.append(.stroke(StrokeEntry(line: line, layerId: layer.id))) }
+        }
+        for stamp in document.placedStamps { events.append(.stamp(stamp)) }
+        for cb in document.chapterBreaks   { events.append(.chapter(cb)) }
+        for rc in document.layerOrderChanges { events.append(.reorder(rc)) }
+        events.sort { $0.timestamp < $1.timestamp }
+
+        // ── Estimate content frame count for progress tracking ───────────────
+        // (exact count may differ slightly; only used for progress denominator)
+        var estimatedContentFrames = 0
+        for event in events {
+            switch event {
+            case .stroke(let entry):
+                guard !entry.line.points.isEmpty else { continue }
+                estimatedContentFrames += max(1, Int(ceil(Double(entry.line.points.count) / Double(pointsPerFrame))))
+            case .stamp:
+                estimatedContentFrames += fadeSteps
+            case .chapter(let cb):
+                estimatedContentFrames += max(1, Int(cb.holdDuration * 30))
+            case .reorder:
+                estimatedContentFrames += 1   // one frame to show the new arrangement
+            }
+        }
+        guard estimatedContentFrames > 0 else { return nil }
 
         // Frame counts
-        let contentFrames  = states.count
-        let holdFrames     = 60    // 2s hold on finished doodle
-        let dissolveFrames = 24    // 0.8s fade in dark overlay + branding
-        let brandHoldFrames = 45   // 1.5s branding at full size
-        let shrinkFrames   = 36    // 1.2s branding shrinks to footer
-        let footerFrames   = 30    // 1s footer hold
-        let outroFrames    = dissolveFrames + brandHoldFrames + shrinkFrames + footerFrames
-        let totalFrames    = contentFrames + holdFrames + outroFrames
+        let holdFrames      = 60    // 2s hold on finished doodle
+        let dissolveFrames  = 24    // 0.8s fade in dark overlay + branding
+        let brandHoldFrames = 45    // 1.5s branding at full size
+        let shrinkFrames    = 36    // 1.2s branding shrinks to footer
+        let footerFrames    = 30    // 1s footer hold
+        let outroFrames     = dissolveFrames + brandHoldFrames + shrinkFrames + footerFrames
+        let totalFrames     = estimatedContentFrames + holdFrames + outroFrames
 
-        // Canvas / bg
+        // ── Canvas / bg ──────────────────────────────────────────────────────
         let canvasUIColor: UIColor = {
             if let rgba = document.canvasColorRGBA {
                 return UIColor(red: rgba.r, green: rgba.g, blue: rgba.b, alpha: rgba.a)
@@ -197,7 +274,7 @@ final class DoodleTimelapseExporter: ObservableObject {
         let bgImage  = document.backgroundImageData.flatMap { UIImage(data: $0) }
         let bgOffset = CGSize(width: document.backgroundOffsetX, height: document.backgroundOffsetY)
 
-        // AVAssetWriter
+        // ── AVAssetWriter ────────────────────────────────────────────────────
         let tempURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("skadoodle_timelapse_\(UUID().uuidString).mp4")
         guard let writer = try? AVAssetWriter(outputURL: tempURL, fileType: .mp4) else { return nil }
@@ -225,6 +302,7 @@ final class DoodleTimelapseExporter: ObservableObject {
         writer.startWriting()
         writer.startSession(atSourceTime: .zero)
 
+        let pool = adaptor.pixelBufferPool   // reuse pre-allocated buffers; nil-safe fallback in pixelBuffer()
         let fps: Int32 = 30
 
         func append(_ buffer: CVPixelBuffer, at frame: Int) async {
@@ -234,18 +312,65 @@ final class DoodleTimelapseExporter: ObservableObject {
             adaptor.append(buffer, withPresentationTime: CMTime(value: CMTimeValue(frame), timescale: fps))
         }
 
-        // ── Phase 1: Content ─────────────────────────────────────────────────
+        // ── Image format for opaque compositing ──────────────────────────────
+        let imgFormat = UIGraphicsImageRendererFormat.preferred()
+        imgFormat.scale = currentScreenScale()
+        imgFormat.opaque = true
 
-        var finalDoodleImage: UIImage? = nil
-        var holdBuffer: CVPixelBuffer? = nil
+        // ── Initialize runningComposite: blank canvas + background ───────────
+        var runningComposite = UIGraphicsImageRenderer(size: pointSize, format: imgFormat).image { ctx in
+            canvasUIColor.setFill()
+            ctx.fill(CGRect(origin: .zero, size: pointSize))
+            if let bgImg = bgImage {
+                let effectiveImg = applyBgEffectsForExport(
+                    to: bgImg,
+                    bgOpacity: document.bgOpacity,
+                    bgBlur: document.bgBlur,
+                    bgBrightness: document.bgBrightness,
+                    bgSaturation: document.bgSaturation
+                )
+                effectiveImg.draw(in: CGRect(origin: .zero, size: pointSize))
+            }
+        }
 
-        for (i, state) in states.enumerated() {
-            if cancelled { writer.cancelWriting(); try? FileManager.default.removeItem(at: tempURL); return nil }
+        // ── Z-order: starts as document.layerOrder, updated by reorder events ──
+        var zLayerOrder = document.layerOrder
 
-            let image = renderCanvasWithStamps(
-                drawingLayers: state.drawingLayers,
-                stamps: state.stamps,
-                layerOrder: state.layerOrder,
+        // Accumulated drawing state
+        var layerLines: [UUID: [DrawingLine]] = [:]
+        var doneStamps: [PlacedStamp] = []
+
+        // bgBaseImage: the canvas + processed background with no drawing or stamps.
+        // runningComposite at this point is exactly that (initialized above).
+        // Used as the "paint" for eraser delta frames — reveals background in stroked area.
+        let bgBaseImage = runningComposite
+
+        // Transparent-background format for eraser deltas
+        let eraserDeltaFormat = UIGraphicsImageRendererFormat.preferred()
+        eraserDeltaFormat.scale = currentScreenScale()
+        eraserDeltaFormat.opaque = false
+
+        // Full re-render of accumulated state in current zLayerOrder.
+        // overrideLines: substitute layerLines for partial-stroke animation in the fallback path.
+        // Called for reorder events and for strokes on non-topmost layers.
+        func rebuildComposite(overrideLines: [UUID: [DrawingLine]]? = nil) -> UIImage {
+            let ll = overrideLines ?? layerLines
+            let layers: [DrawingLayer] = document.drawingLayers.compactMap { tmpl in
+                guard let lines = ll[tmpl.id] else { return nil }
+                return DrawingLayer(id: tmpl.id, lines: lines, opacity: tmpl.opacity, createdAt: tmpl.createdAt)
+            }
+            let activeIds = Set(ll.keys)
+            let doneIds   = Set(doneStamps.map { $0.id })
+            let order = zLayerOrder.filter { entry in
+                switch entry {
+                case .drawing(let id): return activeIds.contains(id)
+                case .stamp(let id):   return doneIds.contains(id)
+                }
+            }
+            return renderCanvasWithStamps(
+                drawingLayers: layers,
+                stamps: doneStamps,
+                layerOrder: order,
                 size: pointSize,
                 canvasColor: canvasUIColor,
                 backgroundImage: bgImage,
@@ -255,13 +380,237 @@ final class DoodleTimelapseExporter: ObservableObject {
                 bgBrightness: document.bgBrightness,
                 bgSaturation: document.bgSaturation
             )
+        }
 
-            if i == contentFrames - 1 { finalDoodleImage = image }
+        // Returns true if there is any already-drawn content (layer or stamp) above layerId
+        // in zLayerOrder. When true, incremental compositing would place the stroke on top
+        // of that content — wrong. Fall back to rebuildComposite for correct z-order.
+        func hasContentAbove(layerId: UUID) -> Bool {
+            guard let layerIdx = zLayerOrder.firstIndex(where: { $0.id == layerId }) else { return false }
+            let doneIds = Set(doneStamps.map { $0.id })
+            for entry in zLayerOrder[(layerIdx + 1)...] {
+                switch entry {
+                case .drawing(let id): if layerLines[id] != nil { return true }
+                case .stamp(let id):   if doneIds.contains(id)  { return true }
+                }
+            }
+            return false
+        }
 
-            guard let buf = pixelBuffer(from: image, pixelSize: pixelSize) else { continue }
-            if i == contentFrames - 1 { holdBuffer = buf }
-            await append(buf, at: i)
-            if i % 10 == 0 { await Task.yield() }
+        // ── Phase 1: Content ─────────────────────────────────────────────────
+
+        var frameIndex = 0
+        var holdBuffer: CVPixelBuffer? = nil
+
+        for event in events {
+            if cancelled { writer.cancelWriting(); try? FileManager.default.removeItem(at: tempURL); return nil }
+
+            switch event {
+
+            case .stroke(let entry):
+                let line = entry.line
+                let layerId = entry.layerId
+
+                guard !line.points.isEmpty else {
+                    // Zero-length stroke: accumulate without emitting a frame
+                    layerLines[layerId, default: []].append(line)
+                    continue
+                }
+
+                // When this layer has drawn content above it in z-order, incremental
+                // compositing would incorrectly place new pixels on top. Fall back to
+                // rebuildComposite per chunk so z-order is always correct.
+                let needsFull = hasContentAbove(layerId: layerId)
+
+                if line.isEraser {
+                    let eraserWidth = line.lineWidth
+                    var cursor = 0
+                    while cursor < line.points.count {
+                        let end = min(cursor + pointsPerFrame, line.points.count)
+                        let segStart = cursor == 0 ? 0 : cursor - 1
+                        let segPoints = Array(line.points[segStart..<end])
+
+                        let composited: UIImage
+                        if needsFull {
+                            // Build partial eraser line to include in rebuildComposite
+                            var partialEraser = line
+                            partialEraser.points = Array(line.points[0..<end])
+                            partialEraser.widths  = Array(line.widths.prefix(end))
+                            var tempLines = layerLines
+                            tempLines[layerId, default: []].append(partialEraser)
+                            composited = rebuildComposite(overrideLines: tempLines)
+                        } else {
+                            // Incremental eraser delta: O(1) per chunk
+                            let eraserDelta = UIGraphicsImageRenderer(size: pointSize, format: eraserDeltaFormat).image { ctx in
+                                guard !segPoints.isEmpty else { return }
+                                let cgCtx = ctx.cgContext
+                                cgCtx.saveGState()
+                                if segPoints.count == 1 {
+                                    let pt = segPoints[0]
+                                    let r = eraserWidth / 2
+                                    cgCtx.addEllipse(in: CGRect(x: pt.x - r, y: pt.y - r,
+                                                                 width: eraserWidth, height: eraserWidth))
+                                    cgCtx.clip()
+                                } else {
+                                    cgCtx.move(to: segPoints[0])
+                                    for pt in segPoints.dropFirst() { cgCtx.addLine(to: pt) }
+                                    cgCtx.setLineWidth(eraserWidth)
+                                    cgCtx.setLineCap(.round)
+                                    cgCtx.setLineJoin(.round)
+                                    cgCtx.replacePathWithStrokedPath()
+                                    cgCtx.clip()
+                                }
+                                bgBaseImage.draw(at: .zero)
+                                cgCtx.restoreGState()
+                            }
+                            composited = UIGraphicsImageRenderer(size: pointSize, format: imgFormat).image { _ in
+                                runningComposite.draw(at: .zero)
+                                eraserDelta.draw(at: .zero)
+                            }
+                        }
+
+                        runningComposite = composited
+                        guard let buf = pixelBuffer(from: composited, pixelSize: pixelSize, pool: pool) else {
+                            cursor = end; continue
+                        }
+                        holdBuffer = buf
+                        await append(buf, at: frameIndex)
+                        frameIndex += 1
+                        cursor = end
+
+                        if frameIndex % 50 == 0 {
+                            progress = Double(frameIndex) / Double(totalFrames)
+                            await Task.yield()
+                        }
+                    }
+                    layerLines[layerId, default: []].append(line)
+
+                } else {
+                    let layerOpacity   = document.drawingLayers.first(where: { $0.id == layerId })?.opacity   ?? 1.0
+                    let layerCreatedAt = document.drawingLayers.first(where: { $0.id == layerId })?.createdAt ?? Date()
+
+                    var cursor = 0
+                    while cursor < line.points.count {
+                        let end = min(cursor + pointsPerFrame, line.points.count)
+
+                        var partial = line
+                        partial.points = Array(line.points[0..<end])
+                        partial.widths = Array(line.widths.prefix(end))
+
+                        let composited: UIImage
+                        if needsFull {
+                            // Full rebuild so content above this layer stays on top
+                            var tempLines = layerLines
+                            tempLines[layerId, default: []].append(partial)
+                            composited = rebuildComposite(overrideLines: tempLines)
+                        } else {
+                            // Incremental delta: render only this partial stroke, composite on top
+                            let deltaLayer = DrawingLayer(
+                                id: layerId, lines: [partial],
+                                opacity: layerOpacity, createdAt: layerCreatedAt
+                            )
+                            let deltaImg = renderCanvasWithStamps(
+                                drawingLayers: [deltaLayer],
+                                stamps: [],
+                                layerOrder: [.drawing(layerId)],
+                                size: pointSize,
+                                canvasColor: UIColor.clear,
+                                backgroundImage: nil,
+                                backgroundOffset: .zero,
+                                bgOpacity: 1.0, bgBlur: 0.0, bgBrightness: 0.0, bgSaturation: 1.0
+                            )
+                            composited = UIGraphicsImageRenderer(size: pointSize, format: imgFormat).image { _ in
+                                runningComposite.draw(at: .zero)
+                                deltaImg.draw(at: .zero)
+                            }
+                        }
+
+                        runningComposite = composited
+                        guard let buf = pixelBuffer(from: composited, pixelSize: pixelSize, pool: pool) else {
+                            cursor = end; continue
+                        }
+                        holdBuffer = buf
+                        await append(buf, at: frameIndex)
+                        frameIndex += 1
+                        cursor = end
+
+                        if frameIndex % 50 == 0 {
+                            progress = Double(frameIndex) / Double(totalFrames)
+                            await Task.yield()
+                        }
+                    }
+                    layerLines[layerId, default: []].append(line)
+                }
+
+            case .stamp(let stamp):
+                // Pre-render stamp at its authored opacity on a transparent background — O(1)
+                let stampDelta = renderCanvasWithStamps(
+                    drawingLayers: [],
+                    stamps: [stamp],
+                    layerOrder: [.stamp(stamp.id)],
+                    size: pointSize,
+                    canvasColor: UIColor.clear,
+                    backgroundImage: nil,
+                    backgroundOffset: .zero,
+                    bgOpacity: 1.0, bgBlur: 0.0, bgBrightness: 0.0, bgSaturation: 1.0
+                )
+
+                // Fade in over fadeSteps frames by compositing at increasing alpha
+                for step in 1...fadeSteps {
+                    if cancelled { break }
+                    let stepAlpha = CGFloat(step) / CGFloat(fadeSteps)
+                    let composited = UIGraphicsImageRenderer(size: pointSize, format: imgFormat).image { _ in
+                        runningComposite.draw(at: .zero)
+                        stampDelta.draw(at: .zero, blendMode: .normal, alpha: stepAlpha)
+                    }
+                    guard let buf = pixelBuffer(from: composited, pixelSize: pixelSize, pool: pool) else { continue }
+                    holdBuffer = buf
+                    await append(buf, at: frameIndex)
+                    frameIndex += 1
+                }
+
+                // Bake stamp into runningComposite at full authored opacity
+                runningComposite = UIGraphicsImageRenderer(size: pointSize, format: imgFormat).image { _ in
+                    runningComposite.draw(at: .zero)
+                    stampDelta.draw(at: .zero, blendMode: .normal, alpha: 1.0)
+                }
+                doneStamps.append(stamp)
+
+            case .chapter(let cb):
+                // Hold on current composite for the chapter break duration — reuse same pixel buffer
+                let holdFrameCount = max(1, Int(cb.holdDuration * 30))
+                guard let buf = pixelBuffer(from: runningComposite, pixelSize: pixelSize, pool: pool) else { continue }
+                holdBuffer = buf
+                for _ in 0..<holdFrameCount {
+                    if cancelled { break }
+                    await append(buf, at: frameIndex)
+                    frameIndex += 1
+                }
+
+            case .reorder(let rc):
+                // User reordered layers — update z-order and rebuild the composite so all
+                // subsequent frames render content in the new arrangement.
+                zLayerOrder = rc.layerOrder
+                runningComposite = rebuildComposite()
+                guard let buf = pixelBuffer(from: runningComposite, pixelSize: pixelSize, pool: pool) else { continue }
+                holdBuffer = buf
+                await append(buf, at: frameIndex)
+                frameIndex += 1
+            }
+
+            // Yield for stamps/chapter/reorder events (strokes yield inside their own loop above)
+            if frameIndex % 50 == 0 {
+                progress = Double(frameIndex) / Double(totalFrames)
+                await Task.yield()
+            }
+        }
+
+        let contentFrames = frameIndex
+
+        guard contentFrames > 0 else {
+            writerInput.markAsFinished()
+            await writer.finishWriting()
+            return nil
         }
 
         // ── Phase 2: Hold ────────────────────────────────────────────────────
@@ -269,18 +618,19 @@ final class DoodleTimelapseExporter: ObservableObject {
         if let holdBuf = holdBuffer {
             for h in 0..<holdFrames {
                 if cancelled { break }
-                await append(holdBuf, at: contentFrames + h)
-                if h % 10 == 0 { await Task.yield() }
+                await append(holdBuf, at: frameIndex + h)
+                if h % 60 == 0 {
+                    progress = Double(frameIndex + h) / Double(totalFrames)
+                    await Task.yield()
+                }
             }
         }
+        frameIndex += holdFrames
 
         // ── Phase 3: Outro ───────────────────────────────────────────────────
 
-        guard let baseImage = finalDoodleImage else {
-            writerInput.markAsFinished()
-            await writer.finishWriting()
-            return writer.status == .completed ? tempURL : nil
-        }
+        // runningComposite IS the final doodle — use it directly as the outro base image
+        let baseImage = runningComposite
 
         // Footer target: centered horizontally, near the bottom
         let footerY = pointSize.height * 0.42    // offset from center to place near bottom
@@ -288,7 +638,7 @@ final class DoodleTimelapseExporter: ObservableObject {
         for o in 0..<outroFrames {
             if cancelled { break }
 
-            let frameIndex = contentFrames + holdFrames + o
+            let absFrame = frameIndex + o
 
             let (darkAlpha, cardScale, cardY): (Double, CGFloat, CGFloat) = {
                 if o < dissolveFrames {
@@ -334,10 +684,13 @@ final class DoodleTimelapseExporter: ObservableObject {
             renderer.proposedSize = ProposedViewSize(width: pointSize.width, height: pointSize.height)
 
             guard let img = renderer.uiImage,
-                  let buf = pixelBuffer(from: img, pixelSize: pixelSize) else { continue }
+                  let buf = pixelBuffer(from: img, pixelSize: pixelSize, pool: pool) else { continue }
 
-            await append(buf, at: frameIndex)
-            if o % 10 == 0 { await Task.yield() }
+            await append(buf, at: absFrame)
+            if o % 100 == 0 {
+                progress = Double(absFrame) / Double(totalFrames)
+                await Task.yield()
+            }
         }
 
         // ── Finalize ─────────────────────────────────────────────────────────
@@ -350,36 +703,31 @@ final class DoodleTimelapseExporter: ObservableObject {
 
     // MARK: - Pixel Buffer
 
-    private func pixelBuffer(from image: UIImage, pixelSize: CGSize) -> CVPixelBuffer? {
-        let attrs: [CFString: Any] = [
-            kCVPixelBufferCGImageCompatibilityKey: true,
-            kCVPixelBufferCGBitmapContextCompatibilityKey: true,
-        ]
+    private func pixelBuffer(from image: UIImage, pixelSize: CGSize, pool: CVPixelBufferPool? = nil) -> CVPixelBuffer? {
         var buffer: CVPixelBuffer?
-        guard CVPixelBufferCreate(
-            kCFAllocatorDefault,
-            Int(pixelSize.width), Int(pixelSize.height),
-            kCVPixelFormatType_32BGRA,
-            attrs as CFDictionary,
-            &buffer
-        ) == kCVReturnSuccess, let buffer else { return nil }
-
-        CVPixelBufferLockBaseAddress(buffer, [])
-        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
-
-        guard let ctx = CGContext(
-            data: CVPixelBufferGetBaseAddress(buffer),
-            width: Int(pixelSize.width),
-            height: Int(pixelSize.height),
-            bitsPerComponent: 8,
-            bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
-        ) else { return nil }
-
-        if let cgImage = image.cgImage {
-            ctx.draw(cgImage, in: CGRect(origin: .zero, size: pixelSize))
+        if let pool {
+            guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &buffer) == kCVReturnSuccess,
+                  let buffer else { return nil }
+        } else {
+            let attrs: [CFString: Any] = [
+                kCVPixelBufferCGImageCompatibilityKey: true,
+                kCVPixelBufferCGBitmapContextCompatibilityKey: true,
+            ]
+            guard CVPixelBufferCreate(
+                kCFAllocatorDefault,
+                Int(pixelSize.width), Int(pixelSize.height),
+                kCVPixelFormatType_32BGRA,
+                attrs as CFDictionary,
+                &buffer
+            ) == kCVReturnSuccess, let buffer else { return nil }
         }
+
+        guard let buffer else { return nil }
+        guard let cgImage = image.cgImage else { return nil }
+
+        let ci = CIImage(cgImage: cgImage)
+        Self.ciContext.render(ci, to: buffer, bounds: CGRect(origin: .zero, size: pixelSize),
+                              colorSpace: cgImage.colorSpace ?? CGColorSpaceCreateDeviceRGB())
         return buffer
     }
 }
@@ -456,7 +804,7 @@ private struct OutroFrameView: View {
 
 // MARK: - Screen helpers (UIScreen.main deprecated in iOS 16)
 
-private func currentScreenScale() -> CGFloat {
+func currentScreenScale() -> CGFloat {
     UIApplication.shared.connectedScenes
         .compactMap { $0 as? UIWindowScene }
         .first?.screen.scale ?? 2.0
@@ -541,24 +889,36 @@ struct TilePlayBadge: View {
     @State private var showPlayer = false
 
     var body: some View {
-        ZStack {
-            Circle()
-                .fill(.black.opacity(0.55))
-                .frame(width: 30, height: 30)
-
+        Group {
             if exporter.isExporting {
-                ProgressView()
-                    .progressViewStyle(.circular)
-                    .scaleEffect(0.5)
+                // Full-width progress bar along the bottom edge of the tile
+                ProgressView(value: exporter.progress)
+                    .progressViewStyle(.linear)
                     .tint(.white)
+                    .frame(height: 3)
+                    .background(Color.black.opacity(0.25))
+                    .clipShape(Capsule())
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 8)
+                    .animation(.linear(duration: 0.1), value: exporter.progress)
             } else {
-                Image(systemName: "play.fill")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(.white)
-                    .offset(x: 1)
+                // Play circle pinned to trailing edge
+                HStack {
+                    Spacer()
+                    ZStack {
+                        Circle()
+                            .fill(.black.opacity(0.55))
+                            .frame(width: 30, height: 30)
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(.white)
+                            .offset(x: 1)
+                    }
+                    .padding(6)
+                }
+                .onTapGesture { startExport() }
             }
         }
-        .onTapGesture { startExport() }           // onTapGesture so it doesn't fight the tile's gesture
         .fullScreenCover(isPresented: $showPlayer, onDismiss: cleanup) {
             if let url = exportedURL {
                 VideoPlayerView(url: url)
