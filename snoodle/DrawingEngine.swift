@@ -8,6 +8,7 @@ import Foundation
 import FirebaseFirestore
 import FirebaseStorage
 import Combine
+import Vision
 
 enum DualToneStyle: String, CaseIterable, Identifiable, Codable {
     case gradient    = "Gradient"
@@ -354,8 +355,13 @@ private final class _BgEffectsImageCache {
         // produce a CGImage with an alpha channel even for fully-opaque source images. If the
         // cached image has any alpha < 1, .tiledImage shading paints semi-transparent eraser
         // strokes, leaving a gray film over whatever was drawn underneath.
+        // Compositing order: white → canvas color (base) → image — matching the live canvas ZStack.
+        // The opaque context initializes to black, so we must fill white first; otherwise a
+        // semi-transparent canvas color composites over black and produces a wrong dark result.
         UIGraphicsBeginImageContextWithOptions(colorProcessed.size, true, colorProcessed.scale)
         defer { UIGraphicsEndImageContext() }
+        UIColor.white.setFill()
+        UIRectFill(CGRect(origin: .zero, size: colorProcessed.size))
         base.setFill()
         UIRectFill(CGRect(origin: .zero, size: colorProcessed.size))
         colorProcessed.draw(at: .zero, blendMode: .normal, alpha: CGFloat(op))
@@ -377,8 +383,20 @@ func processedBackgroundForEraser(
     bgOpacity: Double, bgBlur: Double, bgBrightness: Double, bgSaturation: Double,
     canvasColor: Color
 ) -> UIImage {
-    _bgEffectsImageCache.get(img, op: bgOpacity, bl: bgBlur, br: bgBrightness, sa: bgSaturation,
-                             base: UIColor(canvasColor))
+    // Pre-composite canvasColor over white to produce a fully opaque base.
+    // Matches the live canvas ZStack: canvasColor (possibly semi-transparent) sits over the white
+    // system background. Passing a semi-transparent UIColor as the cache base requires UIKit to
+    // composite it over white via UIRectFill — which can diverge from SwiftUI's compositing path
+    // (different color spaces, P3 vs sRGB) and produce a slightly darker result.
+    // Computing it here in sRGB via UIColor.getRed guarantees the same value as opaqueCanvasColor
+    // in DrawScreen, eliminating the UIKit/SwiftUI color-space discrepancy.
+    let ui = UIColor(canvasColor)
+    var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+    ui.getRed(&r, green: &g, blue: &b, alpha: &a)
+    let opaqueBase: UIColor = a >= 1.0 ? ui
+        : UIColor(red: a*r + (1-a), green: a*g + (1-a), blue: a*b + (1-a), alpha: 1.0)
+    return _bgEffectsImageCache.get(img, op: bgOpacity, bl: bgBlur, br: bgBrightness, sa: bgSaturation,
+                                    base: opaqueBase)
 }
 
 // MARK: - Drawing Layer Canvas
@@ -2041,6 +2059,55 @@ class GeminiProvider: AIProvider {
             }
         }
         return ("My doodle", [])
+    }
+}
+
+// MARK: - Vision Provider (on-device, instant)
+
+class VisionProvider: AIProvider {
+
+    // Identifiers that describe subject matter (not style/medium) — used to build the caption.
+    private static let subjectPrefixes: [String] = [
+        "person", "animal", "cat", "dog", "bird", "fish", "insect",
+        "food", "fruit", "vegetable", "drink",
+        "vehicle", "car", "truck", "boat", "airplane",
+        "building", "house", "architecture",
+        "plant", "flower", "tree", "nature", "landscape",
+        "face", "body", "hand",
+        "furniture", "clothing",
+        "music", "sport", "technology"
+    ]
+
+    func generateCaptionAndKeywords(for image: UIImage) async -> (caption: String, keywords: [String]) {
+        guard let cgImage = image.cgImage else { return ("My doodle", []) }
+
+        return await Task.detached(priority: .userInitiated) {
+            let request = VNClassifyImageRequest()
+            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+            guard (try? handler.perform([request])) != nil,
+                  let observations = request.results as? [VNClassificationObservation]
+            else { return ("My doodle", []) }
+
+            // Keep observations above confidence threshold, drop very generic ones
+            let threshold: Float = 0.15
+            let blocked: Set<String> = ["illustration", "art", "drawing", "image",
+                                        "picture", "graphic", "design", "visual", "color"]
+            let hits = observations
+                .filter { $0.confidence >= threshold && !blocked.contains($0.identifier.lowercased()) }
+                .prefix(10)
+                .map { $0.identifier
+                    .replacingOccurrences(of: "_", with: " ")
+                    .lowercased() }
+
+            // Caption: use the first hit that sounds like a subject, or just the top hit
+            let subjectHit = hits.first { h in
+                VisionProvider.subjectPrefixes.contains(where: { h.hasPrefix($0) })
+            }
+            let captionSubject = subjectHit ?? hits.first ?? "something interesting"
+            let caption = "A doodle of \(captionSubject)"
+            let keywords = Array(hits.prefix(6))
+            return (caption, keywords)
+        }.value
     }
 }
 

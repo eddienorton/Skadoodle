@@ -595,8 +595,7 @@ struct StampRenderView: View {
         if let img = stamp.inlineImage {
             Image(uiImage: img)
                 .resizable()
-                .scaledToFill()
-                .clipped()
+                .scaledToFit()
         } else if let customId = stamp.customImageId,
                   let cs = CustomStampManager.shared.stamps.first(where: { $0.id == customId }),
                   let img = cs.image {

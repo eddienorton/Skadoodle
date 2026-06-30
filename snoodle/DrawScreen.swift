@@ -453,6 +453,7 @@ struct CanvasColorPickerView: View {
     var onApply: ((Int) -> Void)? = nil
     var onPickerCancel: (() -> Void)? = nil
     var onExtractStamps: ((UIImage) -> Void)? = nil
+    var onUseAsStamp: ((UIImage) -> Void)? = nil
     var initialHistoryIndex: Int? = nil
     @Environment(\.dismiss) var dismiss
     @State private var selectedColor: Color
@@ -465,7 +466,8 @@ struct CanvasColorPickerView: View {
     init(currentColor: Color, onSelectColor: @escaping (Color) -> Void, onPickPhoto: (() -> Void)? = nil,
          onPreviewPhoto: ((UIImage) -> Void)? = nil, onGoToEffects: ((Int) -> Void)? = nil,
          onApply: ((Int) -> Void)? = nil, onPickerCancel: (() -> Void)? = nil,
-         onExtractStamps: ((UIImage) -> Void)? = nil, initialHistoryIndex: Int? = nil) {
+         onExtractStamps: ((UIImage) -> Void)? = nil, onUseAsStamp: ((UIImage) -> Void)? = nil,
+         initialHistoryIndex: Int? = nil) {
         self.currentColor = currentColor
         self.onSelectColor = onSelectColor
         self.onPickPhoto = onPickPhoto
@@ -474,6 +476,7 @@ struct CanvasColorPickerView: View {
         self.onApply = onApply
         self.onPickerCancel = onPickerCancel
         self.onExtractStamps = onExtractStamps
+        self.onUseAsStamp = onUseAsStamp
         self.initialHistoryIndex = initialHistoryIndex
         _selectedColor = State(initialValue: currentColor)
         _wipSelectedIndex = State(initialValue: initialHistoryIndex)
@@ -570,6 +573,18 @@ struct CanvasColorPickerView: View {
                                         )
                                 }
                                 .contextMenu {
+                                    Button {
+                                        let img = history.fullImage(at: i) ?? history.thumbnails[i]
+                                        onUseAsStamp?(img)
+                                    } label: {
+                                        Label("Use as Stamp", systemImage: "rectangle.stack.badge.plus")
+                                    }
+                                    Button {
+                                        let img = history.fullImage(at: i) ?? history.thumbnails[i]
+                                        onExtractStamps?(img)
+                                    } label: {
+                                        Label("Extract Objects", systemImage: "wand.and.stars")
+                                    }
                                     Button("Remove", role: .destructive) {
                                         history.remove(at: i)
                                     }
@@ -690,6 +705,7 @@ struct PenStudioSheet: View {
                                         .colorPickerSheet(isPresented: $showColorBPicker, color: $colorB) { picked in
                                             recentColors = RecentColors.add(picked)
                                             colorB = picked
+                                            saveColorB(picked)
                                         }
                                         ForEach(recentColors, id: \.self) { color in
                                             ColorSwatchView(color: color, size: 36,
@@ -698,6 +714,7 @@ struct PenStudioSheet: View {
                                                 .shadow(color: .black.opacity(0.08), radius: 2)
                                                 .onTapGesture {
                                                     colorB = color
+                                                    saveColorB(color)
                                                 }
                                         }
                                     }
@@ -728,6 +745,12 @@ struct PenStudioSheet: View {
                 if penType.isDualTone {
                     selectedDualStyle = penType.dualToneStyle
                 }
+                // Ensure colorB appears selected in the recent list —
+                // it may not be there if it was loaded from the legacy index key
+                // or set before the RecentColors system existed.
+                if !recentColors.contains(where: { $0.isApproximatelyEqual(to: colorB) }) {
+                    recentColors = RecentColors.add(colorB)
+                }
             }
         }
         .presentationDetents(UIDevice.current.userInterfaceIdiom == .pad
@@ -735,6 +758,14 @@ struct PenStudioSheet: View {
             : (penType.isDualTone ? [.fraction(0.83), .large] : [.fraction(0.57), .large]))
         .frame(minHeight: UIDevice.current.userInterfaceIdiom == .pad ? (penType.isDualTone ? 643 : 427) : 0)
         .animation(.easeInOut(duration: 0.2), value: penType.isDualTone)
+    }
+
+    private func saveColorB(_ color: Color) {
+        if let uic = UIColor(color) as UIColor? {
+            var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+            uic.getRed(&r, green: &g, blue: &b, alpha: &a)
+            UserDefaults.standard.set([Double(r), Double(g), Double(b), Double(a)], forKey: "dualToneColorB_rgba")
+        }
     }
 
     private func penTypesMatch(_ a: PenType, _ b: PenType) -> Bool {
@@ -1086,7 +1117,7 @@ struct DrawScreen: View {
     @EnvironmentObject var store: SnoodleStore
     @Binding var isPresented: Bool
     @Binding var selectedTab: Int
-    var entryToEdit: SnoodleEntry? = nil
+    @Binding var entryToEdit: SnoodleEntry?
 
     // Drawing layers — new interleaved layer architecture.
     // The active layer is always the last .drawing entry in layerOrder.
@@ -2061,7 +2092,11 @@ struct DrawScreen: View {
         let doc: SkadoodleDocument
         guard let doc = try? JSONDecoder().decode(SkadoodleDocument.self, from: data) else { return }
         guard !doc.drawingLayers.isEmpty || !doc.placedStamps.isEmpty || doc.backgroundImageData != nil else {
-            try? FileManager.default.removeItem(at: FileManager.currentSkadoodleURL)
+            // Only clean up current.skadoodle if that's the file we just decoded (resume path).
+            // When restoring an entry's own .skadoodle, don't touch current.skadoodle.
+            if entryToEdit == nil {
+                try? FileManager.default.removeItem(at: FileManager.currentSkadoodleURL)
+            }
             return
         }
         // Only push undo if there's something on the canvas worth preserving
@@ -2190,6 +2225,11 @@ struct DrawScreen: View {
         }
     }()
     @State private var dualToneColorB: Color = {
+        // v2: persist as RGBA so custom colors survive across launches
+        if let rgba = UserDefaults.standard.array(forKey: "dualToneColorB_rgba") as? [Double], rgba.count == 4 {
+            return Color(.sRGB, red: rgba[0], green: rgba[1], blue: rgba[2], opacity: rgba[3])
+        }
+        // Legacy: fall back to old palette-index key
         let idx = UserDefaults.standard.integer(forKey: "lastColorBIndex")
         return idx < paletteColors.count ? paletteColors[idx] : .orange
     }()
@@ -2210,7 +2250,7 @@ struct DrawScreen: View {
     @State private var showTextComposer: Bool = false
     @State private var editingStampId: UUID? = nil
     @State private var selectedStampId: UUID? = nil
-    @State private var isStampMode: Bool = false           // hand tool toggle: disables drawing, enables direct stamp drag
+    @State private var isStampMode: Bool = true            // hand tool toggle: disables drawing, enables direct stamp drag; default stamp
     @State private var showSnugDuringDrag: Bool = false    // true only if stamp was already selected when long-press drag began
     @State private var suppressCanvasTapAfterPlace: Bool = false
     @State private var stampResizeTargetId: UUID? = nil
@@ -2250,26 +2290,41 @@ struct DrawScreen: View {
             if case .stamp(let id) = entry { return !hiddenLayerIds.contains(id) }
             return true
         }
+        let t0 = Date()
+        print("[Done] layers=\(visibleLayers.count) stamps=\(placedStamps.count) hasBg=\(canvasBackgroundImage != nil) bgBlur=\(bgBlur)")
         let img = renderCanvasWithStamps(drawingLayers: visibleLayers, stamps: placedStamps, layerOrder: visibleLayerOrder, size: canvasSize, canvasColor: UIColor(canvasColor), backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation)
+        print("[Done] renderCanvasWithStamps: \(String(format: "%.2f", Date().timeIntervalSince(t0)))s")
         resultImage = img
         isGeneratingCaption = true
+        let t1 = Date()
         Task {
-            let result = await callSnoodleAI(for: img)
+            // Phase 1: Vision — on-device, instant. Show the result card immediately.
+            let quick = await VisionProvider().generateCaptionAndKeywords(for: img)
+            let quickFiltered = quick.keywords.filter { !genericKeywords.contains($0.lowercased()) }
+            print("[Done] Vision: \(String(format: "%.3f", Date().timeIntervalSince(t1)))s")
             await MainActor.run {
+                resultCaption = quick.caption
+                resultKeywords = quickFiltered
+                aiFailed = false
+                isEditingCaption = false
+                isGeneratingCaption = false
+                showResultCard = true
+            }
+
+            // Phase 2: Gemini — runs while card is already visible; silently upgrades caption/keywords.
+            let result = await callSnoodleAI(for: img)
+            print("[Done] Gemini: \(String(format: "%.2f", Date().timeIntervalSince(t1)))s total=\(String(format: "%.2f", Date().timeIntervalSince(t0)))s")
+            await MainActor.run {
+                guard showResultCard else { return }   // user already saved/dismissed — don't stomp
                 if result.caption == "My doodle" && result.keywords.isEmpty {
-                    // AI failed — show card with empty caption, keyboard up
-                    resultCaption = ""
-                    resultKeywords = []
+                    // Gemini failed — Vision results stay, flag for manual edit
                     aiFailed = true
                     isEditingCaption = true
                 } else {
                     resultCaption = result.caption
                     resultKeywords = result.keywords
                     aiFailed = false
-                    isEditingCaption = false
                 }
-                isGeneratingCaption = false
-                showResultCard = true
             }
         }
     }
@@ -2283,8 +2338,10 @@ struct DrawScreen: View {
             imageData: data
         )
         // Save .skadoodle alongside the flat image for future re-editing
+        let tSave = Date()
         if let skadoodleData = saveSkadoodleData() {
             try? skadoodleData.write(to: entry.skadoodleURL)
+            print("[Done] saveSkadoodleData: \(String(format: "%.2f", Date().timeIntervalSince(tSave)))s (\(skadoodleData.count / 1024)KB)")
         }
         if post {
             guard auth.isSignedIn else {
@@ -2391,7 +2448,10 @@ struct DrawScreen: View {
     @ViewBuilder
     func drawingLayerView(layer: DrawingLayer) -> some View {
         let liveLine: DrawingLine? = layer.id == eraserTargetLayerId ? currentLine : nil
-        let bgColor: Color = canvasBackgroundImage != nil ? .clear : canvasColor
+        // When no background image: use the pre-composited canvas color (over white) so the eraser
+        // paints a fully-opaque solid color. Raw canvasColor may be semi-transparent, which would
+        // paint semi-transparent eraser strokes instead of revealing the correct background color.
+        let bgColor: Color = canvasBackgroundImage != nil ? .clear : opaqueCanvasColor
         // Pre-process the background image using the same CIFilter pipeline as the video export path
         // (renderCanvasWithStamps). Passing default effect params below makes drawEraserLine skip
         // redundant cache processing (needsProcessing=false) and use the image directly — eliminating
@@ -2405,6 +2465,101 @@ struct DrawScreen: View {
                            backgroundImage: eraserBg, backgroundOffset: backgroundOffset,
                            bgOpacity: 1.0, bgBlur: 0.0, bgBrightness: 0.0, bgSaturation: 1.0,
                            baseCanvasColor: canvasColor)
+    }
+
+    /// Canvas color pre-composited over white, used by the eraser when there is no background image.
+    /// Matches the live canvas ZStack rendering (canvas color layer sits over a white background).
+    /// Without this, a semi-transparent canvas color erases to itself (semi-transparent strokes)
+    /// instead of erasing to the visually correct fully-opaque composited color.
+    var opaqueCanvasColor: Color {
+        let ui = UIColor(canvasColor)
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        ui.getRed(&r, green: &g, blue: &b, alpha: &a)
+        guard a < 1.0 else { return canvasColor }
+        return Color(UIColor(red: a*r + (1-a), green: a*g + (1-a), blue: a*b + (1-a), alpha: 1.0))
+    }
+
+    // Clamp the saved drag offset so the panel can't drift off-screen.
+    // Matches the live-drag clamping in StampMagicMenu.clampedOffset(_:).
+    var clampedMenuOffset: CGSize {
+        guard canvasSize.width > 0 && canvasSize.height > 0 else { return .zero }
+        let minX = -(canvasSize.width - 80)
+        let maxX: Double = 0
+        let vertLimit = canvasSize.height / 2 - 80
+        return CGSize(
+            width:  min(max(savedMenuOffsetX, minX), maxX),
+            height: min(max(savedMenuOffsetY, -vertLimit), vertLimit)
+        )
+    }
+
+    // Extracted so the compiler can type-check WindowPinchView's many callbacks independently.
+    @ViewBuilder
+    var windowPinchView: some View {
+        let bgPanBegan: (() -> Void)? = canvasBackgroundImage != nil ? {
+            undoStack.append(CanvasSnapshot(drawingLayers: drawingLayers, stamps: placedStamps,
+                layerOrder: layerOrder, backgroundImage: canvasBackgroundImage,
+                backgroundOffset: backgroundOffset, bgOpacity: bgOpacity, bgBlur: bgBlur,
+                bgBrightness: bgBrightness, bgSaturation: bgSaturation))
+            redoStack = []
+        } : nil
+        let bgPan: ((CGSize) -> Void)? = canvasBackgroundImage != nil ? { delta in
+            let newOffset = CGSize(width: backgroundOffset.width + delta.width,
+                                   height: backgroundOffset.height + delta.height)
+            backgroundOffset = clampedBackgroundOffset(newOffset)
+        } : nil
+        let blockGestures = showTextComposer || showPenStudio || showBgEditor ||
+            showOpacitySheet || showCanvasBgSheet || showCanvasImagePicker ||
+            showSignInForPost || showPenColorPicker || showCanvasColorPicker || showVideoTimeline
+        WindowPinchView(
+            placedStamps: $placedStamps,
+            stampResizeStartSize: $stampResizeStartSize,
+            stampResizeTargetId: $stampResizeTargetId,
+            stampRotatingId: $stampRotatingId,
+            canvasOrigin: canvasOriginInWindow,
+            canvasSize: canvasSize,
+            selectedStamp: selectedStamp,
+            onLongPress: { _ in },
+            isLongPressing: $isLongPressing,
+            showLayersPanel: showLayersPanel,
+            suppressCanvasTap: suppressCanvasTapAfterPlace,
+            isStampMode: isStampMode,
+            layerOrder: layerOrder,
+            selectedStampId: selectedStampId,
+            onLongPressStamp: { id in
+                showSnugDuringDrag = (selectedStampId == id && showStampMagicMenu)
+                selectedStampId = id
+                showStampMagicMenu = false
+            },
+            onStampDragEnd: { id in
+                if showSnugDuringDrag {
+                    selectedStampId = id
+                    showStampMagicMenu = true
+                } else {
+                    selectedStampId = nil
+                }
+                showSnugDuringDrag = false
+            },
+            onStampPanBegan: { pushUndoSnapshot() },
+            onStampPanMove: { stampId, newPos in
+                if let idx = placedStamps.firstIndex(where: { $0.id == stampId }) {
+                    placedStamps[idx].position = newPos
+                }
+            },
+            onStampTap: { id in activateStamp(id: id) },
+            onCanvasTap: {
+                selectedStampId = nil
+                showStampMagicMenu = false
+                pendingInsertAboveStampId = nil
+                explicitLayerSelection = false
+                ensureLayerSelection()
+            },
+            onBeforeStampChange: { pushUndoSnapshot() },
+            onBackgroundPanBegan: bgPanBegan,
+            onBackgroundPan: bgPan,
+            onBackgroundDoubleTap: nil,
+            blockGestures: blockGestures,
+            blockCanvasTap: showMenuTweak
+        )
     }
 
     // Extracted into its own function so the compiler can type-check the callbacks independently
@@ -2483,18 +2638,18 @@ struct DrawScreen: View {
                 moveStampLayer(id: id, forward: forward, toExtreme: toExtreme)
             },
             showTweak: $showMenuTweak,
-            initialOffset: CGSize(width: savedMenuOffsetX, height: savedMenuOffsetY),
+            initialOffset: clampedMenuOffset,
             onOffsetSaved: { offset in
                 savedMenuOffsetX = offset.width
                 savedMenuOffsetY = offset.height
             }
         )
         // Centered vertically; x anchors the right edge of the panel (strip or strip+tweak)
-        // 6pt from canvas right. Offset from accDrag/liveDrag moves it from here.
+        // 16pt from canvas right. Offset from accDrag/liveDrag moves it from here.
         .position(
             x: showMenuTweak
-                ? canvasSize.width - (300 + 6 + 54) / 2 - 6   // strip + gap + tweak panel
-                : canvasSize.width - 54 / 2 - 6,               // strip only
+                ? canvasSize.width - (300 + 6 + 54) / 2 - 16   // strip + gap + tweak panel
+                : canvasSize.width - 54 / 2 - 16,               // strip only
             y: canvasSize.height / 2
         )
         .zIndex(1000)
@@ -2572,6 +2727,7 @@ struct DrawScreen: View {
         let center = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
         pushUndoSnapshot()
         if isCustomStampMode, let customId = UUID(uuidString: lastCustomStampIdString) {
+            CustomStampManager.shared.moveToTop(id: customId)
             let img = CustomStampManager.shared.stamps.first(where: { $0.id == customId })?.image
             let size = defaultStampSize(imageSize: img?.size)
             var stamp = PlacedStamp(emoji: "📷", position: center, size: size)
@@ -2829,10 +2985,27 @@ struct DrawScreen: View {
                         bgPickerWasApplied = true // restore already done here; skip onDismiss restore
                         restoreSavedBgState()
                     }, onExtractStamps: { img in
-                        // dismiss picker (onDismiss will restore canvas state), then launch segmentation
                         showCanvasBgSheet = false
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                             bgSegmentationItem = SegmentationItem(images: [img])
+                        }
+                    }, onUseAsStamp: { img in
+                        showCanvasBgSheet = false
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                            pushUndoSnapshot()
+                            let center = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
+                            let size = defaultStampSize(imageSize: img.size)
+                            var stamp = PlacedStamp(emoji: "📷", position: center, size: size)
+                            stamp.inlineImage = img
+                            // Register in the stamp tray so it appears in Photos recents
+                            let saved = CustomStampManager.shared.addStamp(image: img, source: .photo)
+                            stamp.customImageId = saved?.id
+                            appendStampToLayer(stamp)
+                            selectedStampId = stamp.id
+                            scheduleSnugScan(for: stamp.id, image: img)
+                            isStampMode = true
+                            showStampMagicMenu = true
+                            suppressNextCanvasTap()
                         }
                     }, initialHistoryIndex: {
                         guard canvasBackgroundImage != nil else { return nil }
@@ -2904,17 +3077,21 @@ struct DrawScreen: View {
             .presentationDragIndicator(.visible)
         }
         .sheet(item: $bgSegmentationItem) { item in
-            ObjectSegmentationSheet(images: item.images) { cutouts in
+            // bypassSingle: false — always show the picker so the user confirms which
+            // objects to use. Without this, .task can fire once per history item as the
+            // background sheet dismisses, placing duplicate stamps on canvas.
+            ObjectSegmentationSheet(images: item.images, bypassSingle: false) { cutouts in
                 bgSegmentationItem = nil
-                var lastStamp: CustomStamp? = nil
+                var stampIds: [UUID] = []
                 for cutout in cutouts {
                     if let stamp = CustomStampManager.shared.addStamp(image: cutout) {
-                        lastStamp = stamp
+                        stampIds.append(stamp.id)
                     }
                 }
-                if let stamp = lastStamp {
-                    lastCustomStampIdString = stamp.id.uuidString
-                    isCustomStampMode = true
+                // Place extracted stamps directly on the canvas (staggered from center),
+                // same as the photo picker extraction path.
+                if !stampIds.isEmpty {
+                    placeFullPhotoStamps(stampIds)
                 }
             }
         }
@@ -3010,13 +3187,17 @@ struct DrawScreen: View {
                                 .opacity(bgOpacity)
                                 .allowsHitTesting(false)
                         }
-                        // Input handler — no self-rendering; external layer canvases handle display
+                        // Input handler — no self-rendering; external layer canvases handle display.
+                        // canvasColor: .clear — the visual background comes from the canvasColor layer
+                        // at the top of this ZStack (a few lines above). Passing canvasColor here
+                        // would add a second semi-transparent layer on top, double-stacking the color
+                        // and making the eraser unable to match the correct composited background.
                         DrawingCanvas(
                             lines: activeLayerLinesBinding,
                             currentColor: currentColor,
                             lineWidth: $lineWidth,
                             isEraser: $isEraser,
-                            canvasColor: canvasBackgroundImage != nil ? .clear : canvasColor,
+                            canvasColor: .clear,
                             backgroundImage: canvasBackgroundImage,
                             backgroundOffset: backgroundOffset,
                             penType: currentPenType,
@@ -3070,12 +3251,11 @@ struct DrawScreen: View {
                             },
                             onEraserCommitted: { _ in },
                             onStampModeDragOnEmpty: { startPoint in
-                                // Auto-switch to draw mode only when dragging on empty canvas in stamp mode.
-                                // Returns true so the caller can start drawing immediately (without waiting
-                                // for SwiftUI to re-render isStampMode change).
+                                // Draw on empty canvas even in stamp mode — don't auto-switch modes.
+                                // The only way to switch to pen mode is the pen button.
+                                // Returns true to start drawing immediately without waiting for re-render.
                                 let hit = topmostStampHit(at: startPoint, layerOrder: layerOrder, stamps: placedStamps)
-                                if hit == nil { isStampMode = false; return true }
-                                return false
+                                return hit == nil   // draw if empty canvas, do nothing if over a stamp
                             },
                             currentLine: $currentLine
                         )
@@ -3131,70 +3311,8 @@ struct DrawScreen: View {
                         snugRectOverlay
                         // Magic menu renders on top of all stamps
                         activeMagicMenuView
-                        // Window-level pinch + long press
-                        WindowPinchView(
-                            placedStamps: $placedStamps,
-                            stampResizeStartSize: $stampResizeStartSize,
-                            stampResizeTargetId: $stampResizeTargetId,
-                            stampRotatingId: $stampRotatingId,
-                            canvasOrigin: canvasOriginInWindow,
-                            canvasSize: canvasSize,
-                            selectedStamp: selectedStamp,
-                            onLongPress: { _ in },
-                            isLongPressing: $isLongPressing,
-                            showLayersPanel: showLayersPanel,
-                            suppressCanvasTap: suppressCanvasTapAfterPlace,
-                            isStampMode: isStampMode,
-                            layerOrder: layerOrder,
-                            selectedStampId: selectedStampId,
-                            onLongPressStamp: { id in
-                                // Only keep the snug rect during drag if the stamp was already selected
-                                showSnugDuringDrag = (selectedStampId == id && showStampMagicMenu)
-                                selectedStampId = id
-                                showStampMagicMenu = false
-                            },
-                            onStampDragEnd: { id in
-                                // Only restore selection+strip if stamp was already selected
-                                // when the drag started (showSnugDuringDrag captures this).
-                                if showSnugDuringDrag {
-                                    selectedStampId = id
-                                    showStampMagicMenu = true
-                                } else {
-                                    // Draw mode: clear the selectedStampId that onLongPressStamp set.
-                                    // Without this, the stamp stays "selected" for hitTest and its
-                                    // UIPanGestureRecognizer can drag it on the next single-finger touch.
-                                    selectedStampId = nil
-                                }
-                                showSnugDuringDrag = false
-                            },
-                            onStampTap: { id in
-                                activateStamp(id: id)
-                            },
-                            onCanvasTap: {
-                                selectedStampId = nil
-                                showStampMagicMenu = false
-                                pendingInsertAboveStampId = nil
-                                explicitLayerSelection = false
-                                ensureLayerSelection()
-                            },
-                            onBeforeStampChange: { pushUndoSnapshot() },
-                            onBackgroundPanBegan: canvasBackgroundImage != nil ? {
-                                undoStack.append(CanvasSnapshot(drawingLayers: drawingLayers, stamps: placedStamps, layerOrder: layerOrder, backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation))
-                                redoStack = []
-                            } : nil,
-                            onBackgroundPan: canvasBackgroundImage != nil ? { delta in
-                                let newOffset = CGSize(
-                                    width: backgroundOffset.width + delta.width,
-                                    height: backgroundOffset.height + delta.height
-                                )
-                                backgroundOffset = clampedBackgroundOffset(newOffset)
-                            } : nil,
-                            onBackgroundDoubleTap: nil,  // extract moved to BG chip ··· menu
-                            blockGestures: showTextComposer || showPenStudio || showBgEditor ||
-                                showOpacitySheet || showCanvasBgSheet || showCanvasImagePicker ||
-                                showSignInForPost || showPenColorPicker || showCanvasColorPicker ||
-                                showVideoTimeline
-                        )
+                        // Window-level pinch + long press + instant stamp pan
+                        windowPinchView
                         } // end stamps ZStack
                         .coordinateSpace(name: "stampCanvas")
                         .frame(width: canvasSize.width, height: canvasSize.height, alignment: .topLeading)
@@ -3236,7 +3354,12 @@ struct DrawScreen: View {
                                     // + opens system ColorPicker
                                     Button {
                                         penPickerColor = currentColor
-                                        showPenColorPicker = true
+                                        // Force false→true even if stuck true (stale-picker
+                                        // state from cancelled-swipe + X-tap sequence) so
+                                        // updateUIView fires and the stale guard in
+                                        // _ColorPickerPresenter clears the stuck state.
+                                        showPenColorPicker = false
+                                        DispatchQueue.main.async { showPenColorPicker = true }
                                     } label: {
                                         ZStack {
                                             Circle().fill(Color(UIColor.secondarySystemBackground))
@@ -3819,6 +3942,8 @@ struct WindowPinchView: UIViewRepresentable {
     var selectedStampId: UUID? = nil
     var onLongPressStamp: ((UUID) -> Void)? = nil
     var onStampDragEnd: ((UUID) -> Void)? = nil   // called after long-press drag ends; re-shows menu
+    var onStampPanBegan: (() -> Void)? = nil       // instant-drag: push undo on first move
+    var onStampPanMove: ((UUID, CGPoint) -> Void)? = nil  // instant-drag: update stamp position
     var onStampTap: ((UUID) -> Void)? = nil
     var onCanvasTap: (() -> Void)? = nil
     var onBeforeStampChange: (() -> Void)? = nil
@@ -3826,6 +3951,7 @@ struct WindowPinchView: UIViewRepresentable {
     var onBackgroundPan: ((CGSize) -> Void)? = nil
     var onBackgroundDoubleTap: (() -> Void)? = nil
     var blockGestures: Bool = false     // true when any sheet/picker is open over the canvas
+    var blockCanvasTap: Bool = false    // true when precision tweak panel is open; suppresses onCanvasTap without blocking pinch/rotation
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -3873,6 +3999,20 @@ struct WindowPinchView: UIViewRepresentable {
                 window.addGestureRecognizer(longPress)
                 context.coordinator.longPressRecognizer = longPress
 
+                // 1-finger stamp pan — fires on first movement (no hold required).
+                // gestureRecognizerShouldBegin returns false unless over a stamp,
+                // so empty-canvas touches fall through to the drawing canvas normally.
+                let stampPan = UIPanGestureRecognizer(
+                    target: context.coordinator,
+                    action: #selector(Coordinator.handleStampPan(_:))
+                )
+                stampPan.minimumNumberOfTouches = 1
+                stampPan.maximumNumberOfTouches = 1
+                stampPan.cancelsTouchesInView = false
+                stampPan.delegate = context.coordinator
+                window.addGestureRecognizer(stampPan)
+                context.coordinator.stampPanRecognizer = stampPan
+
                 let doubleTap = UITapGestureRecognizer(
                     target: context.coordinator,
                     action: #selector(Coordinator.handleWindowDoubleTap(_:))
@@ -3901,7 +4041,9 @@ struct WindowPinchView: UIViewRepresentable {
     func updateUIView(_ uiView: UIView, context: Context) {
         context.coordinator.parent = self
         // In stamp/hand mode, collapse longpress delay so stamps drag immediately.
-        context.coordinator.longPressRecognizer?.minimumPressDuration = isStampMode ? 0.05 : 0.4
+        // Stamp mode: 0.3s — long enough for the instant pan to fire first on a drag,
+        // short enough to feel responsive for deliberate LP select+drag.
+        context.coordinator.longPressRecognizer?.minimumPressDuration = isStampMode ? 0.3 : 0.4
     }
 
     static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
@@ -3921,6 +4063,9 @@ struct WindowPinchView: UIViewRepresentable {
             if let bgPan = coordinator.backgroundPanRecognizer {
                 window.removeGestureRecognizer(bgPan)
             }
+            if let stampPan = coordinator.stampPanRecognizer {
+                window.removeGestureRecognizer(stampPan)
+            }
             if let tap = coordinator.tapRecognizer {
                 window.removeGestureRecognizer(tap)
             }
@@ -3938,7 +4083,12 @@ struct WindowPinchView: UIViewRepresentable {
         var tapRecognizer: UITapGestureRecognizer?
         var doubleTapRecognizer: UITapGestureRecognizer?
         var backgroundPanRecognizer: UIPanGestureRecognizer?
+        var stampPanRecognizer: UIPanGestureRecognizer?
         private var lastPanTranslation: CGPoint = .zero
+        // Instant stamp-pan state (no hold required, no selection)
+        var stampPanStampId: UUID? = nil
+        var stampPanStartLoc: CGPoint? = nil
+        var stampPanStartPos: CGPoint? = nil
         var startCentroid: CGPoint = .zero
         var startPosition: CGPoint = .zero
         var startSize: CGFloat = 0
@@ -3954,6 +4104,29 @@ struct WindowPinchView: UIViewRepresentable {
         init(_ parent: WindowPinchView) { self.parent = parent }
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { return true }
+
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            guard gestureRecognizer === stampPanRecognizer else { return true }
+            guard parent.isStampMode else { return false }
+            guard !parent.blockGestures else { return false }
+            let windowPt = gestureRecognizer.location(in: nil)
+            let canvasX = windowPt.x - parent.canvasOrigin.x
+            let canvasY = windowPt.y - parent.canvasOrigin.y
+            guard canvasX >= 0 && canvasY >= 0 &&
+                  canvasX <= parent.canvasSize.width &&
+                  canvasY <= parent.canvasSize.height else {
+                return false
+            }
+            let loc = CGPoint(x: canvasX, y: canvasY)
+            let hit = topmostStampHit(at: loc, layerOrder: parent.layerOrder, stamps: parent.placedStamps)
+            // Block instant pan only on the stamp that already has the magic menu open —
+            // prevents palette drag from accidentally dragging its own stamp underneath.
+            // Other stamps can still be instant-dragged even while one is selected.
+            if let selectedId = parent.selectedStampId, hit?.id == selectedId {
+                return false
+            }
+            return hit != nil
+        }
 
         // Pencil touches go straight to DrawingCanvas — never intercepted at window level.
         // Window-level recognizers (pinch, rotation, pan, long press) are finger-only.
@@ -4006,8 +4179,7 @@ struct WindowPinchView: UIViewRepresentable {
                 var touchPoints: [CGPoint] = []
                 for i in 0..<g.numberOfTouches {
                     let wp = g.location(ofTouch: i, in: nil)
-                    touchPoints.append(CGPoint(x: wp.x - parent.canvasOrigin.x,
-                                               y: wp.y - parent.canvasOrigin.y))
+                    touchPoints.append(CGPoint(x: wp.x - parent.canvasOrigin.x, y: wp.y - parent.canvasOrigin.y))
                 }
                 var votes: [UUID: Int] = [:]
                 for pt in touchPoints {
@@ -4073,8 +4245,7 @@ struct WindowPinchView: UIViewRepresentable {
                 var touchPoints: [CGPoint] = []
                 for i in 0..<g.numberOfTouches {
                     let wp = g.location(ofTouch: i, in: nil)
-                    touchPoints.append(CGPoint(x: wp.x - parent.canvasOrigin.x,
-                                               y: wp.y - parent.canvasOrigin.y))
+                    touchPoints.append(CGPoint(x: wp.x - parent.canvasOrigin.x, y: wp.y - parent.canvasOrigin.y))
                 }
                 var votes: [UUID: Int] = [:]
                 for pt in touchPoints {
@@ -4106,6 +4277,52 @@ struct WindowPinchView: UIViewRepresentable {
             }
         }
 
+        // Instant stamp drag — no hold required, no selection change.
+        // gestureRecognizerShouldBegin already confirmed we're over a stamp in stamp mode.
+        @objc func handleStampPan(_ g: UIPanGestureRecognizer) {
+            guard parent.isStampMode else { return }
+            let windowPt = g.location(in: nil)
+            let loc = CGPoint(x: windowPt.x - parent.canvasOrigin.x, y: windowPt.y - parent.canvasOrigin.y)
+
+            switch g.state {
+            case .began:
+                // If LP snuck in before movement was detected, clear all LP state now.
+                // Pan owns the touch for position; LP is only for deliberate select+drag.
+                if longPressStampId != nil {
+                    longPressStampId = nil
+                    longPressStartLocation = nil
+                    longPressDragStartPos = nil
+                    longPressDragStarted = false
+                    parent.isLongPressing = false
+                }
+                let hit = topmostStampHit(at: loc, layerOrder: parent.layerOrder, stamps: parent.placedStamps)
+                guard let stamp = hit else { return }
+                // If LP set selectedStampId on this stamp before pan took over, clear it —
+                // instant drag should leave stamps unselected.
+                if parent.selectedStampId == stamp.id {
+                    parent.onCanvasTap?()   // deselects + cleans up menu state
+                }
+                stampPanStampId = stamp.id
+                stampPanStartLoc = loc
+                stampPanStartPos = stamp.position
+                parent.onStampPanBegan?()   // push undo snapshot
+            case .changed:
+                guard let stampId = stampPanStampId,
+                      let startLoc = stampPanStartLoc,
+                      let startPos = stampPanStartPos else { return }
+                let newPos = CGPoint(
+                    x: startPos.x + (loc.x - startLoc.x),
+                    y: startPos.y + (loc.y - startLoc.y)
+                )
+                parent.onStampPanMove?(stampId, newPos)
+            case .ended, .cancelled, .failed:
+                stampPanStampId = nil
+                stampPanStartLoc = nil
+                stampPanStartPos = nil
+            default: break
+            }
+        }
+
         @objc func handleWindowDoubleTap(_ g: UITapGestureRecognizer) {
             guard !parent.showLayersPanel else { return }
             let windowPt = g.location(in: nil)
@@ -4133,6 +4350,7 @@ struct WindowPinchView: UIViewRepresentable {
                 parent.onStampTap?(hit.id)
             } else {
                 guard !parent.suppressCanvasTap else { return }
+                guard !parent.blockCanvasTap else { return }
                 parent.onCanvasTap?()
             }
         }
@@ -4165,8 +4383,18 @@ struct WindowPinchView: UIViewRepresentable {
 
             switch g.state {
             case .began:
+                // Don't start a stamp drag when the precision tweak panel is open —
+                // holding a TweakRepeatButton would otherwise trigger a 0.4s long-press
+                // that hits onLongPressStamp → showStampMagicMenu = false, closing the panel.
+                guard !parent.blockCanvasTap else { return }
+                // Instant stamp pan already owns this touch — don't show snug rect.
+                guard stampPanStampId == nil else { return }
                 let hit = topmostStampHit(at: loc, layerOrder: parent.layerOrder, stamps: parent.placedStamps)
                 guard let hitStamp = hit else { return }
+                // Block LP only when touching the stamp that already has the magic menu open —
+                // prevents palette drag from dragging its own stamp underneath.
+                // LP on any OTHER stamp (to drag it) is allowed even while one is selected.
+                guard hitStamp.id != parent.selectedStampId else { return }
                 parent.isLongPressing = true
                 longPressStampId = hitStamp.id
                 longPressStartLocation = loc
@@ -4226,7 +4454,6 @@ struct WindowPinchView: UIViewRepresentable {
         }
 
         func centroid(_ g: UIPinchGestureRecognizer) -> CGPoint {
-            // Get position in window coordinates then convert to canvas coordinates
             let inWindow: CGPoint
             if g.numberOfTouches >= 2 {
                 let p0 = g.location(ofTouch: 0, in: nil)
@@ -4237,7 +4464,6 @@ struct WindowPinchView: UIViewRepresentable {
             } else {
                 return .zero
             }
-            // Convert from window to canvas coordinates
             return CGPoint(x: inWindow.x - parent.canvasOrigin.x, y: inWindow.y - parent.canvasOrigin.y)
         }
     }

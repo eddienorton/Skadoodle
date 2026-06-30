@@ -1128,9 +1128,8 @@ func renderCanvasWithStamps(drawingLayers: [DrawingLayer], stamps: [PlacedStamp]
                         if let img = stamp.inlineImage {
                             Image(uiImage: img)
                                 .resizable()
-                                .scaledToFill()
+                                .scaledToFit()
                                 .frame(width: stamp.displayWidth, height: stamp.displayHeight)
-                                .clipped()
                         } else if let customId = stamp.customImageId,
                            let customStamp = CustomStampManager.shared.stamps.first(where: { $0.id == customId }),
                            let img = customStamp.image {
@@ -1297,6 +1296,7 @@ private struct TweakRepeatButton: View {
 private struct _SideLPButton: View {
     let icon: String
     let color: Color
+    var isPanelDragging: Bool = false
     let onTap: () -> Void
     let onLongPress: () -> Void
     @State private var isPressed = false
@@ -1310,10 +1310,14 @@ private struct _SideLPButton: View {
             .opacity(isPressed ? 0.35 : 1.0)
             .animation(.easeOut(duration: 0.12), value: isPressed)
             .onTapGesture {
+                guard !isPanelDragging else { return }
                 UISelectionFeedbackGenerator().selectionChanged()
                 onTap()
             }
-            .onLongPressGesture(minimumDuration: 0.5) { onLongPress() }
+            .onLongPressGesture(minimumDuration: 0.5) {
+                guard !isPanelDragging else { return }
+                onLongPress()
+            }
             .simultaneousGesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { _ in if !isPressed { isPressed = true } }
@@ -1347,6 +1351,22 @@ struct StampMagicMenu: View {
     @State private var accDrag: CGSize = .zero
     /// In-flight translation for the current gesture only (resets to .zero at gesture end).
     @State private var liveDrag: CGSize = .zero
+    /// True while a drag is in progress — suppresses button actions so drag-and-release
+    /// doesn't accidentally trigger flip/rotate/delete.
+    @State private var isDragging = false
+
+    /// Clamp a total panel offset so the panel can't be dragged off the canvas.
+    /// Keeps at least 60pt of panel visible from each edge.
+    private func clampedOffset(_ offset: CGSize) -> CGSize {
+        guard canvasSize.width > 0 && canvasSize.height > 0 else { return .zero }
+        let minX = -(canvasSize.width - 80)   // 80pt: keeps panel visible from left
+        let maxX: CGFloat = 0                  // don't drag right past default position
+        let vertLimit = canvasSize.height / 2 - 80
+        return CGSize(
+            width:  min(max(offset.width,  minX), maxX),
+            height: min(max(offset.height, -vertLimit), vertLimit)
+        )
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 6) {
@@ -1415,14 +1435,33 @@ struct StampMagicMenu: View {
             // gestures instead of being blocked by them — fixes the "jumps on release" bug
             // when dragging the panel starting from a button rather than the top area.
             DragGesture(minimumDistance: 4)
-                .onChanged { value in withAnimation(.none) { liveDrag = value.translation } }
-                .onEnded { value in
+                .onChanged { value in
+                    isDragging = true
+                    // Clamp so the panel can't be dragged fully off-canvas
+                    let proposed = CGSize(
+                        width:  accDrag.width  + value.translation.width,
+                        height: accDrag.height + value.translation.height
+                    )
+                    let clamped = clampedOffset(proposed)
                     withAnimation(.none) {
-                        accDrag.width  += value.translation.width
-                        accDrag.height += value.translation.height
+                        liveDrag = CGSize(
+                            width:  clamped.width  - accDrag.width,
+                            height: clamped.height - accDrag.height
+                        )
+                    }
+                }
+                .onEnded { value in
+                    let proposed = CGSize(
+                        width:  accDrag.width  + value.translation.width,
+                        height: accDrag.height + value.translation.height
+                    )
+                    withAnimation(.none) {
+                        accDrag  = clampedOffset(proposed)
                         liveDrag = .zero
                     }
                     onOffsetSaved?(accDrag)
+                    // Brief delay so the gesture-end doesn't race with button tap recognition
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { isDragging = false }
                 }
         )
     }
@@ -1457,12 +1496,13 @@ struct StampMagicMenu: View {
     func sideButtonLP(_ icon: String, color: Color = .white,
                       onTap: @escaping () -> Void,
                       onLongPress: @escaping () -> Void) -> some View {
-        _SideLPButton(icon: icon, color: color, onTap: onTap, onLongPress: onLongPress)
+        _SideLPButton(icon: icon, color: color, isPanelDragging: isDragging,
+                      onTap: onTap, onLongPress: onLongPress)
     }
 
     // Icon-only button for the narrow side panel
     func sideButton(_ icon: String, color: Color = .white, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
+        Button(action: { guard !isDragging else { return }; action() }) {
             Image(systemName: icon)
                 .font(.system(size: 17))
                 .foregroundColor(color)
@@ -1980,6 +2020,16 @@ private struct _ColorPickerPresenter: UIViewRepresentable {
         init(_ parent: _ColorPickerPresenter) { self.parent = parent }
 
         func presentIfNeeded(from view: UIView) {
+            // Stale-picker guard: if picker was dismissed by UIKit without going through
+            // either delegate (e.g., cancelled swipe + X tap leaves interactiveDismiss
+            // stuck true and didFinish early-returns), presentingViewController is nil
+            // even though picker is non-nil. Clear that state so we can re-present.
+            if let p = picker, p.presentingViewController == nil {
+                picker = nil
+                originalColor = nil
+                interactiveDismiss = false
+                parent.isPresented = false
+            }
             guard picker == nil,
                   let root = view.window?.rootViewController else { return }
             let top = topmostVC(root)
@@ -2020,6 +2070,10 @@ private struct _ColorPickerPresenter: UIViewRepresentable {
 
         func colorPickerViewControllerDidSelectColor(_ viewController: UIColorPickerViewController) {
             // Live preview — update color as the user moves the picker.
+            // Also reset interactiveDismiss: if the user partially swiped (setting the flag)
+            // then cancelled and resumed picking, the flag gets stuck true. Resetting here
+            // means a subsequent X-button tap is processed correctly.
+            interactiveDismiss = false
             parent.color = Color(viewController.selectedColor)
         }
 

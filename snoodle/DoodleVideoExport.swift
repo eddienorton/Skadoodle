@@ -271,6 +271,16 @@ final class DoodleTimelapseExporter: ObservableObject {
             let fb: [UIColor] = [.white, .black, UIColor(white: 0.95, alpha: 1)]
             return fb[min(document.canvasColorIndex, fb.count - 1)]
         }()
+        // Video frames are opaque MP4 — a semi-transparent canvas color would composite
+        // over the black CVPixelBuffer default, making the canvas appear dark/black.
+        // Pre-composite over white once here to match the live canvas appearance
+        // (canvas color painted over the white app background).
+        let opaqueCanvasColor: UIColor = {
+            var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+            canvasUIColor.getRed(&r, green: &g, blue: &b, alpha: &a)
+            guard a < 1.0 else { return canvasUIColor }
+            return UIColor(red: a*r + (1-a), green: a*g + (1-a), blue: a*b + (1-a), alpha: 1.0)
+        }()
         let bgImage  = document.backgroundImageData.flatMap { UIImage(data: $0) }
         let bgOffset = CGSize(width: document.backgroundOffsetX, height: document.backgroundOffsetY)
 
@@ -283,7 +293,14 @@ final class DoodleTimelapseExporter: ObservableObject {
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: Int(pixelSize.width),
             AVVideoHeightKey: Int(pixelSize.height),
-            AVVideoCompressionPropertiesKey: [AVVideoAverageBitRateKey: 5_000_000]
+            AVVideoCompressionPropertiesKey: [AVVideoAverageBitRateKey: 5_000_000],
+            // Tag the encoded stream as sRGB so the H.264 encoder doesn't apply a
+            // blind RGB→YCbCr conversion that shifts colors lighter than the source.
+            AVVideoColorPropertiesKey: [
+                AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
+                AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
+                AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2
+            ]
         ]
         let writerInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         writerInput.expectsMediaDataInRealTime = false
@@ -292,6 +309,11 @@ final class DoodleTimelapseExporter: ObservableObject {
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
             kCVPixelBufferWidthKey as String: Int(pixelSize.width),
             kCVPixelBufferHeightKey as String: Int(pixelSize.height),
+            // Match the sRGB color space tag on the video stream so the encoder
+            // treats source pixels as sRGB (not untagged, which gets treated as BT.601).
+            kCVImageBufferColorPrimariesKey as String: kCVImageBufferColorPrimaries_ITU_R_709_2,
+            kCVImageBufferTransferFunctionKey as String: kCVImageBufferTransferFunction_ITU_R_709_2,
+            kCVImageBufferYCbCrMatrixKey as String: kCVImageBufferYCbCrMatrix_ITU_R_709_2,
         ]
         let adaptor = AVAssetWriterInputPixelBufferAdaptor(
             assetWriterInput: writerInput,
@@ -319,7 +341,7 @@ final class DoodleTimelapseExporter: ObservableObject {
 
         // ── Initialize runningComposite: blank canvas + background ───────────
         var runningComposite = UIGraphicsImageRenderer(size: pointSize, format: imgFormat).image { ctx in
-            canvasUIColor.setFill()
+            opaqueCanvasColor.setFill()
             ctx.fill(CGRect(origin: .zero, size: pointSize))
             if let bgImg = bgImage {
                 let effectiveImg = applyBgEffectsForExport(
@@ -372,7 +394,7 @@ final class DoodleTimelapseExporter: ObservableObject {
                 stamps: doneStamps,
                 layerOrder: order,
                 size: pointSize,
-                canvasColor: canvasUIColor,
+                canvasColor: opaqueCanvasColor,
                 backgroundImage: bgImage,
                 backgroundOffset: bgOffset,
                 bgOpacity: document.bgOpacity,
@@ -464,7 +486,7 @@ final class DoodleTimelapseExporter: ObservableObject {
                     let belowComp = renderCanvasWithStamps(
                         drawingLayers: splitLayers(belowEntries), stamps: splitStamps(belowEntries),
                         layerOrder: splitOrder(belowEntries), size: pointSize,
-                        canvasColor: canvasUIColor, backgroundImage: bgImage,
+                        canvasColor: opaqueCanvasColor, backgroundImage: bgImage,
                         backgroundOffset: bgOffset,
                         bgOpacity: document.bgOpacity, bgBlur: document.bgBlur,
                         bgBrightness: document.bgBrightness, bgSaturation: document.bgSaturation
@@ -1064,20 +1086,72 @@ struct TilePlayBadge: View {
     }
 }
 
-// MARK: - Video Player (full-screen AVPlayerViewController)
+// MARK: - Video Player (full-screen AVPlayerViewController + share button)
 
 struct VideoPlayerView: UIViewControllerRepresentable {
     let url: URL
 
-    func makeUIViewController(context: Context) -> AVPlayerViewController {
-        let vc = AVPlayerViewController()
-        vc.player = AVPlayer(url: url)
-        vc.showsPlaybackControls = true
-        vc.player?.play()
-        return vc
+    func makeUIViewController(context: Context) -> VideoPlayerContainerVC {
+        VideoPlayerContainerVC(url: url)
     }
 
-    func updateUIViewController(_ uiViewController: AVPlayerViewController, context: Context) {}
+    func updateUIViewController(_ uiViewController: VideoPlayerContainerVC, context: Context) {}
+}
+
+/// Wraps AVPlayerViewController as a child so we can add our own share button
+/// as a sibling view on top — something AVPlayerViewController itself doesn't support on iOS.
+class VideoPlayerContainerVC: UIViewController {
+    private let url: URL
+    private let playerVC = AVPlayerViewController()
+
+    init(url: URL) {
+        self.url = url
+        super.init(nibName: nil, bundle: nil)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+
+        // Embed AVPlayerViewController as a child
+        addChild(playerVC)
+        playerVC.view.frame = view.bounds
+        playerVC.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(playerVC.view)
+        playerVC.didMove(toParent: self)
+
+        playerVC.player = AVPlayer(url: url)
+        playerVC.showsPlaybackControls = true
+        playerVC.player?.play()
+
+        // Share button — sits on top of the player view in the container's own view layer
+        let btn = UIButton(type: .system)
+        let cfg = UIImage.SymbolConfiguration(pointSize: 20, weight: .semibold)
+        btn.setImage(UIImage(systemName: "square.and.arrow.up", withConfiguration: cfg), for: .normal)
+        btn.tintColor = .white
+        btn.backgroundColor = UIColor.black.withAlphaComponent(0.35)
+        btn.layer.cornerRadius = 14
+        btn.layer.masksToBounds = true
+        btn.addTarget(self, action: #selector(shareTapped), for: .touchUpInside)
+        btn.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(btn)
+
+        NSLayoutConstraint.activate([
+            btn.widthAnchor.constraint(equalToConstant: 44),
+            btn.heightAnchor.constraint(equalToConstant: 44),
+            btn.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            btn.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12)
+        ])
+    }
+
+    @objc private func shareTapped() {
+        let av = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+        av.popoverPresentationController?.sourceView = view
+        av.popoverPresentationController?.sourceRect = CGRect(
+            x: view.bounds.maxX - 56, y: (view.window?.safeAreaInsets.top ?? 0) + 8,
+            width: 44, height: 44)
+        present(av, animated: true)
+    }
 }
 
 // MARK: - Share sheet

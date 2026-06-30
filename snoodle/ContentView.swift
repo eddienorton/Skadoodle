@@ -197,11 +197,17 @@ struct ContentView: View {
                     NotificationCenter.default.post(name: .snoodleProfilePhotoRestored, object: nil)
                 }
             },
-            content: { DrawScreen(isPresented: $showingDraw, selectedTab: $selectedTab, entryToEdit: entryToEdit).environmentObject(store) }
+            content: { DrawScreen(isPresented: $showingDraw, selectedTab: $selectedTab, entryToEdit: $entryToEdit).environmentObject(store) }
         ))
         .onReceive(NotificationCenter.default.publisher(for: .snoodleReEditEntry)) { note in
+            // Set entryToEdit first, then open the sheet one run-loop later so the
+            // content closure is guaranteed to capture the non-nil entry.
+            // Without the async separation, SwiftUI can split the two assignments across
+            // render cycles, presenting the sheet with entryToEdit = nil → black canvas.
             entryToEdit = note.object as? SnoodleEntry
-            showingDraw = true
+            DispatchQueue.main.async {
+                showingDraw = true
+            }
         }
         // Profile setup handled naturally via Profile tab
     }

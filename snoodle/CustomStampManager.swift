@@ -101,6 +101,14 @@ class CustomStampManager: ObservableObject {
         return stamp
     }
 
+    /// Move an existing stamp to the top of its list (most recently used).
+    func moveToTop(id: UUID) {
+        guard let idx = stamps.firstIndex(where: { $0.id == id }), idx != 0 else { return }
+        let stamp = stamps.remove(at: idx)
+        stamps.insert(stamp, at: 0)
+        save()
+    }
+
     func delete(_ stamp: CustomStamp) {
         try? FileManager.default.removeItem(at: stamp.imageURL)
         stamps.removeAll { $0.id == stamp.id }

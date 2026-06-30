@@ -12,15 +12,21 @@ import UIKit
 struct ObjectSegmentationSheet: View {
     let images: [UIImage]
     let preProcessedObjects: [SegmentedObject]?   // non-nil = skip Vision processing
+    /// When true, a single-object result skips the picker and fires onSelect immediately.
+    /// Set false for flows where the user should always confirm (e.g. background extract).
+    let bypassSingle: Bool
     let onSelect: ([UIImage]) -> Void
     @StateObject private var model = ObjectSegmentationModel()
     @Environment(\.dismiss) var dismiss
     @State private var selectedIds: Set<UUID> = []
+    /// Guards against .task firing multiple times (can happen when sheet item identity changes).
+    @State private var didAutoSelect = false
 
-    /// Convenience init for raw images (StampToolButton photo flow).
-    init(images: [UIImage], onSelect: @escaping ([UIImage]) -> Void) {
+    /// Convenience init for raw images (StampToolButton photo flow — bypasses single-object picker).
+    init(images: [UIImage], bypassSingle: Bool = true, onSelect: @escaping ([UIImage]) -> Void) {
         self.images = images
         self.preProcessedObjects = nil
+        self.bypassSingle = bypassSingle
         self.onSelect = onSelect
     }
 
@@ -28,6 +34,7 @@ struct ObjectSegmentationSheet: View {
     init(preProcessedObjects: [SegmentedObject], onSelect: @escaping ([UIImage]) -> Void) {
         self.images = []
         self.preProcessedObjects = preProcessedObjects
+        self.bypassSingle = false   // pre-processed path always shows picker
         self.onSelect = onSelect
     }
 
@@ -150,8 +157,12 @@ struct ObjectSegmentationSheet: View {
                     model.load(preProcessed: pre)
                 } else {
                     await model.processAll(images: images)
-                    // Single object from photo flow — bypass picker
-                    if model.objects.count == 1 {
+                    // Single-object auto-bypass: skip the picker when there's exactly one result
+                    // and the caller opted in (bypassSingle). didAutoSelect guards against .task
+                    // firing more than once (can happen when sheet item identity changes during
+                    // parent sheet dismissal, e.g. background picker closing while this opens).
+                    if bypassSingle && model.objects.count == 1 && !didAutoSelect {
+                        didAutoSelect = true
                         onSelect([model.objects[0].image])
                         dismiss()
                     }

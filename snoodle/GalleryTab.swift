@@ -176,6 +176,9 @@ struct SnoodleDetailView: View {
                         .foregroundColor(.white.opacity(0.6))
                 }
 
+                // Timelapse video export (v2.3+)
+                TimelapseButton(entry: entry)
+
                 // Re-edit button
                 Button(action: {
                     dismiss()
@@ -187,9 +190,6 @@ struct SnoodleDetailView: View {
                         .font(.system(size: 22))
                         .foregroundColor(.white.opacity(0.8))
                 }
-
-                // Timelapse video export (v2.3+)
-                TimelapseButton(entry: entry)
 
                 // Submit to world gallery
                 SubmitButton(entry: entry)
