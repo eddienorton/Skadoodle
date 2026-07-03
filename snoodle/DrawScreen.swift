@@ -206,17 +206,21 @@ struct BackgroundEditorView: View {
     @Binding var bgBlur: Double
     @Binding var bgBrightness: Double
     @Binding var bgSaturation: Double
+    @Binding var backgroundOffset: CGSize
     var showCancel: Bool = false
     let lines: [DrawingLine]
     let stamps: [PlacedStamp]
     let canvasSize: CGSize
     var onExtractionResult: ((UIImage?) -> Void)? = nil
     var onCancel: () -> Void
-    var onDone: () -> Void
+    var onDone: (UIImage?) -> Void
 
     @State private var canvasSnapshot: UIImage? = nil
     @AppStorage("bgExtractionEnabled") private var extractionEnabled: Bool = false
     @StateObject private var extraction = ExtractionModel()
+    @GestureState private var dragTranslation: CGSize = .zero
+    @GestureState private var livePinchScale: CGFloat = 1.0
+    @State private var bgZoom: CGFloat = 1.0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -233,13 +237,18 @@ struct BackgroundEditorView: View {
                         // Canvas background color
                         canvasColor
 
-                        // Background image with live effects
+                        // Background image with live effects + drag/pinch interaction
                         if let bgImg = backgroundImage {
                             let imgW = bgImg.size.width, imgH = bgImg.size.height
-                            let scale = imgW > 0 && imgH > 0 ? max(availW / imgW, availH / imgH) : 1
+                            let coverScale = imgW > 0 && imgH > 0 ? max(availW / imgW, availH / imgH) : 1
+                            let previewScale = canvasSize.width > 0 ? availW / canvasSize.width : 1
+                            let liveZoom = bgZoom * livePinchScale
+                            let displayOffsetX = backgroundOffset.width * previewScale + dragTranslation.width
+                            let displayOffsetY = backgroundOffset.height * previewScale + dragTranslation.height
                             Image(uiImage: bgImg)
                                 .resizable()
-                                .frame(width: imgW * scale, height: imgH * scale)
+                                .frame(width: imgW * coverScale * liveZoom, height: imgH * coverScale * liveZoom)
+                                .offset(x: displayOffsetX, y: displayOffsetY)
                                 .frame(width: availW, height: availH, alignment: .center)
                                 .clipped()
                                 .blur(radius: bgBlur, opaque: true)
@@ -271,6 +280,20 @@ struct BackgroundEditorView: View {
                         }
                     }
                     .frame(width: availW, height: availH)
+                    .gesture(
+                        SimultaneousGesture(
+                            DragGesture(minimumDistance: 5)
+                                .updating($dragTranslation) { value, state, _ in state = value.translation }
+                                .onEnded { value in
+                                    let ps = canvasSize.width > 0 ? availW / canvasSize.width : 1
+                                    backgroundOffset.width  += value.translation.width  / ps
+                                    backgroundOffset.height += value.translation.height / ps
+                                },
+                            MagnificationGesture()
+                                .updating($livePinchScale) { value, state, _ in state = value }
+                                .onEnded { val in bgZoom = max(1.0, bgZoom * val) }
+                        )
+                    )
                     .cornerRadius(12)
                     .shadow(color: .black.opacity(0.15), radius: 8, x: 0, y: 4)
                     .frame(width: geo.size.width, height: geo.size.height, alignment: .center)
@@ -394,7 +417,8 @@ struct BackgroundEditorView: View {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button("Done") {
                     onExtractionResult?(extractionEnabled ? extraction.extractedSubject : nil)
-                    onDone()
+                    let baked = bakeBgTransform()
+                    onDone(baked)
                 }
                 .fontWeight(.semibold)
             }
@@ -426,6 +450,25 @@ struct BackgroundEditorView: View {
             }
             Slider(value: value, in: range)
                 .tint(.purple)
+        }
+    }
+
+    /// Bakes the current zoom + offset into a canvas-sized UIImage.
+    /// Returns nil if the image is nil or transform is identity (no-op).
+    func bakeBgTransform() -> UIImage? {
+        guard let img = backgroundImage, (bgZoom != 1.0 || backgroundOffset != .zero) else { return nil }
+        let cW = canvasSize.width, cH = canvasSize.height
+        guard cW > 0, cH > 0 else { return nil }
+        let imgW = img.size.width, imgH = img.size.height
+        guard imgW > 0, imgH > 0 else { return nil }
+        let baseScale = max(cW / imgW, cH / imgH)
+        let totalScale = baseScale * bgZoom
+        let drawW = imgW * totalScale, drawH = imgH * totalScale
+        let x = (cW - drawW) / 2 + backgroundOffset.width
+        let y = (cH - drawH) / 2 + backgroundOffset.height
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: cW, height: cH))
+        return renderer.image { _ in
+            img.draw(in: CGRect(x: x, y: y, width: drawW, height: drawH))
         }
     }
 
@@ -1363,6 +1406,64 @@ struct DrawScreen: View {
         }
     }
 
+    /// Pure-SwiftUI version of stampChipContent for use with ImageRenderer.
+    /// ImageRenderer cannot render UIViewRepresentable (StampTextRenderView), so text stamps
+    /// fall back to SwiftUI Text() — same rendering as renderCanvasWithStamps export path.
+    @ViewBuilder
+    func stampChipRenderable(id: UUID, chipW: CGFloat, chipH: CGFloat) -> some View {
+        if let stamp = placedStamps.first(where: { $0.id == id }) {
+            let scale = chipW / max(canvasSize.width, 1)
+            let scaled: PlacedStamp = {
+                var s = stamp
+                s.position = CGPoint(x: stamp.position.x * scale, y: stamp.position.y * scale)
+                s.size = stamp.size * scale
+                if stamp.stampWidth  > 0 { s.stampWidth  = stamp.stampWidth  * scale }
+                if stamp.stampHeight > 0 { s.stampHeight = stamp.stampHeight * scale }
+                return s
+            }()
+            ZStack {
+                Color.white
+                Group {
+                    if let img = scaled.inlineImage {
+                        Image(uiImage: img).resizable().scaledToFit()
+                            .frame(width: scaled.displayWidth, height: scaled.displayHeight)
+                    } else if let customId = scaled.customImageId,
+                              let cs = CustomStampManager.shared.stamps.first(where: { $0.id == customId }),
+                              let img = cs.image {
+                        Image(uiImage: img).resizable().scaledToFit()
+                            .frame(width: scaled.displayWidth, height: scaled.displayHeight)
+                    } else if let text = scaled.stampText {
+                        Text(text)
+                            .font(renderFontFor(stamp: scaled))
+                            .foregroundColor(scaled.textColor)
+                            .multilineTextAlignment(scaled.textAlignment == "left" ? .leading : scaled.textAlignment == "right" ? .trailing : .center)
+                            .lineLimit(nil)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(width: scaled.displayWidth)
+                            .frame(height: scaled.displayHeight)
+                            .clipped()
+                            .background(scaled.textBgColor == .clear ? Color.clear : scaled.textBgColor)
+                            .cornerRadius(scaled.textBgColor == .clear ? 0 : 8)
+                            .shadow(color: scaled.shadowEnabled ? scaled.shadowColor : .clear,
+                                    radius: scaled.shadowBlur * scale,
+                                    x: scaled.shadowOffsetX * scale,
+                                    y: scaled.shadowOffsetY * scale)
+                    } else {
+                        Text(scaled.emoji)
+                            .font(.system(size: scaled.size * 0.80))
+                            .frame(width: scaled.size, height: scaled.size)
+                    }
+                }
+                .scaleEffect(x: scaled.flipX ? -1 : 1, y: scaled.flipY ? -1 : 1)
+                .rotationEffect(.degrees(scaled.rotation))
+                .opacity(scaled.opacity)
+                .position(scaled.position)
+            }
+            .frame(width: chipW, height: chipH)
+            .clipped()
+        }
+    }
+
     /// Pre-render layer and stamp thumbnails for the video timeline chip strip.
     /// Uses the same rendering as the layers panel — ImageRenderer at 2× scale for retina.
     @MainActor
@@ -1377,7 +1478,7 @@ struct DrawScreen: View {
             if let img = renderer.uiImage { result[layer.id] = img }
         }
         for stamp in placedStamps {
-            let view = AnyView(stampChipContent(id: stamp.id, chipW: chipW, chipH: chipH))
+            let view = AnyView(stampChipRenderable(id: stamp.id, chipW: chipW, chipH: chipH))
             let renderer = ImageRenderer(content: view)
             renderer.scale = 2.0
             if let img = renderer.uiImage { result[stamp.id] = img }
@@ -1973,6 +2074,11 @@ struct DrawScreen: View {
         dupe.textAlignment = stamp.textAlignment
         dupe.textColor = stamp.textColor
         dupe.textBgColor = stamp.textBgColor
+        dupe.shadowEnabled = stamp.shadowEnabled
+        dupe.shadowColor = stamp.shadowColor
+        dupe.shadowBlur = stamp.shadowBlur
+        dupe.shadowOffsetX = stamp.shadowOffsetX
+        dupe.shadowOffsetY = stamp.shadowOffsetY
         dupe.stampWidth = stamp.stampWidth
         dupe.stampHeight = stamp.stampHeight
         dupe.snugWidthRatio = stamp.snugWidthRatio
@@ -2292,7 +2398,7 @@ struct DrawScreen: View {
         }
         let t0 = Date()
         print("[Done] layers=\(visibleLayers.count) stamps=\(placedStamps.count) hasBg=\(canvasBackgroundImage != nil) bgBlur=\(bgBlur)")
-        let img = renderCanvasWithStamps(drawingLayers: visibleLayers, stamps: placedStamps, layerOrder: visibleLayerOrder, size: canvasSize, canvasColor: UIColor(canvasColor), backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation)
+        let img = renderCanvasWithStamps(drawingLayers: visibleLayers, stamps: placedStamps, layerOrder: visibleLayerOrder, size: canvasSize, canvasColor: UIColor(opaqueCanvasColor), backgroundImage: canvasBackgroundImage, backgroundOffset: backgroundOffset, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation)
         print("[Done] renderCanvasWithStamps: \(String(format: "%.2f", Date().timeIntervalSince(t0)))s")
         resultImage = img
         isGeneratingCaption = true
@@ -2495,18 +2601,6 @@ struct DrawScreen: View {
     // Extracted so the compiler can type-check WindowPinchView's many callbacks independently.
     @ViewBuilder
     var windowPinchView: some View {
-        let bgPanBegan: (() -> Void)? = canvasBackgroundImage != nil ? {
-            undoStack.append(CanvasSnapshot(drawingLayers: drawingLayers, stamps: placedStamps,
-                layerOrder: layerOrder, backgroundImage: canvasBackgroundImage,
-                backgroundOffset: backgroundOffset, bgOpacity: bgOpacity, bgBlur: bgBlur,
-                bgBrightness: bgBrightness, bgSaturation: bgSaturation))
-            redoStack = []
-        } : nil
-        let bgPan: ((CGSize) -> Void)? = canvasBackgroundImage != nil ? { delta in
-            let newOffset = CGSize(width: backgroundOffset.width + delta.width,
-                                   height: backgroundOffset.height + delta.height)
-            backgroundOffset = clampedBackgroundOffset(newOffset)
-        } : nil
         let blockGestures = showTextComposer || showPenStudio || showBgEditor ||
             showOpacitySheet || showCanvasBgSheet || showCanvasImagePicker ||
             showSignInForPost || showPenColorPicker || showCanvasColorPicker || showVideoTimeline
@@ -2554,8 +2648,8 @@ struct DrawScreen: View {
                 ensureLayerSelection()
             },
             onBeforeStampChange: { pushUndoSnapshot() },
-            onBackgroundPanBegan: bgPanBegan,
-            onBackgroundPan: bgPan,
+            onBackgroundPanBegan: nil,
+            onBackgroundPan: nil,
             onBackgroundDoubleTap: nil,
             blockGestures: blockGestures,
             blockCanvasTap: showMenuTweak
@@ -2606,6 +2700,15 @@ struct DrawScreen: View {
                                           textColor: src.textColor, textBgColor: src.textBgColor,
                                           stampWidth: src.stampWidth, stampHeight: src.stampHeight)
                     dupe.inlineImage = src.inlineImage
+                    dupe.fontStyle = src.fontStyle
+                    dupe.textAlignment = src.textAlignment
+                    dupe.shadowEnabled = src.shadowEnabled
+                    dupe.shadowColor = src.shadowColor
+                    dupe.shadowBlur = src.shadowBlur
+                    dupe.shadowOffsetX = src.shadowOffsetX
+                    dupe.shadowOffsetY = src.shadowOffsetY
+                    dupe.snugWidthRatio = src.snugWidthRatio
+                    dupe.snugHeightRatio = src.snugHeightRatio
                     appendStampToLayer(dupe)
                     selectedStampId = dupe.id
                 }
@@ -3019,6 +3122,7 @@ struct DrawScreen: View {
                             bgBlur: $bgBlur,
                             bgBrightness: $bgBrightness,
                             bgSaturation: $bgSaturation,
+                            backgroundOffset: $backgroundOffset,
                             lines: allDrawingLines,
                             stamps: placedStamps,
                             canvasSize: canvasSize,
@@ -3031,13 +3135,17 @@ struct DrawScreen: View {
                                 pendingExtractedSubject = nil
                                 showCanvasBgSheet = false
                             },
-                            onDone: {
+                            onDone: { bakedImage in
                                 bgPickerWasApplied = true
                                 let hasBgChange = pendingBgHistoryIndex != nil
                                 let hasStamp = pendingExtractedSubject != nil
-                                if hasBgChange || hasStamp {
+                                if hasBgChange || hasStamp || bakedImage != nil {
                                     undoStack.append(CanvasSnapshot(drawingLayers: drawingLayers, stamps: placedStamps, layerOrder: layerOrder, backgroundImage: savedBgImage, backgroundOffset: savedBgOffset, bgOpacity: savedBgOpacity, bgBlur: savedBgBlur, bgBrightness: savedBgBrightness, bgSaturation: savedBgSaturation))
                                     redoStack = []
+                                }
+                                if let baked = bakedImage {
+                                    canvasBackgroundImage = baked
+                                    backgroundOffset = .zero
                                 }
                                 if let idx = pendingBgHistoryIndex {
                                     BackgroundPhotoHistory.shared.moveToTop(at: idx)
@@ -3116,6 +3224,7 @@ struct DrawScreen: View {
                     bgBlur: $bgBlur,
                     bgBrightness: $bgBrightness,
                     bgSaturation: $bgSaturation,
+                    backgroundOffset: $backgroundOffset,
                     lines: allDrawingLines,
                     stamps: placedStamps,
                     canvasSize: canvasSize,
@@ -3127,10 +3236,16 @@ struct DrawScreen: View {
                         pendingExtractedSubject = nil
                         showBgEditor = false
                     },
-                    onDone: {
-                        if let subject = pendingExtractedSubject {
+                    onDone: { bakedImage in
+                        if bakedImage != nil || pendingExtractedSubject != nil {
                             undoStack.append(CanvasSnapshot(drawingLayers: drawingLayers, stamps: placedStamps, layerOrder: layerOrder, backgroundImage: savedBgImage, backgroundOffset: savedBgOffset, bgOpacity: savedBgOpacity, bgBlur: savedBgBlur, bgBrightness: savedBgBrightness, bgSaturation: savedBgSaturation))
                             redoStack = []
+                        }
+                        if let baked = bakedImage {
+                            canvasBackgroundImage = baked
+                            backgroundOffset = .zero
+                        }
+                        if let subject = pendingExtractedSubject {
                             let result = subject.croppedToContentWithOrigin()
                             let cropped = result?.image ?? subject
                             let cropOrigin = result?.origin ?? .zero
@@ -3454,19 +3569,19 @@ struct DrawScreen: View {
                                     },
                                     initialShadowEnabled: editingStampId.flatMap { id in
                                         placedStamps.first(where: { $0.id == id })?.shadowEnabled
-                                    } ?? false,
+                                    },
                                     initialShadowColor: editingStampId.flatMap { id in
                                         placedStamps.first(where: { $0.id == id })?.shadowColor
-                                    } ?? .black,
+                                    },
                                     initialShadowBlur: editingStampId.flatMap { id in
                                         placedStamps.first(where: { $0.id == id })?.shadowBlur
-                                    } ?? 4.0,
+                                    },
                                     initialShadowOffsetX: editingStampId.flatMap { id in
                                         placedStamps.first(where: { $0.id == id })?.shadowOffsetX
-                                    } ?? 2.0,
+                                    },
                                     initialShadowOffsetY: editingStampId.flatMap { id in
                                         placedStamps.first(where: { $0.id == id })?.shadowOffsetY
-                                    } ?? 2.0,
+                                    },
                                     onPlace: { text, fontId, fontStyle, alignment, color, bgColor, shEnabled, shColor, shBlur, shOffX, shOffY in
                                         if let editId = editingStampId,
                                            let idx = placedStamps.firstIndex(where: { $0.id == editId }) {

@@ -358,7 +358,7 @@ private struct ChapterBreakChip: View {
             }
             .frame(width: 44, height: 72)
 
-            Text("\(String(format: "%.0f", chapterBreak.holdDuration))s")
+            Text(chapterBreak.holdDuration == floor(chapterBreak.holdDuration) ? "\(Int(chapterBreak.holdDuration))s" : String(format: "%.1fs", chapterBreak.holdDuration))
                 .font(.system(size: 10, weight: .medium))
                 .foregroundColor(.blue)
         }

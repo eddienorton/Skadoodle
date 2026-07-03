@@ -2131,11 +2131,11 @@ struct TextComposerSheet: View {
     var initialAlignment: String? = nil
     var initialTextColor: Color? = nil
     var initialTextBgColor: Color? = nil
-    var initialShadowEnabled: Bool = false
-    var initialShadowColor: Color = .black
-    var initialShadowBlur: Double = 4.0
-    var initialShadowOffsetX: Double = 2.0
-    var initialShadowOffsetY: Double = 2.0
+    var initialShadowEnabled: Bool? = nil
+    var initialShadowColor: Color? = nil
+    var initialShadowBlur: Double? = nil
+    var initialShadowOffsetX: Double? = nil
+    var initialShadowOffsetY: Double? = nil
     var onPlace: (String, String, String, String, Color, Color, Bool, Color, Double, Double, Double) -> Void
 
     @AppStorage("lastTextStampText")      private var textInput: String = ""
@@ -2197,12 +2197,12 @@ struct TextComposerSheet: View {
             if let style  = initialFontStyle  { selectedFontStyle = style }
             if let align  = initialAlignment  { selectedAlignment = align }
             if let color  = initialTextColor  { selectedTextColor = color }
-            if let bgCol  = initialTextBgColor { selectedTextBgColor = bgCol }
-            shadowEnabled  = initialShadowEnabled
-            shadowColor    = initialShadowColor
-            shadowBlur     = initialShadowBlur
-            shadowOffsetX  = initialShadowOffsetX
-            shadowOffsetY  = initialShadowOffsetY
+            if let bgCol  = initialTextBgColor  { selectedTextBgColor = bgCol }
+            if let v = initialShadowEnabled  { shadowEnabled  = v }
+            if let v = initialShadowColor    { shadowColor    = v }
+            if let v = initialShadowBlur     { shadowBlur     = v }
+            if let v = initialShadowOffsetX  { shadowOffsetX  = v }
+            if let v = initialShadowOffsetY  { shadowOffsetY  = v }
         }
     }
 }

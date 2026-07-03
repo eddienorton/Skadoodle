@@ -351,7 +351,15 @@ final class DoodleTimelapseExporter: ObservableObject {
                     bgBrightness: document.bgBrightness,
                     bgSaturation: document.bgSaturation
                 )
-                effectiveImg.draw(in: CGRect(origin: .zero, size: pointSize))
+                // Cover-scale to match live canvas and gallery render (renderCanvasWithStamps).
+                let imgW = effectiveImg.size.width, imgH = effectiveImg.size.height
+                if imgW > 0 && imgH > 0 {
+                    let scale = max(pointSize.width / imgW, pointSize.height / imgH)
+                    let drawW = imgW * scale, drawH = imgH * scale
+                    let x = (pointSize.width - drawW) / 2 + bgOffset.width
+                    let y = (pointSize.height - drawH) / 2 + bgOffset.height
+                    effectiveImg.draw(in: CGRect(x: x, y: y, width: drawW, height: drawH))
+                }
             }
         }
 

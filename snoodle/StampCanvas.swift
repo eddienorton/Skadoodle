@@ -554,6 +554,15 @@ struct StampCanvasView: UIViewRepresentable {
                 stampHeight: src.stampHeight
             )
             dupe.inlineImage = src.inlineImage
+            dupe.fontStyle = src.fontStyle
+            dupe.textAlignment = src.textAlignment
+            dupe.shadowEnabled = src.shadowEnabled
+            dupe.shadowColor = src.shadowColor
+            dupe.shadowBlur = src.shadowBlur
+            dupe.shadowOffsetX = src.shadowOffsetX
+            dupe.shadowOffsetY = src.shadowOffsetY
+            dupe.snugWidthRatio = src.snugWidthRatio
+            dupe.snugHeightRatio = src.snugHeightRatio
             if let onDuped = parent.onStampDuped {
                 // Caller handles append + layerOrder update
                 onDuped(dupe)
