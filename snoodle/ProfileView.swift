@@ -77,12 +77,29 @@ struct DoodleActionSheet: View {
 
             // Actions
             VStack(spacing: 0) {
-                if !isCurrentBanner {
+                // Shown either way — when this doodle is already the banner (including
+                // via the silent first-post auto-assign in autoAssignBannerIfNeeded()),
+                // show a disabled confirmation row instead of hiding the option outright,
+                // so it's never unclear whether "Make Banner" was ever there at all.
+                if isCurrentBanner {
+                    HStack(spacing: 14) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 18))
+                            .foregroundColor(.purple)
+                            .frame(width: 28)
+                            .padding(.leading, 20)
+                        Text("Current Banner")
+                            .font(.system(size: 16))
+                            .foregroundColor(.secondary)
+                        Spacer()
+                    }
+                    .padding(.vertical, 14)
+                } else {
                     actionRow(icon: "photo.on.rectangle", label: "Make Banner", color: .purple) {
                         onMakeBanner()
                     }
-                    Divider().padding(.leading, 52)
                 }
+                Divider().padding(.leading, 52)
 
                 if doodle.userId == SnoodleAuthManager.shared.userId {
                     actionRow(icon: "globe.slash", label: "Remove from Community", color: .orange) {
@@ -253,7 +270,8 @@ struct PublicProfileView: View {
     @State private var doodles: [WorldSnoodle] = []
     @State private var isLoading = true
     @State private var selectedDoodleIndex: Int? = nil
-    @State private var actionDoodle: WorldSnoodle? = nil  // drives doodle action tray
+    @State private var actionDoodle: WorldSnoodle? = nil  // drives the minimal Open/Make Banner menu
+    @State private var actionDoodleIndex: Int? = nil       // paired index, used if "Open" is chosen
     @State private var localFollowerCount: Int = 0
     @State private var hasInitializedCount = false
     @State private var showFollowersList = false
@@ -374,32 +392,10 @@ struct PublicProfileView: View {
             FollowListSheet(userId: userId, mode: .following)
                 .presentationSizing(.page)
         }
-        .sheet(item: $actionDoodle) { doodle in
-            DoodleActionSheet(
-                doodle: doodle,
-                isCurrentBanner: editHeaderDoodleId == doodle.id,
-                onMakeBanner: {
-                    editHeaderDoodleId = doodle.id
-                    saveBanner(doodle.id)
-                    actionDoodle = nil
-                },
-                onRemoveFromCommunity: {
-                    WorldGalleryManager.shared.delete(worldSnoodle: doodle) { _ in }
-                    doodles.removeAll { $0.id == doodle.id }
-                    actionDoodle = nil
-                },
-                onDeleteLocally: {
-                    if let entry = SnoodleStore.shared.entries.first(where: { $0.worldGalleryId == doodle.id || $0.id.uuidString == doodle.id }) {
-                        SnoodleStore.shared.delete(entry)
-                    }
-                    doodles.removeAll { $0.id == doodle.id }
-                    actionDoodle = nil
-                }
-            )
-            .presentationDetents([.height(380)])
-            .presentationDragIndicator(.visible)
-        }
-        // View a doodle — pass filtered array so index always matches grid
+        // View a doodle — pass filtered array so index always matches grid.
+        // Same view/flow for both "Open" on your own profile and tapping
+        // straight through on someone else's profile — browsing your own
+        // community doodles should feel identical to browsing anyone else's.
         .fullScreenCover(item: Binding(
             get: { selectedDoodleIndex.map { IdentifiableInt(value: $0) } },
             set: { selectedDoodleIndex = $0?.value }
@@ -655,7 +651,34 @@ struct PublicProfileView: View {
                             )
                             .clipped()
                             .onTapGesture {
-                                if isOwnProfile { actionDoodle = doodle } else { selectedDoodleIndex = index }
+                                if isOwnProfile {
+                                    actionDoodle = doodle
+                                    actionDoodleIndex = index
+                                } else {
+                                    selectedDoodleIndex = index
+                                }
+                            }
+                            // Attached directly to the tapped cell (not the
+                            // screen root) so on iPad — where confirmationDialog
+                            // presents as a popover, not a bottom sheet — it
+                            // anchors to this doodle's own cell instead of
+                            // defaulting to the top-center of whatever view the
+                            // modifier happened to be attached to. iPhone is
+                            // unaffected (always a bottom sheet regardless of
+                            // anchor).
+                            .confirmationDialog("Doodle Options", isPresented: Binding(
+                                get: { actionDoodle?.id == doodle.id },
+                                set: { if !$0 { actionDoodle = nil; actionDoodleIndex = nil } }
+                            ), titleVisibility: .hidden) {
+                                Button("Open") {
+                                    selectedDoodleIndex = actionDoodleIndex
+                                }
+                                if editHeaderDoodleId != doodle.id {
+                                    Button("Make Banner") {
+                                        editHeaderDoodleId = doodle.id
+                                        saveBanner(doodle.id)
+                                    }
+                                }
                             }
                     }
                 }
@@ -982,6 +1005,7 @@ struct ProfileTab: View {
             NavigationStack {
                 if let uid = auth.userId {
                     PublicProfileView(userId: uid, isOwnProfile: true)
+                        .id(uid)
                 }
             }
         } else {

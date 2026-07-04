@@ -188,7 +188,7 @@ class UserProfileManager: ObservableObject {
         return UserProfile(
             userId: userId,
             username: data["username"] as? String ?? "Anonymous",
-            avatar: (data["photoURL"] as? String) != nil && (data["avatar"] as? String ?? "").isEmpty ? "photo" : (data["avatar"] as? String ?? ""),
+            avatar: (data["photoURL"] as? String) != nil ? "photo" : (data["avatar"] as? String ?? ""),
             photoURL: data["photoURL"] as? String,
             photoBase64: data["photoBase64"] as? String,
             tagline: data["tagline"] as? String ?? "",
@@ -234,6 +234,8 @@ class UserProfileManager: ObservableObject {
                     URLSession.shared.dataTask(with: url) { data, _, _ in
                         if let data = data {
                             DispatchQueue.main.async {
+                                // Guard: only write if we're still signed in as this user
+                                guard Auth.auth().currentUser?.uid == userId else { return }
                                 UserDefaults.standard.set(data, forKey: "snoodleProfilePhoto")
                                 NotificationCenter.default.post(name: .snoodleProfilePhotoRestored, object: nil)
                             }
@@ -351,6 +353,8 @@ class UserProfileManager: ObservableObject {
                         URLSession.shared.dataTask(with: url) { data, _, _ in
                             if let data = data {
                                 DispatchQueue.main.async {
+                                    // Guard: only write if we're still signed in as this user
+                                    guard Auth.auth().currentUser?.uid == userId else { return }
                                     UserDefaults.standard.set(data, forKey: "snoodleProfilePhoto")
                                     NotificationCenter.default.post(name: .snoodleProfilePhotoRestored, object: nil)
                                 }
@@ -1609,6 +1613,652 @@ class FollowManager: ObservableObject {
     }
 }
 
+// MARK: - Daily Challenge
+
+/// One entry in the daily_gallery collection.
+struct DailyEntry: Identifiable {
+    let id: String          // "{contestDate}_{userId}"
+    let userId: String
+    let date: String        // "YYYY-MM-DD" in DailyEntry.contestTimeZone (America/New_York)
+    let imageURL: String
+    let caption: String
+    let timestamp: Date
+    var votes: Int
+
+    // Resolved live via UserProfileManager, never stored on the daily_gallery
+    // doc itself — mirrors WorldSnoodle.applyProfile. A user's username/avatar
+    // can change after they've posted; freezing it at submission time would mean
+    // old entries keep showing stale info forever, which is exactly the bug this
+    // avoids. See DailyManager.resolveProfiles(for:).
+    var username: String = "Anonymous"
+    var avatar: String = "🎨"
+    var photoURL: String? = nil
+
+    var isVotedByMe: Bool = false
+
+    mutating func applyProfile(_ profile: UserProfile?) {
+        guard let profile else { return }
+        username = profile.username
+        avatar = profile.avatar
+        photoURL = profile.photoURL
+    }
+
+    // The single global instant every Daily Doodle day boundary is anchored to.
+    // Chosen over UTC deliberately (skadoodle.nyc, and most current users are
+    // US-based) — a global synchronized cutoff is still required for the blind
+    // submission / timed reveal / voting-window mechanic to work at all (unlike,
+    // say, Wordle, which has no such requirement and rolls over at each player's
+    // own local midnight instead). TimeZone handles the EST/EDT shift automatically.
+    static let contestTimeZone = TimeZone(identifier: "America/New_York")!
+
+    static func contestDateString(for date: Date = Date()) -> String {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyy-MM-dd"
+        fmt.timeZone = contestTimeZone
+        return fmt.string(from: date)
+    }
+
+    static func docId(date: String, userId: String) -> String {
+        "\(date)_\(userId)"
+    }
+}
+
+/// One past (already-concluded) day's winner, for the Past Winners archive list.
+struct DailyWinnerSummary: Identifiable {
+    let date: String
+    let winner: DailyEntry
+    let entryCount: Int
+    var id: String { date }
+}
+
+/// Rotating daily prompts — picked by day-of-year (in DailyEntry.contestTimeZone) so everyone sees the same prompt.
+struct DailyPrompt {
+    static let prompts: [String] = [
+        "Superhero", "Robot", "Dragon", "Treehouse", "Submarine",
+        "Wizard", "Pizza", "Astronaut", "Mermaid", "Monster Truck",
+        "Ghost Town", "Jungle", "Time Machine", "Sandwich", "Volcano",
+        "Dinosaur", "Snowman", "Pirate Ship", "Unicorn", "Haunted House",
+        "Spaceship", "Ninja", "Hot Air Balloon", "Ferris Wheel", "Lighthouse",
+        "Secret Door", "Rainbow", "Treasure Map", "Roller Coaster", "Igloo",
+        "Candy Castle", "Deep Sea", "Storm", "Knight", "Magic Potion",
+        "Giant Robot", "Tiny World", "Cloud City", "Caveman", "Noodle Soup"
+    ]
+
+    /// Same mod-cycle formula as `today`, generalized to an arbitrary date —
+    /// needed so the fallback for a non-today date (e.g. "yesterday" in the
+    /// Voting Booth) reflects that date's own day-of-year, not today's.
+    static func subject(for date: Date) -> String {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = DailyEntry.contestTimeZone
+        let dayOfYear = cal.ordinality(of: .day, in: .year, for: date) ?? 1
+        return prompts[(dayOfYear - 1) % prompts.count]
+    }
+
+    static var today: String { subject(for: Date()) }
+}
+
+class DailyManager: ObservableObject {
+    static let shared = DailyManager()
+
+    private let db = Firestore.firestore()
+    private let storage = Storage.storage()
+    private let collection = "daily_gallery"
+
+    @Published var yesterdayEntries: [DailyEntry] = []
+    @Published var myEntryToday: DailyEntry? = nil
+    @Published var isLoadingYesterday: Bool = false
+    @Published var isPosting: Bool = false
+    @Published var isWithdrawing: Bool = false
+    @Published var pastWinners: [DailyWinnerSummary] = []
+    @Published var isLoadingPastWinners: Bool = false
+    @Published var todaySubmissionCount: Int = 0
+
+    /// The subject everyone's drawing to today. Always has a safe, synchronous
+    /// value from the moment DailyManager exists (falls back to the legacy
+    /// local 40-item mod-cycle in `DailyPrompt.today`), then silently upgrades
+    /// once fetchTodaySubject() resolves the real server-assigned value — same
+    /// "instant safe default, upgrades when the network catches up" pattern as
+    /// the two-phase Vision/Gemini caption flow. See fetchTodaySubject() below
+    /// for the server-side plan (`daily_prompts` collection, one doc per
+    /// calendar date — not yet backed by an admin tool, so most dates will
+    /// still fall back to the local list until that's built).
+    @Published var todaySubject: String = DailyPrompt.today
+
+    /// Total votes cast across all of yesterday's entries. A single aggregate
+    /// number like this doesn't violate blind-reveal — it can't be used to infer
+    /// which entry is leading (unlike a per-entry tally or vote-sorted list
+    /// order), the same way an election turnout counter doesn't leak who's
+    /// ahead. Derived from `yesterdayEntries`, which is already fully fetched
+    /// (see fetchYesterday()) — no extra query needed.
+    var yesterdayTotalVotes: Int {
+        yesterdayEntries.reduce(0) { $0 + $1.votes }
+    }
+
+    /// Distinct people who voted yesterday — NOT the same as yesterdayTotalVotes,
+    /// since voting is unlimited (one person can vote for several entries). Set by
+    /// fetchYesterday() once entries arrive. Still just an aggregate count, same
+    /// blind-reveal exception as yesterdayTotalVotes above — it says nothing about
+    /// which entry anyone voted for.
+    @Published var yesterdayUniqueVoterCount: Int = 0
+
+    /// Total registered accounts — a soft denominator for the turnout percentage
+    /// below. Grows as people sign up and includes inactive/test accounts, so it's
+    /// shown alongside the raw voter count rather than replacing it.
+    @Published var totalUserCount: Int = 0
+
+    var yesterdayVoterTurnoutPercent: Int {
+        guard totalUserCount > 0 else { return 0 }
+        return Int((Double(yesterdayUniqueVoterCount) / Double(totalUserCount) * 100).rounded())
+    }
+
+    // MARK: - Fetch
+
+    /// Fetches only the current user's own entry for today, by known docId.
+    /// Deliberately does NOT query the whole day's collection — today's contest
+    /// is blind until it concludes, so the client should never receive other
+    /// users' entries while the day is still in progress.
+    func fetchMyEntryToday() {
+        guard let uid = SnoodleAuthManager.shared.userId else {
+            DispatchQueue.main.async { self.myEntryToday = nil }
+            return
+        }
+        let dateStr = DailyEntry.contestDateString()
+        let docId = DailyEntry.docId(date: dateStr, userId: uid)
+        db.collection(collection).document(docId).getDocument { [weak self] snap, error in
+            guard let self else { return }
+            if let error { print("❌ DailyManager fetchMyEntryToday: \(error.localizedDescription)") }
+            guard let entry = snap.flatMap({ self.parse(id: $0.documentID, data: $0.data() ?? [:]) }) else {
+                DispatchQueue.main.async { self.myEntryToday = nil }
+                return
+            }
+            self.resolveProfiles(for: [entry]) { resolved in
+                DispatchQueue.main.async { self.myEntryToday = resolved.first }
+            }
+        }
+    }
+
+    /// Fetches only the *count* of today's submissions via a Firestore count
+    /// aggregation query — never the documents themselves. This preserves the
+    /// same blind-submission privacy guarantee as fetchMyEntryToday(): a raw
+    /// number reveals nothing about who's posted or what they drew, just how
+    /// many people have entered so far today.
+    func fetchTodaySubmissionCount() {
+        let dateStr = DailyEntry.contestDateString()
+        db.collection(collection)
+            .whereField("date", isEqualTo: dateStr)
+            .count
+            .getAggregation(source: .server) { [weak self] snapshot, error in
+                guard let self else { return }
+                if let error {
+                    print("❌ DailyManager fetchTodaySubmissionCount: \(error.localizedDescription)")
+                    return
+                }
+                let count = snapshot?.count.intValue ?? 0
+                DispatchQueue.main.async { self.todaySubmissionCount = count }
+            }
+    }
+
+    /// Resolves today's subject: checks a same-day UserDefaults cache first
+    /// (the subject for a given date never changes once fetched, so there's no
+    /// reason to re-hit Firestore every time this is called — TodayTab's
+    /// onAppear/refreshable and DrawScreen's onAppear all call this
+    /// defensively), then reads `daily_prompts/{date}` — one doc per calendar
+    /// date, `subject: String` — falling back to the legacy local mod-cycle
+    /// (`DailyPrompt.today`) if that date has no assignment yet. This is the
+    /// first piece of moving subjects server-side; there's no admin tool to
+    /// populate `daily_prompts` yet, so for now most dates will fall back to
+    /// the local list until dates are seeded (by hand via Firebase Console, or
+    /// later via the planned website admin panel).
+    private var cachedSubjectDate: String {
+        get { UserDefaults.standard.string(forKey: "cachedSubjectDate") ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: "cachedSubjectDate") }
+    }
+    private var cachedSubjectText: String {
+        get { UserDefaults.standard.string(forKey: "cachedSubjectText") ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: "cachedSubjectText") }
+    }
+
+    /// Shared subject resolver for an arbitrary date — reads `daily_prompts/{date}`,
+    /// falling back to the local mod-cycle formula (`DailyPrompt.subject(for:)`,
+    /// evaluated for *that* date, not "today") if no assignment exists yet.
+    /// `hasRealAssignment` tells the caller whether it's safe to cache the
+    /// result permanently (only true for a real Firestore-sourced value — see
+    /// fetchTodaySubject()'s caching note).
+    private func fetchSubject(for date: Date, completion: @escaping (_ subject: String, _ hasRealAssignment: Bool) -> Void) {
+        let dateStr = DailyEntry.contestDateString(for: date)
+        db.collection("daily_prompts").document(dateStr).getDocument { snap, error in
+            if let error {
+                print("❌ DailyManager fetchSubject(\(dateStr)): \(error.localizedDescription)")
+            }
+            let raw = snap?.data()?["subject"] as? String
+            let hasRealAssignment = raw?.isEmpty == false
+            let subject = hasRealAssignment ? raw! : DailyPrompt.subject(for: date)
+            completion(subject, hasRealAssignment)
+        }
+    }
+
+    func fetchTodaySubject() {
+        let dateStr = DailyEntry.contestDateString()
+        if cachedSubjectDate == dateStr, !cachedSubjectText.isEmpty {
+            todaySubject = cachedSubjectText
+            return
+        }
+        fetchSubject(for: Date()) { [weak self] subject, hasRealAssignment in
+            guard let self else { return }
+            DispatchQueue.main.async {
+                self.todaySubject = subject
+                // Only persist the cache once there's a real, permanent Firestore
+                // assignment for this date. If we cached the fallback too, seeding
+                // daily_prompts/{date} by hand mid-day (the current workflow, with
+                // no admin tool yet) would never show up on a device that already
+                // fetched today once — it'd be stuck showing the fallback until the
+                // date rolls over. Leaving the fallback un-cached costs one cheap
+                // Firestore read per app open on unseeded days, which is fine.
+                if hasRealAssignment {
+                    self.cachedSubjectDate = dateStr
+                    self.cachedSubjectText = subject
+                }
+            }
+        }
+    }
+
+    /// Yesterday's real subject — used by the Voting Booth header. Deliberately
+    /// NOT derived from any entry's `caption` field: that's fragile for any
+    /// hand-seeded/legacy test data whose caption was never forced to the
+    /// subject the way a real `post()` call always does, and would silently
+    /// show whatever garbage caption a test doc happens to have. This always
+    /// resolves the same way `today` does (Firestore-first, local-list
+    /// fallback), just for yesterday's date instead.
+    @Published var yesterdaySubject: String = ""
+
+    func fetchYesterdaySubject() {
+        let yesterday = Date().addingTimeInterval(-86400)
+        fetchSubject(for: yesterday) { [weak self] subject, _ in
+            DispatchQueue.main.async { self?.yesterdaySubject = subject }
+        }
+    }
+
+    /// Fetches all entries from yesterday's now-concluded-submission-but-still-voting
+    /// contest and publishes them to yesterdayEntries. Thin wrapper around the shared
+    /// per-day fetch below — this is the only place that writes to that published
+    /// property, since it's specifically "yesterday," not any arbitrary past day
+    /// (the archive/past-winners views use fetchEntries(for:) directly and hold
+    /// their own local state instead).
+    ///
+    /// Blind-reveal voting: no winner is computed or shown here at all, and the
+    /// vote-sorted order the query returns is deliberately discarded in favor of
+    /// timestamp order — showing entries in vote-count order would leak who's
+    /// leading via list position alone, even without printing a number. The
+    /// revealed/final version (sorted by votes, winner spotlighted) only exists
+    /// once a day ages out of this window into the Past Winners archive.
+    func fetchYesterday() {
+        let yesterday = DailyEntry.contestDateString(for: Date().addingTimeInterval(-86400))
+        isLoadingYesterday = true
+        fetchEntries(for: yesterday) { [weak self] entries in
+            let displayOrder = entries.sorted { $0.timestamp < $1.timestamp }
+            DispatchQueue.main.async {
+                self?.yesterdayEntries = displayOrder
+                self?.isLoadingYesterday = false
+            }
+            self?.fetchUniqueVoterCount(for: entries) { count in
+                DispatchQueue.main.async { self?.yesterdayUniqueVoterCount = count }
+            }
+        }
+    }
+
+    /// Counts distinct voters across a set of entries — reads each entry's full
+    /// `votes` subcollection (not just an existence check for one uid, unlike
+    /// fetchVotedIds below) and unions the doc IDs (each doc ID is a voter's
+    /// uid). Bounded by entry count × votes-per-entry, which is fine at this
+    /// app's current scale; would need a collectionGroup query instead if a
+    /// single day ever had a very large number of entries/votes.
+    private func fetchUniqueVoterCount(for entries: [DailyEntry], completion: @escaping (Int) -> Void) {
+        guard !entries.isEmpty else { completion(0); return }
+        let group = DispatchGroup()
+        var voterIds = Set<String>()
+        let lock = NSLock()
+        for entry in entries {
+            group.enter()
+            db.collection(collection).document(entry.id).collection("votes").getDocuments { snap, error in
+                defer { group.leave() }
+                if let error {
+                    print("❌ DailyManager fetchUniqueVoterCount(\(entry.id)): \(error.localizedDescription)")
+                    return
+                }
+                let ids = (snap?.documents ?? []).map { $0.documentID }
+                lock.lock()
+                voterIds.formUnion(ids)
+                lock.unlock()
+            }
+        }
+        group.notify(queue: .main) { completion(voterIds.count) }
+    }
+
+    /// Total registered accounts, via a count aggregation query (never fetches
+    /// the actual user docs). Denominator for the turnout percentage.
+    func fetchTotalUserCount() {
+        db.collection("users").count.getAggregation(source: .server) { [weak self] snapshot, error in
+            guard let self else { return }
+            if let error {
+                print("❌ DailyManager fetchTotalUserCount: \(error.localizedDescription)")
+                return
+            }
+            let count = snapshot?.count.intValue ?? 0
+            DispatchQueue.main.async { self.totalUserCount = count }
+        }
+    }
+
+    /// Fetches all entries for a specific date, sorted server-side by votes
+    /// descending (earliest submission breaks ties), with each entry's
+    /// isVotedByMe resolved against the current user's votes subcollection.
+    ///
+    /// Shared by fetchYesterday() and the past-winners archive (both "yesterday"
+    /// and any older concluded day are the identical shape of query, just
+    /// parameterized by which date string). Sorting/limiting happens in the query
+    /// itself so this scales past whatever a single day's entry count grows to —
+    /// requires a composite Firestore index on daily_gallery: date (==), votes
+    /// (desc), timestamp (asc). See CLAUDE.md "Daily Doodle" section for the spec.
+    func fetchEntries(for date: String, completion: @escaping ([DailyEntry]) -> Void) {
+        db.collection(collection)
+            .whereField("date", isEqualTo: date)
+            .order(by: "votes", descending: true)
+            .order(by: "timestamp", descending: false)
+            .limit(to: 200)
+            .getDocuments { [weak self] snap, error in
+                guard let self else { completion([]); return }
+                if let error { print("❌ DailyManager fetchEntries(\(date)): \(error.localizedDescription)") }
+                let parsed = (snap?.documents ?? [])
+                    .compactMap { self.parse(id: $0.documentID, data: $0.data()) }
+                self.resolveProfiles(for: parsed) { withProfiles in
+                    var entries = withProfiles
+                    self.fetchVotedIds(for: entries) { votedIds in
+                        for i in entries.indices {
+                            entries[i].isVotedByMe = votedIds.contains(entries[i].id)
+                        }
+                        completion(entries)
+                    }
+                }
+            }
+    }
+
+    /// Fetches winners for a window of already-concluded past days, most recent
+    /// first — the "Past Winners" archive. Starts 2 days ago rather than
+    /// yesterday, since yesterday already has its own dedicated section on the
+    /// Today tab; goes back `lookbackDays` from there.
+    ///
+    /// This is ONE range query for the whole window, not one query per day: sorted
+    /// by date ascending then votes descending, so the first entry encountered for
+    /// each date is guaranteed to be that day's top-voted entry (everything sharing
+    /// a date is grouped together by the primary sort, and within a date group the
+    /// highest-voted entry sorts first). No separate summary/snapshot collection
+    /// needed — same composite index as fetchEntries(for:), just a range instead
+    /// of an equality filter on `date`. Fixed-size window for now rather than
+    /// paginated; revisit if history ever outgrows `lookbackDays`.
+    func fetchPastWinners(lookbackDays: Int = 60, completion: (() -> Void)? = nil) {
+        isLoadingPastWinners = true
+        let anchor = Date().addingTimeInterval(-86400 * 2)
+        let earliest = anchor.addingTimeInterval(-86400 * Double(lookbackDays - 1))
+        let anchorStr = DailyEntry.contestDateString(for: anchor)
+        let earliestStr = DailyEntry.contestDateString(for: earliest)
+        print("🔍 DailyManager fetchPastWinners: querying date range \(earliestStr)...\(anchorStr)")
+
+        db.collection(collection)
+            .whereField("date", isGreaterThanOrEqualTo: earliestStr)
+            .whereField("date", isLessThanOrEqualTo: anchorStr)
+            .order(by: "date", descending: false)
+            .order(by: "votes", descending: true)
+            .order(by: "timestamp", descending: false)
+            .limit(to: 3000) // safety cap on raw docs across the whole window, not just winners
+            .getDocuments { [weak self] snap, error in
+                guard let self else { return }
+                if let error {
+                    // Most common cause of an empty archive: Firestore hasn't built the
+                    // composite index yet (date ASC, votes DESC, timestamp ASC). When that's
+                    // the case this error includes a direct "create index" console link.
+                    print("❌ DailyManager fetchPastWinners: \(error.localizedDescription)")
+                }
+                let rawDocs = snap?.documents ?? []
+                print("🔍 DailyManager fetchPastWinners: \(rawDocs.count) raw doc(s) returned from Firestore")
+                let parsed = rawDocs.compactMap { self.parse(id: $0.documentID, data: $0.data()) }
+                if parsed.count != rawDocs.count {
+                    print("⚠️ DailyManager fetchPastWinners: \(rawDocs.count - parsed.count) doc(s) failed to parse (missing/malformed imageURL, userId, date, or timestamp field)")
+                }
+
+                self.resolveProfiles(for: parsed) { entries in
+                    var winnerByDate: [String: DailyEntry] = [:]
+                    var countByDate: [String: Int] = [:]
+                    for entry in entries {
+                        countByDate[entry.date, default: 0] += 1
+                        // First entry seen per date wins — the sort order guarantees
+                        // it's the highest-voted one in that date's group.
+                        if winnerByDate[entry.date] == nil {
+                            winnerByDate[entry.date] = entry
+                        }
+                    }
+                    let summaries = winnerByDate.compactMap { date, winner -> DailyWinnerSummary? in
+                        // Zero-engagement rule — don't list a day at all if nobody
+                        // voted for anything that day.
+                        guard winner.votes > 0 else { return nil }
+                        return DailyWinnerSummary(date: date, winner: winner, entryCount: countByDate[date] ?? 1)
+                    }.sorted { $0.date > $1.date }
+                    print("🔍 DailyManager fetchPastWinners: \(countByDate.count) date(s) present in range, \(summaries.count) surfaced as summaries (dates with 0 votes are omitted) — dates seen: \(countByDate.keys.sorted())")
+
+                    DispatchQueue.main.async {
+                        self.pastWinners = summaries
+                        self.isLoadingPastWinners = false
+                        completion?()
+                    }
+                }
+            }
+    }
+
+    /// Checks which of the given daily entries the current user has voted for,
+    /// via a batched existence check on each entry's votes subcollection.
+    /// Mirrors WorldGalleryManager.fetchLikedIds — daily entries don't get this
+    /// for free from parse() since "isVotedByMe" isn't a field on the doc itself.
+    private func fetchVotedIds(for entries: [DailyEntry], completion: @escaping (Set<String>) -> Void) {
+        guard let uid = SnoodleAuthManager.shared.userId, !entries.isEmpty else {
+            completion([])
+            return
+        }
+        let group = DispatchGroup()
+        var votedIds = Set<String>()
+        for entry in entries {
+            group.enter()
+            db.collection(collection).document(entry.id)
+                .collection("votes").document(uid)
+                .getDocument { snap, _ in
+                    defer { group.leave() }
+                    if snap?.exists == true { votedIds.insert(entry.id) }
+                }
+        }
+        group.notify(queue: .main) { completion(votedIds) }
+    }
+
+    // MARK: - Post
+
+    /// Upload imageData and post (or replace) this user's entry for today.
+    func post(imageData: Data, caption: String, completion: @escaping (Error?) -> Void) {
+        guard let uid = SnoodleAuthManager.shared.userId else {
+            completion(NSError(domain: "DailyManager", code: 0, userInfo: [NSLocalizedDescriptionKey: "Not signed in"]))
+            return
+        }
+        let dateStr = DailyEntry.contestDateString()
+        let docId = DailyEntry.docId(date: dateStr, userId: uid)
+        let storageRef = storage.reference().child("daily_gallery/\(docId).jpg")
+        isPosting = true
+
+        let meta = StorageMetadata()
+        meta.contentType = "image/jpeg"
+        storageRef.putData(imageData, metadata: meta) { [weak self] _, error in
+            if let error {
+                DispatchQueue.main.async { self?.isPosting = false; completion(error) }
+                return
+            }
+            storageRef.downloadURL { [weak self] url, error in
+                guard let self, let downloadURL = url else {
+                    DispatchQueue.main.async { self?.isPosting = false; completion(error) }
+                    return
+                }
+                // Deliberately does NOT write username/avatar/photoURL — these can change
+                // after posting, so they're resolved live via resolveProfiles(for:) on read
+                // instead of frozen on the doc at submission time. See DailyEntry.applyProfile.
+                let data: [String: Any] = [
+                    "userId": uid,
+                    "date": dateStr,
+                    "imageURL": downloadURL.absoluteString,
+                    "caption": caption,
+                    "timestamp": Timestamp(date: Date()),
+                    "votes": 0
+                ]
+
+                self.db.collection(self.collection).document(docId).setData(data) { [weak self] error in
+                    DispatchQueue.main.async {
+                        self?.isPosting = false
+                        if error == nil {
+                            // Only bump the count locally the first time — replacing an
+                            // existing entry (same docId) is an overwrite, not a new
+                            // submission, so re-posting shouldn't inflate the total.
+                            if self?.myEntryToday == nil { self?.todaySubmissionCount += 1 }
+                            self?.fetchMyEntryToday()
+                        }
+                        completion(error)
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Withdraw
+
+    /// Deletes the signed-in user's own entry for today. Only ever touches today's
+    /// doc (derived from the current uid + today's date, not whatever's in
+    /// `myEntryToday`), so there's no way to withdraw anyone else's entry. Safe to
+    /// do as a clean delete — today's entry is guaranteed still-blind/unvoted, so
+    /// there's no votes subcollection to reconcile. Not available once an entry
+    /// has been revealed (see CLAUDE.md — withdrawal is scoped to today only).
+    func withdrawToday(completion: @escaping (Error?) -> Void) {
+        guard let uid = SnoodleAuthManager.shared.userId else {
+            completion(NSError(domain: "DailyManager", code: 0, userInfo: [NSLocalizedDescriptionKey: "Not signed in"]))
+            return
+        }
+        let dateStr = DailyEntry.contestDateString()
+        let docId = DailyEntry.docId(date: dateStr, userId: uid)
+        let storageRef = storage.reference().child("daily_gallery/\(docId).jpg")
+        isWithdrawing = true
+
+        db.collection(collection).document(docId).delete { [weak self] error in
+            if let error {
+                DispatchQueue.main.async { self?.isWithdrawing = false; completion(error) }
+                return
+            }
+            // Best-effort image cleanup — the Firestore doc is the source of truth
+            // for whether an entry exists, so don't block the UI on Storage.
+            storageRef.delete { error in
+                if let error { print("⚠️ DailyManager withdrawToday: storage cleanup failed: \(error.localizedDescription)") }
+            }
+            DispatchQueue.main.async {
+                self?.myEntryToday = nil
+                self?.isWithdrawing = false
+                if let count = self?.todaySubmissionCount, count > 0 { self?.todaySubmissionCount -= 1 }
+                completion(nil)
+            }
+        }
+    }
+
+    // MARK: - Vote
+
+    /// The one day currently open for voting — "yesterday" relative to now, i.e.
+    /// the day that was just revealed and hasn't aged out of the lookback window yet.
+    /// See CLAUDE.md's submission/voting window model.
+    var currentVotableDate: String {
+        DailyEntry.contestDateString(for: Date().addingTimeInterval(-86400))
+    }
+
+    /// Toggles a vote on `entry`. Returns `false` (no-op, nothing written) if the
+    /// entry isn't from the currently-votable day. Today this is belt-and-suspenders —
+    /// the UI only ever surfaces entries from `yesterdayEntries`, which is always
+    /// exactly this window — but it's what will actually stop out-of-window voting
+    /// once an archive/history view can reach older entries. Client-side only; a
+    /// Firestore security rule doing the same check server-side is still deferred
+    /// (see CLAUDE.md).
+    @discardableResult
+    func toggleVote(_ entry: DailyEntry) -> Bool {
+        guard let uid = SnoodleAuthManager.shared.userId else { return false }
+        guard entry.date == currentVotableDate else {
+            print("⚠️ DailyManager toggleVote: blocked — entry.date (\(entry.date)) is outside the current voting window (\(currentVotableDate))")
+            return false
+        }
+        let ref = db.collection(collection).document(entry.id)
+        let voteRef = ref.collection("votes").document(uid)
+        if entry.isVotedByMe {
+            voteRef.delete { error in
+                if let error { print("❌ DailyManager toggleVote (delete): \(error.localizedDescription)") }
+            }
+            ref.updateData(["votes": FieldValue.increment(Int64(-1))]) { error in
+                if let error { print("❌ DailyManager toggleVote (decrement): \(error.localizedDescription)") }
+            }
+            updateLocal(entry.id, voted: false, delta: -1)
+        } else {
+            voteRef.setData(["userId": uid, "timestamp": Timestamp(date: Date())]) { error in
+                if let error { print("❌ DailyManager toggleVote (setData): \(error.localizedDescription)") }
+            }
+            ref.updateData(["votes": FieldValue.increment(Int64(1))]) { error in
+                if let error { print("❌ DailyManager toggleVote (increment): \(error.localizedDescription)") }
+            }
+            updateLocal(entry.id, voted: true, delta: 1)
+        }
+        return true
+    }
+
+    private func updateLocal(_ id: String, voted: Bool, delta: Int) {
+        if let i = yesterdayEntries.firstIndex(where: { $0.id == id }) {
+            yesterdayEntries[i].isVotedByMe = voted
+            yesterdayEntries[i].votes += delta
+        }
+        if myEntryToday?.id == id {
+            myEntryToday?.isVotedByMe = voted
+            myEntryToday?.votes += delta
+        }
+    }
+
+    // MARK: - Parse
+
+    private func parse(id: String, data d: [String: Any]) -> DailyEntry? {
+        guard let imageURL = d["imageURL"] as? String,
+              let userId = d["userId"] as? String,
+              let date = d["date"] as? String,
+              let ts = d["timestamp"] as? Timestamp else { return nil }
+        // Deliberately does NOT read username/avatar/photoURL from the doc —
+        // those are resolved live via resolveProfiles(for:) after parsing.
+        return DailyEntry(
+            id: id,
+            userId: userId,
+            date: date,
+            imageURL: imageURL,
+            caption: d["caption"] as? String ?? "",
+            timestamp: ts.dateValue(),
+            votes: d["votes"] as? Int ?? 0
+        )
+    }
+
+    /// Resolves username/avatar/photoURL for each entry via UserProfileManager
+    /// (batched, cached) instead of trusting whatever was frozen on the doc at
+    /// submission time. Mirrors WorldGalleryManager.applyProfilesAndLikes.
+    private func resolveProfiles(for entries: [DailyEntry], completion: @escaping ([DailyEntry]) -> Void) {
+        guard !entries.isEmpty else { completion([]); return }
+        let userIds = Set(entries.map { $0.userId })
+        UserProfileManager.shared.fetchProfiles(userIds: userIds) { _ in
+            let resolved = entries.map { entry -> DailyEntry in
+                var e = entry
+                e.applyProfile(UserProfileManager.shared.getCached(e.userId))
+                return e
+            }
+            completion(resolved)
+        }
+    }
+}
+
 // MARK: - Phantom Accounts (DEBUG only)
 
 #if DEBUG
@@ -1622,20 +2272,16 @@ struct PhantomAccount {
 
 struct PhantomAccounts {
     static let all: [PhantomAccount] = [
-        PhantomAccount(
-            name: "Phantom One",
-            avatar: "👻",
-            userId: "OuoU7FyilGRQgA0W3q3sxXw5z942",
-            email: "phantom1@skadoodle.dev",
-            password: "password"
-        ),
-        PhantomAccount(
-            name: "Phantom Two",
-            avatar: "🎨",
-            userId: "tFlfWm4t5YahtGe8aYZnCfISk6d2",
-            email: "phantom2@skadoodle.dev",
-            password: "password"
-        )
+        PhantomAccount(name: "Doodle Dan",    avatar: "👻", userId: "T8KZZCKad1cmWbffmdGNZ1wvoJt2", email: "phantom1@skadoodle.dev",  password: "Skadoodle#1"),
+        PhantomAccount(name: "bart-art",      avatar: "🎨", userId: "Q8FTk1ew49fnulc9nSWoXXsLXuf2", email: "phantom2@skadoodle.dev",  password: "Skadoodle#2"),
+        PhantomAccount(name: "Pete Kaso",     avatar: "🖊️", userId: "Oa1gXqUPgAOGrGzKYSmb87bJGo02", email: "phantom3@skadoodle.dev",  password: "Skadoodle#3"),
+        PhantomAccount(name: "Big Franky",    avatar: "⚡", userId: "vTKqPAnP85QnzngpO8cOwIC3pIA3", email: "phantom4@skadoodle.dev",  password: "Skadoodle#4"),
+        PhantomAccount(name: "doodlemaven",   avatar: "🌊", userId: "J3nHTel5XKgObx7hoc29vCYphDY2", email: "phantom5@skadoodle.dev",  password: "Skadoodle#5"),
+        PhantomAccount(name: "doodle poodle", avatar: "🍦", userId: "37ZUwwxCmRRKVe3HPM5u6f84Zzy1", email: "phantom6@skadoodle.dev",  password: "Skadoodle#6"),
+        PhantomAccount(name: "Cindys Pen",    avatar: "🌀", userId: "5KwWL0OJ5LhtnhzmTKFia1y1Rnd2", email: "phantom7@skadoodle.dev",  password: "Skadoodle#7"),
+        PhantomAccount(name: "Dadoodle",      avatar: "👑", userId: "2t5KHcBWtdX112rAai8l25j2GqW2", email: "phantom8@skadoodle.dev",  password: "Skadoodle#8"),
+        PhantomAccount(name: "Squiggle man",  avatar: "😬", userId: "TNSg8JoUhqQPIJhf1bAkL7ojDz62", email: "phantom9@skadoodle.dev",  password: "Skadoodle#9"),
+        PhantomAccount(name: "i-cant-draw",   avatar: "🌙", userId: "bL2jgsyuC3O2fWmv2Eux5XEu7Zu2", email: "phantom10@skadoodle.dev", password: "Skadoodle#10"),
     ]
 }
 
@@ -1670,6 +2316,17 @@ class PhantomSessionManager: ObservableObject {
             UserDefaults.standard.set(phantom.name, forKey: "snoodleUsername")
             UserDefaults.standard.set(phantom.avatar, forKey: "snoodleAvatar")
             UserDefaults.standard.removeObject(forKey: "snoodleProfilePhoto")
+            // Write correct username + avatar to Firestore, then clear cache so
+            // the profile view re-fetches fresh instead of showing a stale random username.
+            // Only fix the username — don't touch avatar, which may be "photo" if the
+            // phantom has uploaded a profile picture. Overwriting it here would clobber
+            // the photo avatar back to the emoji on every sign-in.
+            Firestore.firestore().collection("users").document(phantom.userId).setData(
+                ["username": phantom.name, "isPublic": true],
+                merge: true
+            ) { _ in
+                UserProfileManager.shared.clearCache(for: phantom.userId)
+            }
             FollowManager.shared.loadFollowing(for: phantom.userId)
             // Refresh world gallery so like state reflects the phantom's account
             WorldGalleryManager.shared.fetchRecent(accountSwitch: true)

@@ -114,6 +114,10 @@ struct ContentView: View {
     @State private var showingDraw = false
     @State private var firstDrawLaunch = true
     @State private var entryToEdit: SnoodleEntry? = nil
+    // Set right before showingDraw when opened via TodayTab's "Open Canvas" —
+    // lets DrawScreen default its "Submit to Today's Challenge" toggle to on
+    // only in that context, off for the ordinary New-tab entry point.
+    @State private var dailySubmitIntent: Bool = false
     @State private var selectedTab: Int = 0
     @AppStorage("hasSeenOnboarding") private var hasSeenOnboarding: Bool = false
     @State private var showingOnboarding: Bool = false
@@ -123,14 +127,14 @@ struct ContentView: View {
 
     var body: some View {
         TabView(selection: $selectedTab) {
+            TodayTab()
+                .environmentObject(store)
+                .tabItem { Label("Today", systemImage: "sun.max") }
+                .tag(0)
+
             GalleryTab()
                 .environmentObject(store)
                 .tabItem { Label("Gallery", systemImage: "photo.on.rectangle.angled") }
-                .tag(0)
-
-            CalendarTab()
-                .environmentObject(store)
-                .tabItem { Label("Calendar", systemImage: "calendar") }
                 .tag(1)
 
             Color.clear
@@ -192,13 +196,18 @@ struct ContentView: View {
             onDismiss: {
                 if selectedTab == 2 { selectedTab = 0 }
                 entryToEdit = nil
+                dailySubmitIntent = false
                 NotificationCenter.default.post(name: .snoodleProfilePhotoRestored, object: nil)
                 DispatchQueue.main.async {
                     NotificationCenter.default.post(name: .snoodleProfilePhotoRestored, object: nil)
                 }
             },
-            content: { DrawScreen(isPresented: $showingDraw, selectedTab: $selectedTab, entryToEdit: $entryToEdit).environmentObject(store) }
+            content: { DrawScreen(isPresented: $showingDraw, selectedTab: $selectedTab, entryToEdit: $entryToEdit, dailySubmitIntent: $dailySubmitIntent).environmentObject(store) }
         ))
+        .onReceive(NotificationCenter.default.publisher(for: .todaySwitchToNew)) { _ in
+            dailySubmitIntent = true
+            showingDraw = true
+        }
         .onReceive(NotificationCenter.default.publisher(for: .snoodleReEditEntry)) { note in
             // Set entryToEdit first, then open the sheet one run-loop later so the
             // content closure is guaranteed to capture the non-nil entry.

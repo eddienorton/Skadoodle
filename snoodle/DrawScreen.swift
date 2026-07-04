@@ -1161,6 +1161,9 @@ struct DrawScreen: View {
     @Binding var isPresented: Bool
     @Binding var selectedTab: Int
     @Binding var entryToEdit: SnoodleEntry?
+    // True only when this session was opened via TodayTab's "Open Canvas" — sets
+    // the "Submit to Today's Challenge" toggle's default. See ContentView.
+    @Binding var dailySubmitIntent: Bool
 
     // Drawing layers — new interleaved layer architecture.
     // The active layer is always the last .drawing entry in layerOrder.
@@ -2312,7 +2315,18 @@ struct DrawScreen: View {
     @State private var layerOrderChanges: [LayerOrderChange] = []
     @State private var timelineThumbnails: [UUID: UIImage] = [:]
     @ObservedObject private var auth = SnoodleAuthManager.shared
+    @ObservedObject private var daily = DailyManager.shared
     @State private var showSignInForPost: Bool = false
+    @State private var isSaving: Bool = false
+    @State private var actionErrorMessage: String? = nil
+    @State private var showActionErrorAlert: Bool = false
+    // Two independent, freely-combinable options on the result card — saving to
+    // the private gallery itself is not a toggle, it always happens (see
+    // saveResult()). wantsDailySubmit's initial value is set from
+    // dailySubmitIntent in onAppear, not here, since @State can't read another
+    // property at declaration time.
+    @State private var wantsPublicPost: Bool = false
+    @State private var wantsDailySubmit: Bool = false
     @State private var currentPenType: PenType = {
         let penName = UserDefaults.standard.string(forKey: "lastPenTypeName") ?? "pencil"
         let styleName = UserDefaults.standard.string(forKey: "lastDualToneStyle") ?? "Gradient"
@@ -2389,6 +2403,11 @@ struct DrawScreen: View {
 
     // stampView replaced by StampItemView struct below
     func handleDone() {
+        // Toggle defaults for the upcoming result card: Daily only defaults on
+        // when this session started via TodayTab's "Open Canvas"; Public always
+        // starts off (posting publicly stays an explicit choice, same as before).
+        wantsDailySubmit = dailySubmitIntent && auth.isSignedIn && daily.myEntryToday == nil
+        wantsPublicPost = false
         // Hidden layers are excluded from the flattened export
         let visibleLayers = drawingLayers.filter { !hiddenLayerIds.contains($0.id) }
         let visibleLayerOrder = layerOrder.filter { entry in
@@ -2435,55 +2454,87 @@ struct DrawScreen: View {
         }
     }
 
-    func saveEntry(post: Bool) {
+    /// Commits the result card. Saving to the private gallery is not a toggle —
+    /// it always happens, the same as a browser keeps history regardless of what
+    /// else you do — so there is no combination of the two toggles that can
+    /// result in a doodle saved nowhere. `wantsPublicPost` / `wantsDailySubmit`
+    /// are independent and freely combinable, replacing the old three
+    /// mutually-exclusive actions (Post to Community / Keep Private / Submit to
+    /// Today's Challenge), which couldn't express "both at once."
+    func saveResult() {
         guard let img = resultImage, let data = img.jpegData(compressionQuality: 0.8) else { return }
+
+        if wantsPublicPost && !auth.isSignedIn {
+            showSignInForPost = true
+            return
+        }
+
         let caption = resultCaption.trimmingCharacters(in: .whitespaces)
         var entry = SnoodleEntry(
             caption: caption,
             keywords: resultKeywords,
             imageData: data
         )
-        // Save .skadoodle alongside the flat image for future re-editing
-        let tSave = Date()
         if let skadoodleData = saveSkadoodleData() {
             try? skadoodleData.write(to: entry.skadoodleURL)
-            print("[Done] saveSkadoodleData: \(String(format: "%.2f", Date().timeIntervalSince(tSave)))s (\(skadoodleData.count / 1024)KB)")
         }
-        if post {
-            guard auth.isSignedIn else {
-                showSignInForPost = true
-                return
-            }
-            // Switch to gallery immediately — world gallery will load
-            // Navigate to world gallery — the live listener (started in onAppear)
-            // will pick up the new doc automatically; no manual fetchRecent() needed.
+
+        isSaving = true
+        let group = DispatchGroup()
+        var firstError: Error? = nil
+
+        if wantsPublicPost {
+            group.enter()
             WorldGalleryManager.shared.submit(entry: entry) { docId, error in
                 if error == nil {
                     entry.isSubmitted = true
                     entry.worldGalleryId = docId
+                } else {
+                    firstError = firstError ?? error
                 }
-                SnoodleStore.shared.save(entry)
-                // Fetch first, then show world gallery once data is ready
-                WorldGalleryManager.shared.fetchRecent()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-                    WorldGalleryManager.shared.pendingShowWorld = true
-                    self.selectedTab = 0
-                }
-            }
-        } else {
-            store.save(entry)
-            WorldGalleryManager.shared.pendingShowWorld = false
-            // Slight delay so @Published store.entries propagates to the
-            // gallery view before it appears — prevents the "new doodle
-            // missing until you switch tabs" glitch.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                WorldGalleryManager.shared.pendingShowPrivate = true
-                selectedTab = 0
+                group.leave()
             }
         }
-        // Doodle saved to gallery — discard the auto-save so it won't be offered for resume
-        try? FileManager.default.removeItem(at: FileManager.currentSkadoodleURL)
-        isPresented = false
+
+        if wantsDailySubmit {
+            group.enter()
+            daily.post(imageData: data, caption: daily.todaySubject) { error in
+                if let error { firstError = firstError ?? error }
+                group.leave()
+            }
+        }
+
+        group.notify(queue: .main) {
+            isSaving = false
+            // The guaranteed outcome — happens whether or not the two optional
+            // posts above succeeded, using entry as mutated by World Gallery's
+            // completion (if it ran) so the private copy links to its
+            // worldGalleryId correctly.
+            store.save(entry)
+
+            if let firstError {
+                actionErrorMessage = firstError.localizedDescription
+                showActionErrorAlert = true
+                return   // stay on the result card — the doodle is already safely
+                         // saved privately, so nothing is lost; let the user see
+                         // the error and decide whether to retry.
+            }
+
+            if wantsPublicPost {
+                WorldGalleryManager.shared.fetchRecent()
+            }
+            WorldGalleryManager.shared.pendingShowWorld = wantsPublicPost && !wantsDailySubmit
+            WorldGalleryManager.shared.pendingShowPrivate = !wantsPublicPost && !wantsDailySubmit
+            // Daily takes priority for where we land — it's the freshest, most
+            // specific confirmation ("✓ Posted" on the Today tab). Otherwise
+            // land on the Gallery tab (World or Private, whichever applies).
+            let delay = wantsPublicPost ? 1.2 : 0.05
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                selectedTab = wantsDailySubmit ? 0 : 1
+            }
+            try? FileManager.default.removeItem(at: FileManager.currentSkadoodleURL)
+            isPresented = false
+        }
     }
 
     @ViewBuilder
@@ -3879,12 +3930,64 @@ struct DrawScreen: View {
                             .padding(.horizontal, 24)
                             .padding(.top, 24)
 
-                            // Action buttons
-                            VStack(spacing: 12) {
-                                Button(action: { saveEntry(post: true) }) {
+                            // Save options — always-saved note (not a toggle, just a fact,
+                            // like browser history) plus two independent, freely-combinable
+                            // toggles, plus one Save button that commits whichever combination
+                            // is selected. Replaces the old three mutually-exclusive buttons
+                            // (Post to Community / Keep Private / Submit to Today's Challenge),
+                            // which couldn't express "post publicly AND submit to today's
+                            // challenge" at the same time.
+                            VStack(spacing: 16) {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .font(.system(size: 13))
+                                    Text("Always saved to your gallery")
+                                        .font(.system(size: 13))
+                                }
+                                .foregroundColor(.secondary)
+
+                                VStack(spacing: 10) {
+                                    Toggle(isOn: $wantsPublicPost) {
+                                        HStack(spacing: 10) {
+                                            Image(systemName: "globe")
+                                            Text("Post to Community")
+                                        }
+                                        .font(.system(size: 16, weight: .medium))
+                                    }
+                                    .padding(.horizontal, 16)
+                                    .padding(.vertical, 12)
+                                    .background(Color(.systemGray6))
+                                    .cornerRadius(14)
+
+                                    // Only offered when there's an actual today's challenge left
+                                    // to enter — hidden once signed out or already submitted
+                                    // today. Closes the gap where drawing a brand-new doodle via
+                                    // "Open Canvas" had no direct path into the Daily Doodle;
+                                    // previously you had to save it, then go back through
+                                    // DailyPostPickerSheet to pick it from the gallery.
+                                    if auth.isSignedIn && daily.myEntryToday == nil {
+                                        Toggle(isOn: $wantsDailySubmit) {
+                                            HStack(spacing: 10) {
+                                                Image(systemName: "star.fill")
+                                                Text("Submit to Today's Challenge")
+                                            }
+                                            .font(.system(size: 16, weight: .medium))
+                                        }
+                                        .padding(.horizontal, 16)
+                                        .padding(.vertical, 12)
+                                        .background(Color(.systemGray6))
+                                        .cornerRadius(14)
+                                    }
+                                }
+
+                                Button(action: { saveResult() }) {
                                     HStack {
-                                        Image(systemName: "globe")
-                                        Text("Post to Community")
+                                        if isSaving {
+                                            ProgressView().tint(.white)
+                                        } else {
+                                            Image(systemName: "checkmark")
+                                        }
+                                        Text(isSaving ? "Saving..." : "Save")
                                     }
                                     .font(.system(size: 17, weight: .bold))
                                     .foregroundColor(.white)
@@ -3893,16 +3996,7 @@ struct DrawScreen: View {
                                     .background(Color.purple)
                                     .cornerRadius(14)
                                 }
-
-                                Button(action: { saveEntry(post: false) }) {
-                                    Text("Keep Private")
-                                        .font(.system(size: 17, weight: .semibold))
-                                        .foregroundColor(.primary)
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 16)
-                                        .background(Color(.systemGray5))
-                                        .cornerRadius(14)
-                                }
+                                .disabled(isSaving)
                             }
                             .padding(.horizontal, 24)
                             .padding(.bottom, 32)
@@ -3932,7 +4026,10 @@ struct DrawScreen: View {
                     }
                 }
             }
-            .navigationTitle("New Doodle")
+            // Shows today's subject instead of the generic title when this session
+            // was opened via TodayTab's "Open Canvas" — dailySubmitIntent is set
+            // true only in that path (see ContentView's .todaySwitchToNew handler).
+            .navigationTitle(dailySubmitIntent ? daily.todaySubject : "New Doodle")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
@@ -3985,8 +4082,13 @@ struct DrawScreen: View {
             .animation(.easeInOut(duration: 0.2), value: showResultCard)
             .sheet(isPresented: $showSignInForPost) {
                 SignInView(onComplete: {
-                    saveEntry(post: true)
+                    saveResult()
                 }, showCancel: true)
+            }
+            .alert("Something Went Wrong", isPresented: $showActionErrorAlert) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(actionErrorMessage ?? "Unknown error")
             }
         }
         .interactiveDismissDisabled(true)
@@ -4000,6 +4102,11 @@ struct DrawScreen: View {
         }
         // Load entry for re-edit, or offer to restore last auto-saved session
         .onAppear {
+            // Defensive — TodayTab normally fetches this first, but a canvas
+            // session can in principle start before that ever ran this app
+            // launch. Cheap/no-op if already cached for today (see
+            // DailyManager.fetchTodaySubject()).
+            daily.fetchTodaySubject()
             if let entry = entryToEdit {
                 if entry.hasSkadoodleFile, let data = try? Data(contentsOf: entry.skadoodleURL) {
                     // Full layer restore — v2.2+ doodle

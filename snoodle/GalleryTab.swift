@@ -6,7 +6,7 @@
 import SwiftUI
 import AVFoundation
 
-struct IdentifiableString: Identifiable {
+struct IdentifiableString: Identifiable, Hashable {
     let id = UUID()
     let value: String
     init(_ value: String) { self.value = value }
@@ -802,12 +802,14 @@ struct RetryAsyncImage: View {
     var contentMode: ContentMode = .fill
     @State private var retryCount = 0
     @State private var urlVersion = UUID()
+    @State private var isResolved = false  // true once phase reaches .success or .failure
 
     var body: some View {
         AsyncImage(url: url, transaction: Transaction(animation: .easeIn)) { phase in
             switch phase {
             case .success(let img):
                 img.resizable().aspectRatio(contentMode: contentMode)
+                    .onAppear { isResolved = true }
             case .failure:
                 ZStack {
                     Color.gray.opacity(0.15)
@@ -816,21 +818,49 @@ struct RetryAsyncImage: View {
                         .font(.system(size: 24))
                 }
                 .onAppear {
-                    if retryCount < 3 {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + Double(retryCount + 1) * 1.5) {
-                            retryCount += 1
-                            urlVersion = UUID()
-                        }
-                    }
+                    isResolved = true
+                    scheduleRetry(after: Double(retryCount + 1) * 1.5)
                 }
             default:
                 ZStack {
                     Color.gray.opacity(0.12)
                     ProgressView().scaleEffect(0.7)
                 }
+                .onAppear {
+                    isResolved = false
+                    scheduleStuckWatchdog()
+                }
             }
         }
         .id(urlVersion)
+    }
+
+    private func scheduleRetry(after delay: Double) {
+        guard retryCount < 3 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            retryCount += 1
+            urlVersion = UUID()
+        }
+    }
+
+    /// Cold-launch safety net. Observed bug: right after app launch (e.g. the
+    /// Today tab's "already posted" thumbnail), AsyncImage's underlying
+    /// URLSession task can occasionally never resolve to either .success or
+    /// .failure at all — the phase just sits at .empty indefinitely (network
+    /// path not fully up yet this early in process lifetime), which the
+    /// .failure-only retry above can never catch since failure never fires.
+    /// Looks like a permanently blank thumbnail until something else (e.g.
+    /// switching tabs and back) recreates the view and gives the request a
+    /// fresh start. Fix: if still unresolved a few seconds after entering the
+    /// loading state, force a fresh attempt ourselves rather than waiting on
+    /// a view recreation that may never come.
+    private func scheduleStuckWatchdog() {
+        guard retryCount < 3 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) {
+            guard !isResolved else { return }
+            retryCount += 1
+            urlVersion = UUID()
+        }
     }
 }
 

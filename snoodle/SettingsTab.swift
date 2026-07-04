@@ -36,6 +36,8 @@ struct SettingsTab: View {
     @State private var nukeStatus: String = ""
     @State private var isBackfilling: Bool = false
     @State private var backfillStatus: String = ""
+    @State private var isSeedingPrompts: Bool = false
+    @State private var seedPromptsStatus: String = ""
     @ObservedObject private var phantomSession = PhantomSessionManager.shared
     #endif
 
@@ -63,8 +65,16 @@ struct SettingsTab: View {
             .reduce(0) { $0 + $1.likes }
     }
 
+    #if DEBUG
+    // Anchor for the DEBUG-only auto-scroll-to-bottom below — lets Eddie land
+    // straight on Phantom Accounts (used constantly while bulk-creating test
+    // users/doodles) without manually scrolling down every time.
+    private let debugBottomAnchorID = "settingsDebugBottomAnchor"
+    #endif
+
     var body: some View {
         NavigationStack {
+            ScrollViewReader { proxy in
             List {
                 // MARK: Stats
                 Section("Your Doodles") {
@@ -302,6 +312,28 @@ struct SettingsTab: View {
                     }
                 }
 
+                Section(header: Text("📝 Daily Subjects").foregroundColor(.orange)) {
+                    Text("Seeds \(debugSeedSubjects.count) subjects into daily_prompts, starting today, skipping any date that already has one. Safe to re-run after editing debugSeedSubjects — it only fills empty dates, never overwrites.")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                    if isSeedingPrompts {
+                        HStack {
+                            ProgressView().scaleEffect(0.8)
+                            Text(seedPromptsStatus).font(.system(size: 13)).foregroundColor(.secondary)
+                        }
+                    } else {
+                        Button(action: seedDailyPromptsIfDebug) {
+                            Label("Seed daily_prompts now", systemImage: "text.badge.plus")
+                                .foregroundColor(.orange)
+                        }
+                    }
+                    if !seedPromptsStatus.isEmpty && !isSeedingPrompts {
+                        Text(seedPromptsStatus)
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                    }
+                }
+
                 Section(header: Text("👻 Phantom Accounts").foregroundColor(.purple)) {
                     if let active = phantomSession.activePhantom {
                         HStack {
@@ -339,6 +371,7 @@ struct SettingsTab: View {
                         }
                     }
                 }
+                .id(debugBottomAnchorID)
             #endif
             }
             .navigationTitle("Settings")
@@ -349,6 +382,16 @@ struct SettingsTab: View {
                         notifAuthStatus = settings.authorizationStatus
                     }
                 }
+                #if DEBUG
+                // Slight delay so the List has finished laying out its rows before
+                // we try to scroll — calling scrollTo synchronously in onAppear can
+                // be a no-op on first launch.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    withAnimation {
+                        proxy.scrollTo(debugBottomAnchorID, anchor: .bottom)
+                    }
+                }
+                #endif
             }
             .sheet(isPresented: $showingOnboarding) {
                 OnboardingView {
@@ -393,6 +436,7 @@ struct SettingsTab: View {
                 Text("Deletes ALL documents in world_gallery and likes, and all images in Storage. Cannot be undone.")
             }
             #endif
+            }
         }
     }
 
@@ -701,6 +745,192 @@ struct SettingsTab: View {
             }
             WorldGalleryManager.shared.entries = []
             nukeStatus = "✓ Nuked"
+        }
+    }
+
+    // MARK: - Daily Subjects Seeder
+
+    /// Draft subject pool for `daily_prompts` — the existing 40 (already in
+    /// `DailyPrompt.prompts`, the local fallback) plus 62 new ones, each tagged
+    /// with a `category` for the future web admin panel (not used by the app
+    /// itself yet — this is forward-looking metadata only, so the admin UI has
+    /// something to group/filter by once it exists). Edit/add/remove freely;
+    /// re-running the seeder only fills empty upcoming dates, so it's always
+    /// safe to run again after changing this list.
+    private var debugSeedSubjects: [(subject: String, category: String)] {
+        [
+            // Existing 40
+            ("Superhero", "Characters & Occupations"),
+            ("Robot", "Space & Sci-Fi"),
+            ("Dragon", "Fantasy & Magic"),
+            ("Treehouse", "Places"),
+            ("Submarine", "Vehicles"),
+            ("Wizard", "Fantasy & Magic"),
+            ("Pizza", "Food & Treats"),
+            ("Astronaut", "Characters & Occupations"),
+            ("Mermaid", "Fantasy & Magic"),
+            ("Monster Truck", "Vehicles"),
+            ("Ghost Town", "Places"),
+            ("Jungle", "Places"),
+            ("Time Machine", "Space & Sci-Fi"),
+            ("Sandwich", "Food & Treats"),
+            ("Volcano", "Places"),
+            ("Dinosaur", "Animals & Creatures"),
+            ("Snowman", "Everyday & Whimsical"),
+            ("Pirate Ship", "Vehicles"),
+            ("Unicorn", "Fantasy & Magic"),
+            ("Haunted House", "Places"),
+            ("Spaceship", "Vehicles"),
+            ("Ninja", "Characters & Occupations"),
+            ("Hot Air Balloon", "Vehicles"),
+            ("Ferris Wheel", "Places"),
+            ("Lighthouse", "Places"),
+            ("Secret Door", "Everyday & Whimsical"),
+            ("Rainbow", "Everyday & Whimsical"),
+            ("Treasure Map", "Everyday & Whimsical"),
+            ("Roller Coaster", "Places"),
+            ("Igloo", "Places"),
+            ("Candy Castle", "Places"),
+            ("Deep Sea", "Places"),
+            ("Storm", "Everyday & Whimsical"),
+            ("Knight", "Characters & Occupations"),
+            ("Magic Potion", "Fantasy & Magic"),
+            ("Giant Robot", "Space & Sci-Fi"),
+            ("Tiny World", "Everyday & Whimsical"),
+            ("Cloud City", "Places"),
+            ("Caveman", "Characters & Occupations"),
+            ("Noodle Soup", "Food & Treats"),
+            // New — drafted batch (see daily_subjects_draft.txt)
+            ("Octopus", "Animals & Creatures"),
+            ("Kangaroo", "Animals & Creatures"),
+            ("Peacock", "Animals & Creatures"),
+            ("Chameleon", "Animals & Creatures"),
+            ("Jellyfish", "Animals & Creatures"),
+            ("Owl", "Animals & Creatures"),
+            ("Fox", "Animals & Creatures"),
+            ("Panda", "Animals & Creatures"),
+            ("Sloth", "Animals & Creatures"),
+            ("Narwhal", "Animals & Creatures"),
+            ("Fairy", "Fantasy & Magic"),
+            ("Genie", "Fantasy & Magic"),
+            ("Griffin", "Fantasy & Magic"),
+            ("Phoenix", "Fantasy & Magic"),
+            ("Troll Bridge", "Fantasy & Magic"),
+            ("Elf Workshop", "Fantasy & Magic"),
+            ("Gnome House", "Fantasy & Magic"),
+            ("Enchanted Forest", "Fantasy & Magic"),
+            ("Alien Planet", "Space & Sci-Fi"),
+            ("Black Hole", "Space & Sci-Fi"),
+            ("Moon Base", "Space & Sci-Fi"),
+            ("Robot Pet", "Space & Sci-Fi"),
+            ("Flying Saucer", "Space & Sci-Fi"),
+            ("Comet", "Space & Sci-Fi"),
+            ("Meteor Shower", "Space & Sci-Fi"),
+            ("Umbrella", "Everyday & Whimsical"),
+            ("Kite", "Everyday & Whimsical"),
+            ("Balloon Animal", "Everyday & Whimsical"),
+            ("Sandcastle", "Everyday & Whimsical"),
+            ("Snow Fort", "Everyday & Whimsical"),
+            ("Paper Airplane", "Everyday & Whimsical"),
+            ("Skateboard", "Everyday & Whimsical"),
+            ("Trampoline", "Everyday & Whimsical"),
+            ("Bubble Bath", "Everyday & Whimsical"),
+            ("Campfire", "Everyday & Whimsical"),
+            ("Race Car", "Vehicles"),
+            ("Tractor", "Vehicles"),
+            ("Train", "Vehicles"),
+            ("Helicopter", "Vehicles"),
+            ("Bicycle", "Vehicles"),
+            ("Amusement Park", "Places"),
+            ("Zoo", "Places"),
+            ("Aquarium", "Places"),
+            ("Farm", "Places"),
+            ("Desert Oasis", "Places"),
+            ("Waterfall", "Places"),
+            ("Cave", "Places"),
+            ("Windmill", "Places"),
+            ("Library", "Places"),
+            ("Bakery", "Places"),
+            ("Detective", "Characters & Occupations"),
+            ("Circus Performer", "Characters & Occupations"),
+            ("Magician", "Characters & Occupations"),
+            ("Explorer", "Characters & Occupations"),
+            ("Cowboy", "Characters & Occupations"),
+            ("Viking Ship", "Characters & Occupations"),
+            ("Taco", "Food & Treats"),
+            ("Donut", "Food & Treats"),
+            ("Ice Cream Truck", "Food & Treats"),
+            ("Cupcake", "Food & Treats"),
+            ("Gingerbread House", "Food & Treats"),
+            ("S'mores", "Food & Treats"),
+        ]
+    }
+
+    /// Seeds `daily_prompts` from `debugSeedSubjects`, shuffled for randomness
+    /// ("let it surprise me as well as others"). Reads the existing collection
+    /// first so it only fills dates that don't have a doc yet — starting today,
+    /// walking forward day by day — so it never overwrites a date you (or a
+    /// future admin panel) already assigned, and is always safe to re-run after
+    /// editing the list above. Firestore doc format: collection `daily_prompts`,
+    /// doc ID = `DailyEntry.contestDateString`, fields `subject: String` and
+    /// `category: String` (category isn't read by the app anywhere yet — it's
+    /// there for the not-yet-built website admin panel to group/filter by).
+    private func seedDailyPromptsIfDebug() {
+        isSeedingPrompts = true
+        seedPromptsStatus = "Checking existing daily_prompts…"
+        let db = Firestore.firestore()
+        let horizon = 400 // days to look ahead for open slots
+        let subjects = debugSeedSubjects
+
+        db.collection("daily_prompts").getDocuments { snap, error in
+            if let error {
+                DispatchQueue.main.async {
+                    seedPromptsStatus = "Error reading existing docs: \(error.localizedDescription)"
+                    isSeedingPrompts = false
+                }
+                return
+            }
+            let existingDates = Set((snap?.documents ?? []).map { $0.documentID })
+
+            var candidateDates: [String] = []
+            for offset in 0..<horizon {
+                let date = Date().addingTimeInterval(Double(offset) * 86400)
+                let dateStr = DailyEntry.contestDateString(for: date)
+                if !existingDates.contains(dateStr) {
+                    candidateDates.append(dateStr)
+                }
+                if candidateDates.count >= subjects.count { break }
+            }
+
+            let shuffled = subjects.shuffled()
+            let pairCount = min(shuffled.count, candidateDates.count)
+            guard pairCount > 0 else {
+                DispatchQueue.main.async {
+                    seedPromptsStatus = "Nothing to seed — next \(horizon) days already assigned."
+                    isSeedingPrompts = false
+                }
+                return
+            }
+
+            let batch = db.batch()
+            for i in 0..<pairCount {
+                let ref = db.collection("daily_prompts").document(candidateDates[i])
+                batch.setData([
+                    "subject": shuffled[i].subject,
+                    "category": shuffled[i].category
+                ], forDocument: ref)
+            }
+
+            batch.commit { error in
+                DispatchQueue.main.async {
+                    isSeedingPrompts = false
+                    if let error {
+                        seedPromptsStatus = "Error: \(error.localizedDescription)"
+                    } else {
+                        seedPromptsStatus = "✓ Seeded \(pairCount) subject(s), \(candidateDates.first ?? "?") → \(candidateDates[pairCount - 1])"
+                    }
+                }
+            }
         }
     }
     #endif
