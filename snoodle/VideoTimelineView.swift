@@ -204,8 +204,15 @@ struct VideoTimelineView: View {
             .sheet(item: $editingBreak) { cb in
                 ChapterBreakEditSheet(
                     chapterBreak: cb,
-                    onUpdate: { updated in
-                        if let i = chapterBreaks.firstIndex(where: { $0.id == updated.id }) {
+                    onUpdate: { updated, applyToAll in
+                        if applyToAll {
+                            // Apply the new hold duration to every chapter
+                            // break, not just this one — each break keeps its
+                            // own timestamp, only holdDuration is synced.
+                            for i in chapterBreaks.indices {
+                                chapterBreaks[i].holdDuration = updated.holdDuration
+                            }
+                        } else if let i = chapterBreaks.firstIndex(where: { $0.id == updated.id }) {
                             chapterBreaks[i] = updated
                         }
                         editingBreak = nil
@@ -215,7 +222,7 @@ struct VideoTimelineView: View {
                         editingBreak = nil
                     }
                 )
-                .presentationDetents([.height(160)])
+                .presentationDetents([.height(210)])
             }
         }
         .presentationDetents([.medium, .large])
@@ -371,12 +378,16 @@ private struct ChapterBreakChip: View {
 
 private struct ChapterBreakEditSheet: View {
     let chapterBreak: ChapterBreak
-    let onUpdate: (ChapterBreak) -> Void
+    // Second param: whether "apply to all" was checked when Save was tapped.
+    let onUpdate: (ChapterBreak, Bool) -> Void
     let onDelete: () -> Void
 
     @State private var duration: Double
+    // Defaults unchecked — applying to every break is the less common case,
+    // shouldn't be an accidental default when someone's just tweaking one.
+    @State private var applyToAll: Bool = false
 
-    init(chapterBreak: ChapterBreak, onUpdate: @escaping (ChapterBreak) -> Void, onDelete: @escaping () -> Void) {
+    init(chapterBreak: ChapterBreak, onUpdate: @escaping (ChapterBreak, Bool) -> Void, onDelete: @escaping () -> Void) {
         self.chapterBreak = chapterBreak
         self.onUpdate = onUpdate
         self.onDelete = onDelete
@@ -406,6 +417,21 @@ private struct ChapterBreakEditSheet: View {
                 }
             }
 
+            Button {
+                applyToAll.toggle()
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: applyToAll ? "checkmark.square.fill" : "square")
+                        .font(.system(size: 18))
+                        .foregroundColor(applyToAll ? .blue : .secondary)
+                    Text("Apply this time to all chapter breaks")
+                        .font(.system(size: 14))
+                        .foregroundColor(.primary)
+                    Spacer()
+                }
+            }
+            .buttonStyle(.plain)
+
             Divider()
 
             HStack(spacing: 20) {
@@ -421,7 +447,7 @@ private struct ChapterBreakEditSheet: View {
                 Button {
                     var updated = chapterBreak
                     updated.holdDuration = duration
-                    onUpdate(updated)
+                    onUpdate(updated, applyToAll)
                 } label: {
                     Text("Save")
                         .font(.system(size: 15, weight: .medium))

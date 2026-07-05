@@ -46,24 +46,30 @@ struct TodayTab: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 0) {
+                // Three visually distinct cards (hero, submit/vote, past
+                // winners), each with its own contrasting tint — per
+                // feedback that the screen should read as three clearly
+                // separated zones at a glance, not one undifferentiated
+                // scroll. Consistent 20pt gap between the three; each
+                // card handles its own internal padding/background.
+                VStack(spacing: 20) {
                     heroWinnerSection
                         .padding(.horizontal, 16)
                         .padding(.top, 16)
 
-                    subjectStrip
-                        .padding(.top, 24)
-
-                    ctaSection
+                    submitVoteCard
                         .padding(.horizontal, 16)
-                        .padding(.top, 14)
 
-                    pastWinnersSection
-                        .padding(.top, 28)
+                    pastWinnersCard
+                        .padding(.horizontal, 16)
                         .padding(.bottom, 32)
                 }
             }
-            .navigationTitle("Today")
+            // "Today" → "Daily Doodle" — matches the feature's actual name
+            // used throughout (see CLAUDE.md), and frees up "Doodle of the
+            // Day" so the hero card below can show the actual subject
+            // instead of restating that same generic phrase.
+            .navigationTitle("Daily Doodle")
             .navigationBarTitleDisplayMode(.inline)
             .refreshable {
                 daily.fetchTodaySubject()
@@ -186,7 +192,8 @@ struct TodayTab: View {
     private static let heroDisplayFormatter: DateFormatter = {
         // Same time-zone-safety rule as PastWinnerRow/DailyContestDayView — must
         // match heroParseFormatter's zone or the date rolls onto the wrong day.
-        let f = DateFormatter(); f.dateFormat = "MMM d"; f.timeZone = DailyEntry.contestTimeZone; return f
+        // "Sat, Jul 3, 2026" — day of week and year added per feedback.
+        let f = DateFormatter(); f.dateFormat = "EEE, MMM d, yyyy"; f.timeZone = DailyEntry.contestTimeZone; return f
     }()
     private func heroDisplayDate(_ dateStr: String) -> String {
         guard let d = TodayTab.heroParseFormatter.date(from: dateStr) else { return dateStr }
@@ -197,47 +204,120 @@ struct TodayTab: View {
     /// avatar is a separate sibling tap target (opens the artist's profile) —
     /// same non-nested-button convention used by PastWinnerRow.
     func heroWinnerCard(_ summary: DailyWinnerSummary) -> some View {
-        VStack(spacing: 14) {
-            HStack(spacing: 6) {
-                Image(systemName: "crown.fill").foregroundColor(.yellow)
-                Text("DOODLE OF THE DAY")
-                    .font(.system(size: 12, weight: .bold))
-                    .tracking(1.5)
-                Text("· \(heroDisplayDate(summary.date))")
-                    .font(.system(size: 12, weight: .medium))
-            }
-            .foregroundColor(.secondary)
+        VStack(spacing: 10) {
+            // Banner-shaped label instead of plain text — part of the
+            // "every label gets its own shaped chrome" pass (see
+            // "Game-Chrome Components" above). Date sits underneath as its
+            // own small pill rather than crammed into the same line, closer
+            // to the two-tier header/date look from the reference mockups.
+            BannerLabel(text: "Doodle of the Day", color: Color(red: 0.55, green: 0.20, blue: 0.65))
+            // Explicit cream pill + dark ink instead of the dynamic system
+            // background/.secondary — those assumed a light-ish card, but
+            // this card's fill is now a fixed dark plum regardless of system
+            // appearance (see background comment below), so a dynamic gray
+            // pill would wash out or clash. Cream/dark-ink pairing echoes
+            // SubjectPlacard's parchment tone for a consistent "frame label"
+            // family across the two.
+            Text(heroDisplayDate(summary.date))
+                .font(.system(size: 13, weight: .bold))
+                .foregroundColor(Color(red: 0.32, green: 0.20, blue: 0.09))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 4)
+                .background(Color(red: 0.94, green: 0.87, blue: 0.68))
+                .clipShape(Capsule())
 
             Button {
                 selectedPastDate = IdentifiableString(summary.date)
             } label: {
-                ZStack(alignment: .topLeading) {
-                    // Capped at a fixed max width (not maxWidth: .infinity) and
-                    // centered — on iPad the hero card spans nearly the full
-                    // screen width, so a square that stretched edge-to-edge
-                    // became tall enough to need scrolling just to see the
-                    // whole thing under the tab bar/header. Same fix pattern
-                    // as the old prompt-card thumbnail's iPad sliver bug.
-                    RetryAsyncImage(url: URL(string: summary.winner.imageURL))
-                        .aspectRatio(1, contentMode: .fit)
+                ZStack(alignment: .topTrailing) {
+                    // Capped at a fixed max width (not maxWidth: .infinity) —
+                    // on iPad the hero card spans nearly the full screen
+                    // width, so a square that stretched edge-to-edge became
+                    // tall enough to need scrolling just to see the whole
+                    // thing under the tab bar/header. Same fix pattern as
+                    // the old prompt-card thumbnail's iPad sliver bug.
+                    // contentMode: .fit (not RetryAsyncImage's own .fill
+                    // default) — doodle canvases aren't guaranteed square
+                    // (canvasSize varies by device's on-screen drawing area
+                    // at draw time), so .fill was center-cropping the sides
+                    // off every non-square doodle to force it into a 1:1 box.
+                    // FIXED (round two): the earlier fix kept a forced
+                    // `.aspectRatio(1, contentMode: .fit)` on the *container*,
+                    // which still boxed every doodle into a square and just
+                    // letterboxed uncropped pixels inside it — reported back
+                    // as "the frame is wider than the canvas... a black strip
+                    // on either side." Removed that forced square entirely:
+                    // with only `.frame(maxWidth: 380)` constraining width,
+                    // `img.resizable().aspectRatio(contentMode: .fit)` (inside
+                    // RetryAsyncImage) now sizes the view to the *doodle's own
+                    // real aspect ratio* within that width — so the frame
+                    // built on `geo.size` below hugs the actual doodle
+                    // rectangle exactly, no matte, no letterbox bars, for any
+                    // doodle shape. The `.background` fill only matters now
+                    // for RetryAsyncImage's brief loading/failure placeholder
+                    // (which still defaults to a plain square — see its own
+                    // `.aspectRatio(1, contentMode: .fit)` added alongside
+                    // this fix) before the real image — and its real aspect
+                    // ratio — has loaded in.
+                    RetryAsyncImage(url: URL(string: summary.winner.imageURL), contentMode: .fit)
+                        .background(Color(red: 0.06, green: 0.03, blue: 0.08))
                         .frame(maxWidth: 380)
-                        .frame(maxWidth: .infinity)
                         .clipShape(RoundedRectangle(cornerRadius: 20))
+                        // Thin dark-to-light bevel ring, sized to the image's
+                        // actual rendered geometry via GeometryReader.
+                        // Declared before RibbonBadge below so the ribbon
+                        // still paints on top wherever the two overlap.
+                        .overlay(
+                            GeometryReader { geo in
+                                // OrnateGoldFrame (not the plain GradientFrame) —
+                                // per direct request to make this specific frame
+                                // more elaborate. Keeps the same innerEdgeColor
+                                // fix underneath (this frame sits directly
+                                // against the doodle photo, a light interior, so
+                                // without it the lightColor end would fade into
+                                // the photo instead of reading as a bevel edge —
+                                // see GradientFrame's doc comment), with a
+                                // scalloped Bezier-curve gold ring layered on top
+                                // as ornamental trim.
+                                OrnateGoldFrame(cornerRadius: 20, innerEdgeColor: Color(red: 0.20, green: 0.12, blue: 0.05))
+                                    .frame(width: geo.size.width, height: geo.size.height)
+                            }
+                        )
+                        // Museum-placard-style subject tag straddling the
+                        // bottom edge, like a nameplate on a picture frame.
+                        // Reads daily.heroWinnerSubject — see the crown row's
+                        // doc comment above for why this deliberately does
+                        // NOT read summary.winner.caption directly.
+                        .overlay(alignment: .bottom) {
+                            if !daily.heroWinnerSubject.isEmpty {
+                                SubjectPlacard(text: daily.heroWinnerSubject)
+                                    .offset(y: -18)
+                            }
+                        }
 
-                    // Overlaps the corner rather than framing the whole image —
-                    // keeps the doodle itself perfectly flat/undistorted (an
-                    // artist's linework shouldn't get tilted or bordered away),
-                    // while still making it unmistakable at a glance that this
-                    // is the winner. Chosen over a plain colored border after
-                    // reviewing mockups together.
-                    // Pulled in from the raw corner (not -14,-14) — the card
-                    // only has 16pt of padding before its own rounded-rect
-                    // clip, and the badge is wide enough that a bigger
-                    // negative offset pushed part of it past that edge and
-                    // got clipped off.
+                    // Moved from overlapping the top-left corner to sitting
+                    // fully on the canvas at the top-right, inside the
+                    // frame — offset clears the frame's own 10pt thickness
+                    // plus a bit of breathing room, so the ribbon reads as
+                    // resting on the artwork itself with a gap between it
+                    // and the frame, not touching/overlapping the frame ring.
                     RibbonBadge()
-                        .offset(x: -2, y: -6)
+                        .offset(x: -22, y: 22)
                 }
+                // Centers the whole ZStack (image + frame + ribbon) as one
+                // unit within the available card width — not just the image
+                // alone. That distinction matters: putting .frame(maxWidth:
+                // .infinity) on the image only (inside the ZStack, as a
+                // sibling to RibbonBadge) made the ZStack's own bounding box
+                // expand to that full width, so .topTrailing aligned the
+                // ribbon against the *expanded* box instead of the true
+                // 380pt image — the ribbon ended up pinned to the edge of
+                // the card, not the edge of the doodle, on anything wider
+                // than exactly 380pt. Moving the infinity frame out here, to
+                // wrap image+ribbon together, fixes that: the ZStack's own
+                // size is now the true ~380×380 image, and this frame just
+                // centers that whole correctly-proportioned unit.
+                .frame(maxWidth: .infinity)
                 .overlay(alignment: .bottomTrailing) {
                     // checkmark.seal, not a heart — matches the Voting Booth's
                     // existing vote icon. Votes and World Gallery's likes are
@@ -259,30 +339,71 @@ struct TodayTab: View {
             }
             .buttonStyle(.plain)
 
-            HStack {
-                Button {
-                    showAuthorProfile(summary.winner.userId)
-                } label: {
-                    DailyAvatarRow(entry: summary.winner)
-                }
-                .buttonStyle(.plain)
-
-                Spacer()
-
-                if !summary.winner.caption.isEmpty {
-                    Text(summary.winner.caption)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                }
+            // Caption/subject no longer duplicated here now that
+            // SubjectPlacard shows it prominently on the frame itself —
+            // this row is just the artist now.
+            Button {
+                showAuthorProfile(summary.winner.userId)
+            } label: {
+                // Explicit white text — see the card background's doc
+                // comment just below. `DailyAvatarRow`'s default (non-compact)
+                // text color is `.primary`, which is near-black in light mode
+                // and would be unreadable on this card's now-dark fill.
+                DailyAvatarRow(entry: summary.winner, textColor: .white)
             }
+            .buttonStyle(.plain)
         }
         .padding(16)
         .background(
-            LinearGradient(colors: [Color.yellow.opacity(0.15), Color.purple.opacity(0.08)],
-                           startPoint: .topLeading, endPoint: .bottomTrailing)
+            // Deliberately dark, not just "darker" — a light pastel wash (the
+            // previous yellow/purple tint) sits at roughly the same
+            // brightness as a typical doodle photo, so the card and the
+            // framed image blended together instead of reading as separate
+            // objects. A doodle's own hue varies wildly (that's the whole
+            // point of the app), so hue-matching the card to "whatever's
+            // popular" isn't reliable — but going genuinely dark is: nearly
+            // any bright/colorful doodle will contrast against a near-black
+            // card the way art contrasts against a gallery wall.
+            //
+            // Switched from a diagonal plum-to-near-black gradient to a
+            // plain vertical black-to-gray one, per direct request — "black
+            // to a gray at bottom, as if light is being shined on the pic."
+            // A neutral top-to-bottom gradient reads more like directional
+            // stage lighting than the plum diagonal did, and there's no
+            // longer a hue to worry about clashing with any doodle's own
+            // colors. Bumped from an initial `white: 0.22` bottom stop
+            // (reported as not visibly reading as a gradient at all — likely
+            // too close to black, especially once the framed doodle fills
+            // most of the card's height and leaves little bare background
+            // exposed to show it) up to `white: 0.4`, a clearly lighter gray
+            // that should be unambiguous evidence of the gradient even
+            // against a mostly-covered card.
+            // Switched from black/gray to a dark-to-medium blue pair, per
+            // direct request, paired with `submitVoteCard` below using the
+            // SAME two colors but reversed top/bottom — the idea being a
+            // single light source that reads as brightest right at the
+            // seam between the two cards (this card's bottom, the next
+            // card's top) and fades to dark at both outer edges, like it's
+            // "overflowing" from card #1 down into card #2.
+            LinearGradient(colors: [Color(red: 0.03, green: 0.07, blue: 0.18), Color(red: 0.15, green: 0.35, blue: 0.62)],
+                           startPoint: .top, endPoint: .bottom)
         )
         .clipShape(RoundedRectangle(cornerRadius: 24))
+        // Real carved-bezel border instead of a flat stroke — reuses
+        // GradientFrame's concentric-ring technique (already proven correct
+        // around corners, unlike a plain RadialGradient) with a gold/bronze
+        // pair matching this card's own warm identity color.
+        .overlay(
+            GeometryReader { geo in
+                GradientFrame(
+                    cornerRadius: 24,
+                    thickness: 5,
+                    darkColor: Color(red: 0.55, green: 0.40, blue: 0.06),
+                    lightColor: Color(red: 1.0, green: 0.87, blue: 0.55)
+                )
+                .frame(width: geo.size.width, height: geo.size.height)
+            }
+        )
     }
 
     // MARK: - Subject strip
@@ -294,13 +415,59 @@ struct TodayTab: View {
         VStack(spacing: 4) {
             Text("TODAY'S SUBJECT")
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(.secondary)
+                .foregroundColor(Color.white.opacity(0.65))
                 .tracking(1.5)
             Text(daily.todaySubject)
                 .font(.system(size: 24, weight: .black))
-                .foregroundColor(.primary)
+                .foregroundColor(.white)
                 .multilineTextAlignment(.center)
         }
+    }
+
+    // MARK: - Countdown
+
+    /// The submission window (today) and the voting window (yesterday) are
+    /// two 24h windows permanently offset by exactly one day (see
+    /// "Submission / voting window model" above) — which means they always
+    /// close at the *exact same instant*, every day, by construction. Rather
+    /// than show that identical number twice (once next to SUBMIT!, once
+    /// next to VOTE!, which would just look like a duplicate-data bug), this
+    /// shows it once, as a single shared clock governing both actions —
+    /// no need to spell out which calendar date it's "for" on either side.
+    /// `TimelineView` (not a manual Timer + @State) drives the per-second
+    /// tick, which is the idiomatic SwiftUI way to get a live-updating clock.
+    var countdownStrip: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            VStack(spacing: 4) {
+                Text("TIME REMAINING")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(Color.white.opacity(0.65))
+                    .tracking(1.5)
+                Text(countdownText(secondsUntilContestBoundary(from: context.date)))
+                    // Monospaced digits so the ticking seconds don't jitter
+                    // the layout width every time a digit changes.
+                    .font(.system(size: 20, weight: .bold, design: .monospaced))
+                    .foregroundColor(.white)
+            }
+        }
+    }
+
+    /// Seconds remaining until the next contest-day boundary (midnight in
+    /// `DailyEntry.contestTimeZone`) — the same instant `fetchYesterday()`'s
+    /// window ages out and `fetchTodaySubject()`'s "today" rolls over.
+    private func secondsUntilContestBoundary(from now: Date) -> Int {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = DailyEntry.contestTimeZone
+        let startOfToday = cal.startOfDay(for: now)
+        let startOfTomorrow = cal.date(byAdding: .day, value: 1, to: startOfToday) ?? startOfToday
+        return max(0, Int(startOfTomorrow.timeIntervalSince(now)))
+    }
+
+    private func countdownText(_ totalSeconds: Int) -> String {
+        let h = totalSeconds / 3600
+        let m = (totalSeconds % 3600) / 60
+        let s = totalSeconds % 60
+        return String(format: "%02d:%02d:%02d", h, m, s)
     }
 
     // MARK: - Submit / Vote CTAs
@@ -323,10 +490,14 @@ struct TodayTab: View {
     var ctaSection: some View {
         VStack(spacing: 10) {
             HStack(spacing: 12) {
+                // Colors swapped per direct request — SUBMIT is now always
+                // purple (previously flipped to green once posted; the
+                // "SUBMITTED ✓" title + checkmark-seal icon already convey
+                // the state change on their own), VOTE is now green.
                 ctaButton(
                     title: hasPostedToday ? "SUBMITTED ✓" : "SUBMIT!",
                     subtitle: submitSubtitle,
-                    color: hasPostedToday ? Color.green : Color.purple,
+                    color: Color.purple,
                     systemImage: hasPostedToday ? "checkmark.seal.fill" : "pencil.tip"
                 ) {
                     showSubmitScreen = true
@@ -335,7 +506,7 @@ struct TodayTab: View {
                 ctaButton(
                     title: "VOTE!",
                     subtitle: voteSubtitle,
-                    color: canVoteToday ? Color.purple : Color.gray.opacity(0.5),
+                    color: canVoteToday ? Color.green : Color.gray.opacity(0.5),
                     systemImage: "hand.thumbsup.fill"
                 ) {
                     showVotingBooth = true
@@ -343,23 +514,37 @@ struct TodayTab: View {
                 .disabled(!canVoteToday)
             }
 
-            // Turnout stats are safe to show during active voting — see
+            // A raw count is safe to show during active voting — see
             // toggleVote/blind-reveal comments elsewhere in this file — a
-            // combined number can't leak who's leading, unlike a per-entry tally.
-            if !daily.yesterdayEntries.isEmpty && daily.totalUserCount > 0 {
-                Text("\(daily.yesterdayUniqueVoterCount) of \(daily.totalUserCount) users voted (\(daily.yesterdayVoterTurnoutPercent)%)")
+            // combined number can't leak who's leading, unlike a per-entry
+            // tally. Deliberately NOT "X of Y users voted (Z%)" anymore —
+            // that framing implied a real turnout/participation rate, but a
+            // "No" tap writes nothing to Firestore (see DailyVotingBoothView's
+            // forced Yes/No redesign — "No" is explicitly equivalent to not
+            // voting at all), so there's no tracked "didn't vote" population
+            // to divide against. Just state the plain fact: how many votes
+            // have been cast so far, no denominator, no percent, no implied
+            // comparison to a "no" that isn't actually being counted.
+            if !daily.yesterdayEntries.isEmpty {
+                let voteCount = daily.yesterdayUniqueVoterCount
+                Text("\(voteCount) vote\(voteCount == 1 ? "" : "s") \(voteCount == 1 ? "is" : "are") in")
                     .font(.system(size: 12))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(Color.white.opacity(0.6))
             }
         }
     }
 
+    /// "Chunky game button" treatment — a top-lit linear gradient (light face
+    /// fading to the base color, same lit-from-above logic as the medal discs
+    /// and the hero bezel, just linear instead of radial/concentric) plus a
+    /// bright top highlight line and a darker bottom-edge shadow, so the
+    /// button reads as a raised chip rather than a flat color swatch.
     @ViewBuilder
     func ctaButton(title: String, subtitle: String, color: Color, systemImage: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             VStack(spacing: 6) {
                 Image(systemName: systemImage)
-                    .font(.system(size: 20))
+                    .font(.system(size: 22))
                 Text(title)
                     .font(.system(size: 17, weight: .heavy))
                 Text(subtitle)
@@ -371,10 +556,81 @@ struct TodayTab: View {
             .foregroundColor(.white)
             .frame(maxWidth: .infinity)
             .padding(.vertical, 20)
-            .background(color)
+            .background(
+                LinearGradient(colors: [color.shaded(0.35), color, color.shaded(-0.25)],
+                               startPoint: .top, endPoint: .bottom)
+            )
             .clipShape(RoundedRectangle(cornerRadius: 20))
+            .overlay(
+                // Bright bevel highlight along the top edge only — a thin
+                // rounded-rect stroke would ring the whole button evenly,
+                // which reads as an outline, not a raised edge catching light.
+                RoundedRectangle(cornerRadius: 20)
+                    .stroke(
+                        LinearGradient(colors: [Color.white.opacity(0.55), Color.white.opacity(0)],
+                                       startPoint: .top, endPoint: .center),
+                        lineWidth: 2
+                    )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 20)
+                    .stroke(color.shaded(-0.45), lineWidth: 1.5)
+            )
+            .shadow(color: color.shaded(-0.5).opacity(0.6), radius: 5, x: 0, y: 4)
         }
         .buttonStyle(.plain)
+    }
+
+    // MARK: - Submit/Vote Card
+
+    /// "Gem panel" treatment — a deep indigo/violet gradient fill (a jewel
+    /// tone, not a flat tint) plus a real gold bezel (reusing `GradientFrame`,
+    /// same as the hero card's frame) instead of a flat stroke, and a
+    /// BannerLabel header instead of plain section text — the same three
+    /// game-chrome moves applied to the hero card, carried over here so the
+    /// three Today-tab cards read as one consistent visual language rather
+    /// than each having its own one-off treatment. `subjectStrip`,
+    /// `countdownStrip`, and `ctaSection` had their internal text colors
+    /// switched from `.secondary`/`.primary` to explicit white/opacity
+    /// values as part of this change, since those dynamic colors don't have
+    /// enough contrast against a dark jewel-tone background — safe since
+    /// none of the three are reused anywhere outside this card.
+    var submitVoteCard: some View {
+        VStack(spacing: 0) {
+            BannerLabel(text: "Today's Challenge", color: Color(red: 0.20, green: 0.45, blue: 0.55))
+                .padding(.bottom, 14)
+            subjectStrip
+            countdownStrip
+                .padding(.top, 10)
+            ctaSection
+                .padding(.top, 14)
+        }
+        .padding(16)
+        // Switched from purple/violet to the SAME dark/medium blue pair as
+        // the hero card above, but reversed (medium at top, darkest at
+        // bottom) and using the same vertical `.top`→`.bottom` direction
+        // (was a diagonal) so the two cards' gradients actually line up at
+        // the seam between them — the hero card fades TO medium blue at
+        // its bottom edge, this card starts FROM that same medium blue at
+        // its top edge and fades further down to the darkest blue, like
+        // one light source brightest at the seam, dimming outward in both
+        // directions.
+        .background(
+            LinearGradient(colors: [Color(red: 0.15, green: 0.35, blue: 0.62), Color(red: 0.03, green: 0.07, blue: 0.18)],
+                           startPoint: .top, endPoint: .bottom)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 24))
+        .overlay(
+            GeometryReader { geo in
+                GradientFrame(
+                    cornerRadius: 24,
+                    thickness: 5,
+                    darkColor: Color(red: 0.45, green: 0.32, blue: 0.05),
+                    lightColor: Color(red: 1.0, green: 0.87, blue: 0.55)
+                )
+                .frame(width: geo.size.width, height: geo.size.height)
+            }
+        )
     }
 
     // MARK: - Past Winners (inline — everything Daily Doodle lives on this one
@@ -391,39 +647,42 @@ struct TodayTab: View {
 
     var pastWinnersSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 6) {
-                Image(systemName: "trophy.fill")
-                    .foregroundColor(.yellow)
-                    .font(.system(size: 11))
-                Text("PAST WINNERS")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(.secondary)
-                    .tracking(1.5)
-            }
-            .padding(.horizontal, 16)
+            // Green banner, matching the reference mockups' habit of giving
+            // every section its own shaped-chrome label instead of plain
+            // tracked caps sitting on the tint. Frame centered since this
+            // card reads top-down like a scroll/ledger, not left-anchored.
+            BannerLabel(text: "Past Winners", color: Color(red: 0.15, green: 0.42, blue: 0.20))
+                .frame(maxWidth: .infinity, alignment: .center)
 
             if daily.isLoadingPastWinners && daily.pastWinners.isEmpty {
                 ProgressView()
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 30)
             } else if remainingPastWinners.isEmpty {
+                // Explicit brown tone rather than `.secondary` — `.secondary`
+                // is a dynamic light/dark-mode color, but this card's
+                // parchment background is a fixed light tint regardless of
+                // system appearance (same reasoning as the hero/submit
+                // cards), so a dynamic gray would lose contrast in dark mode.
                 VStack(spacing: 10) {
                     Image(systemName: "trophy")
                         .font(.system(size: 36, weight: .thin))
-                        .foregroundColor(.secondary.opacity(0.4))
+                        .foregroundColor(Color(red: 0.32, green: 0.20, blue: 0.09).opacity(0.35))
                     Text("No more past winners yet.")
                         .font(.system(size: 14))
-                        .foregroundColor(.secondary)
+                        .foregroundColor(Color(red: 0.32, green: 0.20, blue: 0.09).opacity(0.7))
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 30)
             } else {
                 VStack(spacing: 0) {
-                    ForEach(remainingPastWinners) { summary in
-                        PastWinnerRow(summary: summary, onAuthorTap: showAuthorProfile) {
+                    // Rank starts at 2 — the hero card above is always the
+                    // actual #1 (most recent decided winner), so the very
+                    // first row in this list is already the runner-up day.
+                    ForEach(Array(remainingPastWinners.enumerated()), id: \.element.id) { index, summary in
+                        PastWinnerRow(summary: summary, rank: index + 2, onAuthorTap: showAuthorProfile) {
                             selectedPastDate = IdentifiableString(summary.date)
                         }
-                        .padding(.horizontal, 16)
                         if summary.id != remainingPastWinners.last?.id {
                             Divider().padding(.leading, 84)
                         }
@@ -431,6 +690,34 @@ struct TodayTab: View {
                 }
             }
         }
+    }
+
+    /// "Parchment archive" treatment — a warm tan/parchment gradient fill
+    /// (reads as an old ledger/scroll, fitting for a historical record) plus
+    /// a brown wood-tone `GradientFrame` bezel, replacing the flat amber
+    /// tint + stroke. Same game-chrome moves as the other two cards: a real
+    /// bezel instead of a flat stroke, a BannerLabel instead of plain
+    /// tracked-caps text (see `pastWinnersSection`). `pastWinnersSection`
+    /// itself is otherwise unchanged, just composed with this background.
+    var pastWinnersCard: some View {
+        pastWinnersSection
+            .padding(16)
+            .background(
+                LinearGradient(colors: [Color(red: 0.93, green: 0.85, blue: 0.68), Color(red: 0.85, green: 0.74, blue: 0.53)],
+                               startPoint: .top, endPoint: .bottom)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 24))
+            .overlay(
+                GeometryReader { geo in
+                    GradientFrame(
+                        cornerRadius: 24,
+                        thickness: 5,
+                        darkColor: Color(red: 0.32, green: 0.20, blue: 0.09),
+                        lightColor: Color(red: 0.72, green: 0.55, blue: 0.32)
+                    )
+                    .frame(width: geo.size.width, height: geo.size.height)
+                }
+            )
     }
 
     // MARK: - Post Action
@@ -539,7 +826,15 @@ struct RibbonBadge: View {
                     .foregroundColor(.white)
             }
         }
-        .shadow(color: .black.opacity(0.25), radius: 2, x: 0, y: 2)
+        // Scaled up a bit per feedback — applied before the shadow (not
+        // baked into every individual frame/offset/font number above) so
+        // the shadow scales up proportionally along with the badge itself.
+        .scaleEffect(1.2)
+        // Deepened from the original tight (radius 2, offset 2) shadow —
+        // a bigger blur radius and offset with a softer opacity reads as
+        // the badge floating just above the image rather than being
+        // printed flat onto it.
+        .shadow(color: .black.opacity(0.35), radius: 6, x: 0, y: 4)
         .fixedSize()
     }
 }
@@ -559,6 +854,443 @@ struct RibbonTail: Shape {
         p.addLine(to: CGPoint(x: w * 0.16, y: h))
         p.closeSubpath()
         return p
+    }
+}
+
+// MARK: - Subject Placard (nameplate on the hero winner frame)
+
+/// A small museum-nameplate-style tag showing the day's subject, straddling
+/// the bottom edge of the hero winner's frame — like the little brass plaque
+/// on a picture frame that names the piece. Cream/ivory fill with a bold
+/// black border and serif type reads as "plaque," not "app label," which is
+/// the point.
+struct SubjectPlacard: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 20, weight: .heavy, design: .serif))
+            .foregroundColor(.black)
+            .lineLimit(1)
+            .minimumScaleFactor(0.6)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 8)
+            .background(Color(red: 0.96, green: 0.94, blue: 0.86))
+            .clipShape(RoundedRectangle(cornerRadius: 3))
+            .overlay(
+                // Thinned slightly per direct request ("a wee bit thinner").
+                RoundedRectangle(cornerRadius: 3)
+                    .stroke(Color.black, lineWidth: 1.75)
+            )
+            .shadow(color: .black.opacity(0.3), radius: 5, x: 0, y: 3)
+            .fixedSize()
+    }
+}
+
+// MARK: - Gradient Frame (thin dark-to-light border around the hero winner image)
+
+/// Replaces an earlier woven-braid frame attempt — that read as taking over
+/// the doodle itself ("if they want a border like that they'd draw it in the
+/// doodle"). This is deliberately much quieter: a thin ring around the image
+/// that shades from dark at the outer edge to light at the inner edge (right
+/// where it meets the photo), like a beveled metal/gold picture-frame edge —
+/// no woven pattern, nothing that competes with the artist's own linework.
+///
+/// **First version used a single `RadialGradient` centered on the square and
+/// got the "outside" and "inside" wrong everywhere except the exact midpoint
+/// of each flat edge.** A `RadialGradient` shades by straight-line distance
+/// from one center point — on a rounded *rectangle* (not a circle), that
+/// distance only equals "how far into the ring" at the four points directly
+/// above/below/left/right of center. Anywhere else along an edge, straight-
+/// line distance from center is *larger* than the ring's true local depth
+/// (Pythagoras — moving along the edge adds a sideways component the radial
+/// math has no way to discount), so the gradient's inner/outer stops crept
+/// past their intended radii well before reaching the corners. The visible
+/// result was a band partway down each side where the ring had already
+/// (incorrectly) blended partway from dark toward light — reading as the
+/// brown drifting toward yellow — while the corners themselves, being
+/// farthest from center of all, clamped to flat dark with no gradient at all.
+///
+/// **Fix: concentric offset rings, not a radial field.** `body` layers
+/// several thin `RoundedRectangle` strokes, each padded inward a bit more
+/// than the last with its corner radius shrunk to match (a true parallel
+/// offset of the original rounded rect, the same shape a picture-frame
+/// bevel or a pen's `.padding` naturally produces) and colored by
+/// interpolating darkColor → lightColor across the steps. Because each ring
+/// is a genuine inward offset of the *actual* shape — corners included —
+/// "how far into the frame" is correct at every point on the perimeter, not
+/// just the four edge midpoints.
+struct GradientFrame: View {
+    var cornerRadius: CGFloat = 20
+    var thickness: CGFloat = 10
+    var darkColor: Color = Color(red: 0.42, green: 0.27, blue: 0.15)   // dark bronze/brown, outer edge
+    var lightColor: Color = Color(red: 0.94, green: 0.83, blue: 0.53)  // light gold, inner edge (against photo)
+
+    /// Optional thin dark stroke drawn exactly at the frame's innermost
+    /// edge, where it meets whatever sits inside it. Why this is needed at
+    /// all: the bevel reads correctly on its own when the interior is dark
+    /// (a card's gem-panel fill, say) because `lightColor` — pale gold —
+    /// already contrasts sharply against that dark interior, so the ring's
+    /// own inner edge *is* a visible value break. But against a light
+    /// interior (a photo, a parchment card), `lightColor` is close in value
+    /// to the interior itself, so the ring just fades out instead of
+    /// stopping — no seam, no "frame," just a soft gradient trailing off.
+    /// Setting `innerEdgeColor` manufactures that missing value-break
+    /// artificially: a solid line right where the ring's light end would
+    /// otherwise blend away. `nil` (default) leaves every existing call
+    /// site's look untouched.
+    var innerEdgeColor: Color? = nil
+    var innerEdgeWidth: CGFloat = 1.5
+
+    // Enough concentric steps that the color change reads as a smooth
+    // gradient rather than visible banding, without the cost of a
+    // per-pixel Canvas render for something this small on screen.
+    private let steps = 16
+
+    var body: some View {
+        ZStack {
+            ForEach(0..<steps, id: \.self) { i in
+                let t = CGFloat(i) / CGFloat(steps - 1)     // 0 = outer (dark), 1 = inner (light)
+                let inset = t * thickness
+                // Slight overlap between adjacent rings (rather than exact
+                // edge-to-edge tiling) so there's no hairline gap from
+                // sub-pixel rounding between one ring and the next.
+                let ringWidth = thickness / CGFloat(steps) + 1
+                RoundedRectangle(cornerRadius: max(0, cornerRadius - inset))
+                    .strokeBorder(lerp(darkColor, lightColor, t), lineWidth: ringWidth)
+                    .padding(inset)
+            }
+            if let innerEdgeColor {
+                RoundedRectangle(cornerRadius: max(0, cornerRadius - thickness))
+                    .stroke(innerEdgeColor, lineWidth: innerEdgeWidth)
+                    .padding(thickness)
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    /// Plain linear RGBA interpolation — `Color` itself doesn't expose its
+    /// components, so this bridges through `UIColor` to read them out.
+    private func lerp(_ a: Color, _ b: Color, _ t: CGFloat) -> Color {
+        var ar: CGFloat = 0, ag: CGFloat = 0, ab: CGFloat = 0, aa: CGFloat = 0
+        var br: CGFloat = 0, bg: CGFloat = 0, bb: CGFloat = 0, ba: CGFloat = 0
+        UIColor(a).getRed(&ar, green: &ag, blue: &ab, alpha: &aa)
+        UIColor(b).getRed(&br, green: &bg, blue: &bb, alpha: &ba)
+        return Color(red: Double(ar + (br - ar) * t),
+                     green: Double(ag + (bg - ag) * t),
+                     blue: Double(ab + (bb - ab) * t),
+                     opacity: Double(aa + (ba - aa) * t))
+    }
+}
+
+// MARK: - Ornate Scalloped Frame (elaborated version, hero image only)
+
+/// A fancier alternative to the plain `GradientFrame` bevel, requested
+/// specifically for card #1's canvas frame (the border around the doodle
+/// photo itself, not any card-level bezel) — "could we do some kind of
+/// bezier curve with the gold gradient." `GradientFrame`'s concentric rings
+/// are flat-sided by construction (straight rounded-rect offsets); this
+/// instead traces a ring that ripples in and out around the same rounded
+/// rect perimeter, the peaks/troughs joined by real cubic Bezier curves —
+/// reads like a fluted or twisted-rope gold molding instead of a plain band.
+/// Layered on top of a normal `GradientFrame` (kept underneath, still with
+/// `innerEdgeColor`) rather than replacing it, so the geometrically-correct
+/// bevel shading is preserved and the scallop reads as ornamental trim on
+/// top of it, not instead of it.
+struct OrnateGoldFrame: View {
+    var cornerRadius: CGFloat = 20
+    var thickness: CGFloat = 10
+    var darkColor: Color = Color(red: 0.42, green: 0.27, blue: 0.15)
+    var lightColor: Color = Color(red: 1.0, green: 0.90, blue: 0.55)
+    var innerEdgeColor: Color? = nil
+
+    /// **Shimmer animation removed entirely, per direct request** ("lets
+    /// kill this animation... somebody's trying to tell me something").
+    /// After many rounds — AngularGradient dot, LinearGradient-point
+    /// rotation, `.rotationEffect`+`.mask`, `.offset`-swept rectangle,
+    /// `.trim()`-based single glint, then two counter-traveling glints with
+    /// progressively narrowed color ranges — none of them landed. The frame
+    /// is back to a plain static scalloped gold ribbon, no `TimelineView`,
+    /// no animation dependency at all. The animation idea moved to a new
+    /// "light fireworks" effect behind the hero photo instead — see
+    /// `FireworksBackground`, used in `heroWinnerCard`'s background.
+    private var ribbonShape: ScallopRingShape {
+        ScallopRingShape(cornerRadius: cornerRadius, thickness: thickness * 0.85,
+                         amplitude: thickness * 0.22, wavelength: 15)
+    }
+
+    private var ribbonStrokeStyle: StrokeStyle {
+        StrokeStyle(lineWidth: thickness * 0.6, lineCap: .round, lineJoin: .round)
+    }
+
+    var body: some View {
+        ZStack {
+            GradientFrame(cornerRadius: cornerRadius, thickness: thickness,
+                          darkColor: darkColor, lightColor: lightColor,
+                          innerEdgeColor: innerEdgeColor)
+
+            // Static gold ribbon.
+            // BUG FIXED (earlier round): this used to be `.fill(...)` on
+            // `ScallopRingShape` directly, which paints the entire area
+            // enclosed by the ring's path — since the shape is a single
+            // closed wavy contour (not an outer+inner annulus with a
+            // hole cut out), that painted almost the *entire* photo area
+            // solid, hiding the doodle underneath ("nailed the gold
+            // zigzag edge... where's the doodle?"). `.stroke(...)` paints
+            // only a fixed-width ribbon following the path instead.
+            ribbonShape
+                .stroke(
+                    LinearGradient(colors: [lightColor, darkColor, lightColor, darkColor, lightColor],
+                                   startPoint: .topLeading, endPoint: .bottomTrailing),
+                    style: ribbonStrokeStyle
+                )
+                .overlay(
+                    // Thin dark seam down the center of the gold ribbon
+                    // — reads like the twist-line of a rope rather than
+                    // an outline, since it follows the same centerline
+                    // path.
+                    ribbonShape
+                        .stroke(darkColor.shaded(-0.35), style: StrokeStyle(lineWidth: 0.75, lineCap: .round, lineJoin: .round))
+                )
+                .shadow(color: .black.opacity(0.35), radius: 1.5, x: 0, y: 0.5)
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+/// A closed ring shape that rides the same rounded-rect perimeter
+/// `GradientFrame` uses, but bulges in and out sinusoidally (alternating
+/// peak/trough anchor points every half-`wavelength`) with the anchors
+/// joined by cubic Bezier curves rather than straight lines — a rope-twist/
+/// fluted molding profile instead of a flat band. Built from first
+/// principles (arc length + outward normal at each point on a rounded rect,
+/// walked segment by segment: top edge, corner arc, right edge, corner arc,
+/// ...) since SwiftUI has no built-in "wavy rounded rect" primitive.
+struct ScallopRingShape: Shape {
+    var cornerRadius: CGFloat
+    var thickness: CGFloat
+    var amplitude: CGFloat
+    var wavelength: CGFloat
+
+    /// Point and outward-unit-normal at arc length `s` around the rounded
+    /// rect centered in `rect`, with corner radius `r`. Walks the 8-segment
+    /// loop clockwise starting at the top-left corner's end (top edge start):
+    /// top edge → top-right corner → right edge → bottom-right corner →
+    /// bottom edge → bottom-left corner → left edge → top-left corner.
+    private func pointAndNormal(_ s: CGFloat, rect: CGRect, r: CGFloat,
+                                 topLen: CGFloat, sideLen: CGFloat, cornerLen: CGFloat,
+                                 perimeter: CGFloat) -> (CGPoint, CGPoint) {
+        var t = s.truncatingRemainder(dividingBy: perimeter)
+        if t < 0 { t += perimeter }
+
+        if t <= topLen {
+            return (CGPoint(x: rect.minX + r + t, y: rect.minY), CGPoint(x: 0, y: -1))
+        }
+        t -= topLen
+        if t <= cornerLen {
+            let theta = -CGFloat.pi / 2 + (t / cornerLen) * (CGFloat.pi / 2)
+            let c = CGPoint(x: rect.maxX - r, y: rect.minY + r)
+            return (CGPoint(x: c.x + r * cos(theta), y: c.y + r * sin(theta)), CGPoint(x: cos(theta), y: sin(theta)))
+        }
+        t -= cornerLen
+        if t <= sideLen {
+            return (CGPoint(x: rect.maxX, y: rect.minY + r + t), CGPoint(x: 1, y: 0))
+        }
+        t -= sideLen
+        if t <= cornerLen {
+            let theta = (t / cornerLen) * (CGFloat.pi / 2)
+            let c = CGPoint(x: rect.maxX - r, y: rect.maxY - r)
+            return (CGPoint(x: c.x + r * cos(theta), y: c.y + r * sin(theta)), CGPoint(x: cos(theta), y: sin(theta)))
+        }
+        t -= cornerLen
+        if t <= topLen {
+            return (CGPoint(x: rect.maxX - r - t, y: rect.maxY), CGPoint(x: 0, y: 1))
+        }
+        t -= topLen
+        if t <= cornerLen {
+            let theta = CGFloat.pi / 2 + (t / cornerLen) * (CGFloat.pi / 2)
+            let c = CGPoint(x: rect.minX + r, y: rect.maxY - r)
+            return (CGPoint(x: c.x + r * cos(theta), y: c.y + r * sin(theta)), CGPoint(x: cos(theta), y: sin(theta)))
+        }
+        t -= cornerLen
+        if t <= sideLen {
+            return (CGPoint(x: rect.minX, y: rect.maxY - r - t), CGPoint(x: -1, y: 0))
+        }
+        t -= sideLen
+        let theta = CGFloat.pi + (t / max(cornerLen, 0.0001)) * (CGFloat.pi / 2)
+        let c = CGPoint(x: rect.minX + r, y: rect.minY + r)
+        return (CGPoint(x: c.x + r * cos(theta), y: c.y + r * sin(theta)), CGPoint(x: cos(theta), y: sin(theta)))
+    }
+
+    func path(in rect: CGRect) -> Path {
+        // Ride the centerline of the given thickness band so the ripple has
+        // room to bulge both outward and inward without poking past either
+        // edge of the frame it's decorating.
+        let insetRect = rect.insetBy(dx: thickness / 2, dy: thickness / 2)
+        let r = max(1, cornerRadius - thickness / 2)
+        let topLen = max(0, insetRect.width - 2 * r)
+        let sideLen = max(0, insetRect.height - 2 * r)
+        let cornerLen = (CGFloat.pi / 2) * r
+        let perimeter = 2 * topLen + 2 * sideLen + 4 * cornerLen
+        guard perimeter > 0 else { return Path() }
+
+        let halfWave = max(4, wavelength / 2)
+        let count = max(12, Int((perimeter / halfWave).rounded()))
+
+        var anchors: [(point: CGPoint, tangent: CGPoint)] = []
+        anchors.reserveCapacity(count)
+        for i in 0..<count {
+            let s = perimeter * CGFloat(i) / CGFloat(count)
+            let (p, n) = pointAndNormal(s, rect: insetRect, r: r, topLen: topLen, sideLen: sideLen,
+                                         cornerLen: cornerLen, perimeter: perimeter)
+            let sign: CGFloat = (i % 2 == 0) ? 1 : -1
+            let offsetPoint = CGPoint(x: p.x + n.x * amplitude * sign, y: p.y + n.y * amplitude * sign)
+            // Tangent = normal rotated 90° CCW — matches this loop's clockwise
+            // travel direction at every segment (verified against each
+            // straight edge's known direction of travel).
+            let tangent = CGPoint(x: -n.y, y: n.x)
+            anchors.append((offsetPoint, tangent))
+        }
+
+        var path = Path()
+        guard let first = anchors.first else { return path }
+        path.move(to: first.point)
+        let segLen = perimeter / CGFloat(count)
+        let controlDist = segLen * 0.55
+        for i in 0..<count {
+            let a = anchors[i]
+            let b = anchors[(i + 1) % count]
+            let c1 = CGPoint(x: a.point.x + a.tangent.x * controlDist, y: a.point.y + a.tangent.y * controlDist)
+            let c2 = CGPoint(x: b.point.x - b.tangent.x * controlDist, y: b.point.y - b.tangent.y * controlDist)
+            path.addCurve(to: b.point, control1: c1, control2: c2)
+        }
+        path.closeSubpath()
+        return path
+    }
+}
+
+// MARK: - Game-Chrome Components (Today tab visual pass)
+
+/// Reference mockups (AI-generated concept art, not something this
+/// environment can produce) showed a much more game-like "carved wood and
+/// gold" skin — banner-shaped labels, beveled stone/gold panels, medal
+/// icons for rank — instead of flat tinted rounded rects. The actual
+/// painted textures (wood grain, stone, parchment, the illustrated
+/// background) aren't reproducible as SwiftUI shapes/gradients, but the
+/// *structural* ideas are: every text label gets its own shaped chrome
+/// instead of sitting on a plain tint, panels get a genuine beveled border
+/// (reusing `GradientFrame`'s concentric-ring technique, not a flat
+/// stroke), and rank gets a medal icon instead of a plain number/trophy.
+/// These three components carry that across the three Today-tab cards.
+
+/// A ribbon-banner/pennant shape — a rectangle with a small triangular
+/// notch cut into each end, like a hanging nameplate. Used for section
+/// header labels so they read as a distinct object, not text-on-a-tint.
+struct BannerShape: Shape {
+    var notchDepth: CGFloat = 8
+
+    func path(in rect: CGRect) -> Path {
+        let w = rect.width, h = rect.height
+        var p = Path()
+        p.move(to: CGPoint(x: 0, y: 0))
+        p.addLine(to: CGPoint(x: w, y: 0))
+        p.addLine(to: CGPoint(x: w - notchDepth, y: h / 2))
+        p.addLine(to: CGPoint(x: w, y: h))
+        p.addLine(to: CGPoint(x: 0, y: h))
+        p.addLine(to: CGPoint(x: notchDepth, y: h / 2))
+        p.closeSubpath()
+        return p
+    }
+}
+
+struct BannerLabel: View {
+    let text: String
+    var color: Color
+    var textColor: Color = .white
+    var fontSize: CGFloat = 13
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: fontSize, weight: .heavy))
+            .foregroundColor(textColor)
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+            .padding(.horizontal, 22)
+            .padding(.vertical, 8)
+            .background(
+                BannerShape()
+                    .fill(color)
+                    .overlay(BannerShape().stroke(Color.black.opacity(0.15), lineWidth: 1))
+            )
+            .shadow(color: .black.opacity(0.25), radius: 3, x: 0, y: 2)
+    }
+}
+
+/// Small numbered medal for Past Winners rank — a gold/silver/bronze
+/// gradient disc with a short ribbon tail beneath (reusing the existing
+/// `RibbonTail` shape), replacing the plain trophy-badge-on-thumbnail-corner
+/// that was here before. Only ranks 2+ ever reach this — the actual #1
+/// winner is already spotlighted separately in the hero card above.
+struct RankMedal: View {
+    let rank: Int
+
+    private var discColors: (light: Color, dark: Color) {
+        switch rank {
+        case 2: return (Color(red: 0.90, green: 0.90, blue: 0.94), Color(red: 0.58, green: 0.58, blue: 0.64)) // silver
+        case 3: return (Color(red: 0.88, green: 0.62, blue: 0.42), Color(red: 0.55, green: 0.35, blue: 0.18)) // bronze
+        default: return (Color(red: 1.0, green: 0.87, blue: 0.45), Color(red: 0.75, green: 0.55, blue: 0.06)) // gold (rank 4+ reuses gold rather than inventing a 4th tier)
+        }
+    }
+    private var tailColor: Color {
+        switch rank {
+        case 2: return Color.blue
+        case 3: return Color.red
+        default: return Color.purple
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: -3) {
+            ZStack {
+                Circle()
+                    .fill(
+                        RadialGradient(colors: [discColors.light, discColors.dark],
+                                       center: .topLeading, startRadius: 1, endRadius: 22)
+                    )
+                Circle()
+                    .stroke(Color.white.opacity(0.85), lineWidth: 1.5)
+                Text("\(rank)")
+                    .font(.system(size: 12, weight: .heavy))
+                    .foregroundColor(.white)
+            }
+            .frame(width: 22, height: 22)
+
+            RibbonTail()
+                .fill(tailColor)
+                .frame(width: 9, height: 9)
+        }
+        .shadow(color: .black.opacity(0.2), radius: 2, x: 0, y: 1)
+    }
+}
+
+extension Color {
+    /// Brightness-adjusts a color by blending it toward white (positive
+    /// `amount`) or black (negative), bridging through `UIColor` the same
+    /// way `GradientFrame.lerp` does — `Color` doesn't expose its own RGBA
+    /// components directly. Used to turn a single flat identity color (the
+    /// CTA buttons' `color` param) into a lit-from-above bevel gradient
+    /// without having to hand-pick a second literal color at every call site.
+    func shaded(_ amount: CGFloat) -> Color {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        UIColor(self).getRed(&r, green: &g, blue: &b, alpha: &a)
+        let mix: (CGFloat) -> CGFloat = { channel in
+            if amount >= 0 {
+                return channel + (1 - channel) * amount
+            } else {
+                return channel * (1 + amount)
+            }
+        }
+        return Color(red: Double(mix(r)), green: Double(mix(g)), blue: Double(mix(b)), opacity: Double(a))
     }
 }
 
@@ -753,7 +1485,11 @@ struct DailyVotingBoothView: View {
                     .foregroundColor(.white)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 16)
-                    .background(entry.isVotedByMe ? Color.gray.opacity(0.4) : Color.gray)
+                    // Recolored from plain gray to a light/high-opacity red
+                    // per direct request — dims to a paler red when Yes is
+                    // the currently-held answer, same selected/unselected
+                    // dimming pattern as before, just red instead of gray.
+                    .background(entry.isVotedByMe ? Color(red: 0.90, green: 0.35, blue: 0.35).opacity(0.35) : Color(red: 0.90, green: 0.35, blue: 0.35))
                     .clipShape(Capsule())
             }
 
@@ -766,7 +1502,20 @@ struct DailyVotingBoothView: View {
                     .foregroundColor(.white)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 16)
-                    .background(entry.isVotedByMe ? Color.green : Color.purple)
+                    // Recolored from purple (unselected) / green (selected)
+                    // to a consistent light green either way, per direct
+                    // request — still dims when not the currently-held
+                    // answer, same pattern as the No button above.
+                    // First attempt (0.40, 0.80, 0.45) read as "too pale...
+                    // looks like it's disabled" next to the No button's
+                    // punchier red — R/B weren't pulled down far enough
+                    // relative to G, so it landed pastel instead of vivid.
+                    // Still reported too pale after that adjustment — per
+                    // direct request, now uses the exact same `Color.green`
+                    // as the main Today tab's VOTE! button, so the two
+                    // greens in the app are guaranteed identical rather
+                    // than two independently-tuned near-matches.
+                    .background(entry.isVotedByMe ? Color.green : Color.green.opacity(0.35))
                     .clipShape(Capsule())
             }
         }
@@ -791,8 +1540,10 @@ struct DailyVotingBoothView: View {
             Text("You're All Caught Up!")
                 .font(.system(size: 26, weight: .heavy))
 
+            // Bumped from 15pt — "we have lots of room" on this page, per
+            // direct feedback.
             Text("You've gone through every doodle from yesterday's contest.")
-                .font(.system(size: 15))
+                .font(.system(size: 19, weight: .medium))
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 40)
@@ -802,7 +1553,13 @@ struct DailyVotingBoothView: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(.secondary)
                     .tracking(1.5)
-                Text("Every doodle is submitted blind during its own day. The next day, it's revealed here for voting — and results stay hidden until that day closes too, so nothing's spoiled early. Check the Today tab tomorrow to see who won.")
+                // Replaced per direct feedback ("replace the text... with
+                // something much more clear") — the previous paragraph
+                // ("Every doodle is submitted blind during its own day...")
+                // packed the whole submit/reveal/vote/results-hidden
+                // mechanic into one dense sentence. Broken into 3 short,
+                // plain-language beats instead, one per step of the cycle.
+                Text("Doodles stay hidden while people are still submitting them. The next day, they show up here for everyone to vote on. Once voting closes, the winner is revealed on the Today tab.")
                     .font(.system(size: 13))
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
@@ -879,8 +1636,22 @@ struct DailySubmitScreen: View {
                             // Already posted today
                             VStack(spacing: 12) {
                                 ZStack(alignment: .topTrailing) {
-                                    RetryAsyncImage(url: URL(string: mine.imageURL))
-                                        .frame(width: 220, height: 220)
+                                    // Was a fixed 220×220 square using
+                                    // RetryAsyncImage's default `.fill`
+                                    // contentMode — cropped every non-square
+                                    // doodle AND left most of the screen's
+                                    // height as bare white space on both
+                                    // iPad (~60%) and iPhone (~50%), since
+                                    // this screen has nothing else on it.
+                                    // Fixed the same way as the hero card's
+                                    // own crop/space fix: `contentMode: .fit`
+                                    // (full doodle, no cropping) inside only
+                                    // a `.frame(maxWidth:)` cap — no fixed
+                                    // height — so the real aspect ratio sets
+                                    // the height and the preview actually
+                                    // uses the room available on this screen.
+                                    RetryAsyncImage(url: URL(string: mine.imageURL), contentMode: .fit)
+                                        .frame(maxWidth: 500)
                                         .clipShape(RoundedRectangle(cornerRadius: 12))
 
                                     Text("✓ Posted")
@@ -1033,6 +1804,13 @@ struct DailyEntryTile: View {
 struct DailyAvatarRow: View {
     let entry: DailyEntry
     var compact: Bool = false
+    // Lets a call site pin an explicit text color regardless of `compact`'s
+    // size/color coupling (compact controls both avatar/font size AND
+    // defaults the text to white) — added for the hero card, which needs
+    // full (non-compact) size but white text now that its background is a
+    // fixed dark fill. `nil` (default) preserves every existing call site's
+    // look exactly as before.
+    var textColor: Color? = nil
 
     var avatarSize: CGFloat { compact ? 20 : 28 }
     var fontSize: CGFloat { compact ? 11 : 14 }
@@ -1059,7 +1837,7 @@ struct DailyAvatarRow: View {
 
             Text(entry.username)
                 .font(.system(size: fontSize, weight: .medium))
-                .foregroundColor(compact ? .white : .primary)
+                .foregroundColor(textColor ?? (compact ? .white : .primary))
                 .lineLimit(1)
         }
     }
@@ -1285,6 +2063,13 @@ struct PastWinnersView: View {
 
 struct PastWinnerRow: View {
     let summary: DailyWinnerSummary
+    // Defaults to 2 (not 1 — the hero card above is always the real #1) so
+    // the old, no-longer-linked-to `PastWinnersView` standalone screen
+    // (which calls this without a rank, showing every day including what
+    // would elsewhere be "the" winner) still compiles unchanged, per this
+    // codebase's convention of leaving orphaned call sites alone rather
+    // than threading a rank through code paths nothing routes to anymore.
+    var rank: Int = 2
     var onAuthorTap: (String) -> Void
     var onRowTap: () -> Void
 
@@ -1307,6 +2092,12 @@ struct PastWinnerRow: View {
     // date, avatar, votes) rather than one row wrapped in a single button —
     // keeps the avatar's tap-to-profile fully separate from tap-to-open-day
     // without needing any nested-button or hit-testing workarounds.
+    // Fixed brown tone (matches pastWinnersSection's empty-state fix) rather
+    // than `.secondary` — this row now always sits on the parchment card's
+    // fixed light background regardless of system light/dark mode, so a
+    // dynamic gray would lose contrast in dark mode.
+    private static let inkColor = Color(red: 0.32, green: 0.20, blue: 0.09)
+
     var body: some View {
         HStack(spacing: 12) {
             Button(action: onRowTap) {
@@ -1314,13 +2105,11 @@ struct PastWinnerRow: View {
                     .frame(width: 56, height: 56)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
                     .overlay(alignment: .topLeading) {
-                        Image(systemName: "trophy.fill")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundColor(.white)
-                            .padding(3)
-                            .background(Color.yellow)
-                            .clipShape(Circle())
-                            .offset(x: -3, y: -3)
+                        // RankMedal replaces the old plain trophy-badge
+                        // corner icon — see "Game-Chrome Components" above.
+                        RankMedal(rank: rank)
+                            .scaleEffect(0.7)
+                            .offset(x: -8, y: -8)
                     }
             }
             .buttonStyle(.plain)
@@ -1329,7 +2118,7 @@ struct PastWinnerRow: View {
                 Button(action: onRowTap) {
                     Text(displayDate)
                         .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(.secondary)
+                        .foregroundColor(PastWinnerRow.inkColor.opacity(0.75))
                 }
                 .buttonStyle(.plain)
 
@@ -1351,10 +2140,11 @@ struct PastWinnerRow: View {
                             .foregroundColor(.green)
                         Text("\(summary.winner.votes)")
                             .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(PastWinnerRow.inkColor)
                     }
                     Text("\(summary.entryCount) entr\(summary.entryCount == 1 ? "y" : "ies")")
                         .font(.system(size: 11))
-                        .foregroundColor(.secondary)
+                        .foregroundColor(PastWinnerRow.inkColor.opacity(0.75))
                 }
             }
             .buttonStyle(.plain)
@@ -1366,23 +2156,31 @@ struct PastWinnerRow: View {
 
 // MARK: - Contest Day Detail (Past Winners drill-in)
 
-/// Full view of one specific already-concluded (fully revealed) day — winner
-/// spotlight + grid, sorted by votes. Unlike the live "yesterday" flow (which
-/// hides counts/ranking until reveal — see DailyVotingBoothView), archive days
-/// are finalized, so showing the real ranking here is correct. Reached by
-/// tapping into PastWinnersView.
+/// Full swipeable browse of one specific already-concluded (fully revealed)
+/// day, most-voted first — reached by tapping either the hero winner image
+/// or a Past Winners row (both just set TodayTab's `selectedPastDate`, which
+/// drives this same `.navigationDestination`, so both land here).
+///
+/// Replaces an earlier winner-spotlight-card + grid layout — that screen is
+/// gone per direct feedback ("we don't want that... it should let the user
+/// swipe thru the list of submissions in yes vote order"). This now mirrors
+/// `DailyVotingBoothView`'s one-doodle-at-a-time swiping, just read-only (no
+/// vote buttons — archive days are already closed, `toggleVote` would no-op
+/// on them anyway) and with the real vote count shown per page, since these
+/// days are fully revealed/finalized (unlike the live "yesterday" flow,
+/// which hides counts until its own reveal).
+///
+/// `DailyEntryTile` and `DailyEntryDetailSheet` (the old grid-cell/sheet
+/// pair this replaced) are left in the file unused rather than deleted —
+/// same precedent as `PastWinnersView`/`CalendarTab.swift` elsewhere in this
+/// codebase.
 struct DailyContestDayView: View {
     let date: String
     var onAuthorTap: (String) -> Void
 
     @State private var entries: [DailyEntry] = []
     @State private var isLoading = true
-    @State private var showWinnerDetail = false
-
-    private var winner: DailyEntry? {
-        guard let top = entries.first, top.votes > 0 else { return nil }
-        return top
-    }
+    @State private var currentIndex: Int = 0
 
     private var displayDate: String {
         guard let d = DailyContestDayView.parseFormatter.date(from: date) else { return date }
@@ -1397,50 +2195,43 @@ struct DailyContestDayView: View {
     }()
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                if isLoading {
-                    ProgressView()
-                        .frame(maxWidth: .infinity)
-                        .padding(.top, 60)
-                } else if entries.isEmpty {
-                    VStack(spacing: 12) {
-                        Image(systemName: "pencil.and.scribble")
-                            .font(.system(size: 44, weight: .thin))
-                            .foregroundColor(.secondary.opacity(0.4))
-                        Text("No doodles were submitted this day.")
-                            .font(.system(size: 15))
-                            .foregroundColor(.secondary)
-                            .multilineTextAlignment(.center)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 60)
-                } else {
-                    if let winner {
-                        winnerCard(winner)
-                            .padding(.horizontal, 16)
-                            .padding(.top, 8)
-                    }
-
-                    let gridEntries = winner != nil ? Array(entries.dropFirst()) : entries
-                    if !gridEntries.isEmpty {
-                        let isIPad = UIDevice.current.userInterfaceIdiom == .pad
-                        let colCount = isIPad ? 4 : 3
-                        let cellSize = (UIScreen.main.bounds.width - 16 - CGFloat(colCount - 1) * 2) / CGFloat(colCount)
-                        let columns = Array(repeating: GridItem(.fixed(cellSize), spacing: 2), count: colCount)
-                        LazyVGrid(columns: columns, spacing: 2) {
-                            ForEach(gridEntries) { entry in
-                                DailyEntryTile(entry: entry, onAuthorTap: onAuthorTap)
-                                    .frame(width: cellSize, height: cellSize)
-                                    .clipped()
-                            }
+        Group {
+            if isLoading {
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if entries.isEmpty {
+                VStack(spacing: 12) {
+                    Image(systemName: "pencil.and.scribble")
+                        .font(.system(size: 44, weight: .thin))
+                        .foregroundColor(.secondary.opacity(0.4))
+                    Text("No doodles were submitted this day.")
+                        .font(.system(size: 15))
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                // entries already arrive sorted votes-descending, timestamp-
+                // ascending (see DailyManager.fetchEntries's doc comment) —
+                // index 0 is always the winner, no separate sort needed here.
+                ZStack(alignment: .top) {
+                    TabView(selection: $currentIndex) {
+                        ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
+                            dayPage(for: entry, rank: index)
+                                .tag(index)
                         }
-                        .padding(.horizontal, 8)
-                        .padding(.top, 16)
                     }
+                    .tabViewStyle(.page(indexDisplayMode: .never))
+
+                    Text("\(currentIndex + 1) of \(entries.count)")
+                        .font(.system(size: 13, weight: .semibold))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(.ultraThinMaterial)
+                        .clipShape(Capsule())
+                        .padding(.top, 8)
                 }
             }
-            .padding(.bottom, 32)
         }
         .navigationTitle(displayDate)
         .navigationBarTitleDisplayMode(.inline)
@@ -1450,67 +2241,104 @@ struct DailyContestDayView: View {
                 isLoading = false
             }
         }
-        .sheet(isPresented: $showWinnerDetail) {
-            if let winner {
-                DailyEntryDetailSheet(entry: winner, onAuthorTap: onAuthorTap)
+    }
+
+    // Wrapped in its own ScrollView per page (not one ScrollView around the
+    // whole TabView — each page scrolls independently while the TabView
+    // itself still pages horizontally). Without this, the image's full
+    // aspect-ratio height (once RetryAsyncImage finishes loading — its
+    // placeholder is shorter, which is why this only became visible after
+    // the real image popped in) could push the avatar/caption/vote-count
+    // block below the screen with no way to reach it, since there was
+    // nothing to scroll. A long caption made it worse by pushing the vote
+    // count further down still.
+    @ViewBuilder
+    private func dayPage(for entry: DailyEntry, rank: Int) -> some View {
+        ScrollView {
+            VStack(spacing: 14) {
+                Spacer().frame(height: 24)
+
+                ZStack(alignment: .topLeading) {
+                    RetryAsyncImage(url: URL(string: entry.imageURL))
+                        .aspectRatio(1, contentMode: .fit)
+                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal, 24)
+                        .clipShape(RoundedRectangle(cornerRadius: 20))
+
+                    // Only the top-voted entry (rank 0, since entries already
+                    // arrive votes-descending) gets the trophy badge — same
+                    // marker PastWinnerRow's own thumbnail uses.
+                    if rank == 0 {
+                        Image(systemName: "trophy.fill")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundColor(.white)
+                            .padding(6)
+                            .background(Color.yellow)
+                            .clipShape(Circle())
+                            .padding(.leading, 34)
+                            .padding(.top, 10)
+                    }
+
+                    // Prev/Next overlaid directly on the image — same
+                    // reasoning as DailyVotingBoothView: always flank the
+                    // thing being browsed, regardless of device height.
+                    // Unlike the Voting Booth (which always has a completion
+                    // page to advance to), this is a finite, already-revealed
+                    // list, so Next is disabled on the last entry rather than
+                    // always enabled.
+                    HStack {
+                        navArrow(systemName: "chevron.left", disabled: currentIndex == 0) {
+                            currentIndex = max(0, currentIndex - 1)
+                        }
+                        Spacer()
+                        navArrow(systemName: "chevron.right", disabled: currentIndex == entries.count - 1) {
+                            currentIndex = min(entries.count - 1, currentIndex + 1)
+                        }
+                    }
+                    .padding(.horizontal, 36)
+                }
+
+                Button {
+                    onAuthorTap(entry.userId)
+                } label: {
+                    DailyAvatarRow(entry: entry)
+                }
+                .buttonStyle(.plain)
+
+                if !entry.caption.isEmpty {
+                    Text(entry.caption)
+                        .font(.system(size: 15))
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 32)
+                }
+
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.seal.fill")
+                        .foregroundColor(.green)
+                        .font(.system(size: 15))
+                    Text("\(entry.votes) vote\(entry.votes == 1 ? "" : "s")")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer(minLength: 24)
             }
         }
     }
 
-    func winnerCard(_ winner: DailyEntry) -> some View {
-        HStack(spacing: 14) {
-            Button {
-                showWinnerDetail = true
-            } label: {
-                ZStack(alignment: .topLeading) {
-                    RetryAsyncImage(url: URL(string: winner.imageURL))
-                        .frame(width: 100, height: 100)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-
-                    Image(systemName: "trophy.fill")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundColor(.white)
-                        .padding(6)
-                        .background(Color.yellow)
-                        .clipShape(Circle())
-                        .padding(6)
-                }
-            }
-            .buttonStyle(.plain)
-
-            VStack(alignment: .leading, spacing: 6) {
-                Button {
-                    onAuthorTap(winner.userId)
-                } label: {
-                    DailyAvatarRow(entry: winner)
-                }
-                .buttonStyle(.plain)
-
-                Button {
-                    showWinnerDetail = true
-                } label: {
-                    VStack(alignment: .leading, spacing: 6) {
-                        if !winner.caption.isEmpty {
-                            Text(winner.caption)
-                                .font(.system(size: 14))
-                                .foregroundColor(.secondary)
-                                .lineLimit(2)
-                        }
-                        HStack(spacing: 4) {
-                            Image(systemName: "checkmark.seal.fill")
-                                .foregroundColor(.green)
-                                .font(.system(size: 13))
-                            Text("\(winner.votes) vote\(winner.votes == 1 ? "" : "s")")
-                                .font(.system(size: 14, weight: .medium))
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                }
-                .buttonStyle(.plain)
-            }
-
-            Spacer()
+    @ViewBuilder
+    private func navArrow(systemName: String, disabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundColor(.primary)
+                .padding(12)
+                .background(.ultraThinMaterial)
+                .clipShape(Circle())
         }
+        .disabled(disabled)
+        .opacity(disabled ? 0.3 : 1)
     }
 }
 

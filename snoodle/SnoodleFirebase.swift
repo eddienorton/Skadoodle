@@ -1878,6 +1878,35 @@ class DailyManager: ObservableObject {
         }
     }
 
+    /// Subject for the hero card's date specifically — `pastWinners.first`,
+    /// the most recently decided winner. Same reliability fix as
+    /// `yesterdaySubject` above, for the exact same reason: the hero card
+    /// briefly showed `winner.caption` directly, which is only guaranteed to
+    /// equal the subject for entries posted through the real `post()` flow.
+    /// A hand-seeded/legacy test doc can have an actual AI-style caption
+    /// sitting in that field instead — that's a real bug that showed up here
+    /// ("My poodle is feeling a little purple today" displayed as if it were
+    /// the day's theme). This resolves the same Firestore-first/local-
+    /// fallback way as today/yesterday's subject, just for whichever date
+    /// fetchPastWinners() decided is the most recent winner. Triggered
+    /// automatically at the end of fetchPastWinners() below — not something
+    /// the view needs to remember to call separately.
+    @Published var heroWinnerSubject: String = ""
+
+    private static let dateOnlyFormatter: DateFormatter = {
+        // Same time-zone-safety rule as every other formatter that touches a
+        // daily_gallery `date` string — must be pinned to contestTimeZone or
+        // parsing can roll the date onto the wrong calendar day.
+        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; f.timeZone = DailyEntry.contestTimeZone; return f
+    }()
+
+    func fetchHeroWinnerSubject(for dateStr: String) {
+        guard let date = DailyManager.dateOnlyFormatter.date(from: dateStr) else { return }
+        fetchSubject(for: date) { [weak self] subject, _ in
+            DispatchQueue.main.async { self?.heroWinnerSubject = subject }
+        }
+    }
+
     /// Fetches all entries from yesterday's now-concluded-submission-but-still-voting
     /// contest and publishes them to yesterdayEntries. Thin wrapper around the shared
     /// per-day fetch below — this is the only place that writes to that published
@@ -2046,6 +2075,14 @@ class DailyManager: ObservableObject {
                     DispatchQueue.main.async {
                         self.pastWinners = summaries
                         self.isLoadingPastWinners = false
+                        // Resolve the hero card's subject reliably (never
+                        // from winner.caption — see heroWinnerSubject's doc
+                        // comment) as soon as we know which date is most
+                        // recent, so the view never has to remember to
+                        // trigger this itself.
+                        if let heroDate = summaries.first?.date {
+                            self.fetchHeroWinnerSubject(for: heroDate)
+                        }
                         completion?()
                     }
                 }

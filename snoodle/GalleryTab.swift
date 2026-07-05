@@ -811,12 +811,21 @@ struct RetryAsyncImage: View {
                 img.resizable().aspectRatio(contentMode: contentMode)
                     .onAppear { isResolved = true }
             case .failure:
+                // Square fallback footprint only matters for call sites that
+                // don't impose their own fixed .frame(width:height:) — every
+                // existing call site does, so this is a no-op there. Added
+                // for the hero winner card, which now sizes itself from the
+                // real loaded image's own aspect ratio (see success case
+                // below) rather than forcing a fixed square — before any
+                // image has loaded, there's no real aspect ratio to go on
+                // yet, so this gives loading/failure a sane default shape.
                 ZStack {
                     Color.gray.opacity(0.15)
                     Image(systemName: "photo")
                         .foregroundColor(.gray.opacity(0.3))
                         .font(.system(size: 24))
                 }
+                .aspectRatio(1, contentMode: .fit)
                 .onAppear {
                     isResolved = true
                     scheduleRetry(after: Double(retryCount + 1) * 1.5)
@@ -826,6 +835,7 @@ struct RetryAsyncImage: View {
                     Color.gray.opacity(0.12)
                     ProgressView().scaleEffect(0.7)
                 }
+                .aspectRatio(1, contentMode: .fit)
                 .onAppear {
                     isResolved = false
                     scheduleStuckWatchdog()
