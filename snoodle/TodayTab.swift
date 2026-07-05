@@ -484,7 +484,12 @@ struct TodayTab: View {
     var voteSubtitle: String {
         if daily.isLoadingYesterday { return "Loading…" }
         if daily.yesterdayEntries.isEmpty { return "No doodles yesterday" }
-        return "\(daily.yesterdayEntries.count) \(daily.yesterdayEntries.count == 1 ? "entry" : "entries") · \(daily.yesterdayTotalVotes) vote\(daily.yesterdayTotalVotes == 1 ? "" : "s")"
+        // "Yes votes," not just "votes" — per direct feedback ("this yes no
+        // thing is confusing"). Every vote counted here is a Yes tap (a "No"
+        // tap writes nothing to Firestore, see DailyVotingBoothView's forced
+        // Yes/No redesign elsewhere in this file), so labeling the raw count
+        // plain "votes" invited the reader to assume it also included No's.
+        return "\(daily.yesterdayEntries.count) \(daily.yesterdayEntries.count == 1 ? "entry" : "entries") · \(daily.yesterdayTotalVotes) yes vote\(daily.yesterdayTotalVotes == 1 ? "" : "s")"
     }
 
     var ctaSection: some View {
@@ -1476,47 +1481,53 @@ struct DailyVotingBoothView: View {
     private func voteButtons(for entry: DailyEntry) -> some View {
         let isMe = auth.userId == entry.userId
         HStack(spacing: 14) {
+            // Selection indicator redesigned per direct feedback — opacity
+            // dimming for the non-chosen answer ("both No and Yes look
+            // disabled in their dimmed state") read as a disabled control,
+            // not as "this is simply not your current pick." Both buttons
+            // now stay at full, undimmed color always; a checkmark next to
+            // the label is the ONLY thing that changes to show which side
+            // you're currently on — unambiguous, and neither button ever
+            // looks broken/inactive.
             Button {
                 setVote(entry, voted: false)
                 advanceAfterVote()
             } label: {
-                Text("No")
-                    .font(.system(size: 19, weight: .semibold))
-                    .foregroundColor(.white)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 16)
-                    // Recolored from plain gray to a light/high-opacity red
-                    // per direct request — dims to a paler red when Yes is
-                    // the currently-held answer, same selected/unselected
-                    // dimming pattern as before, just red instead of gray.
-                    .background(entry.isVotedByMe ? Color(red: 0.90, green: 0.35, blue: 0.35).opacity(0.35) : Color(red: 0.90, green: 0.35, blue: 0.35))
-                    .clipShape(Capsule())
+                HStack(spacing: 6) {
+                    if !entry.isVotedByMe {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 17, weight: .bold))
+                    }
+                    Text("No")
+                        .font(.system(size: 19, weight: .semibold))
+                }
+                .foregroundColor(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 16)
+                .background(Color(red: 0.90, green: 0.35, blue: 0.35))
+                .clipShape(Capsule())
             }
 
             Button {
                 setVote(entry, voted: true)
                 advanceAfterVote()
             } label: {
-                Text("Yes")
-                    .font(.system(size: 19, weight: .semibold))
-                    .foregroundColor(.white)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 16)
-                    // Recolored from purple (unselected) / green (selected)
-                    // to a consistent light green either way, per direct
-                    // request — still dims when not the currently-held
-                    // answer, same pattern as the No button above.
-                    // First attempt (0.40, 0.80, 0.45) read as "too pale...
-                    // looks like it's disabled" next to the No button's
-                    // punchier red — R/B weren't pulled down far enough
-                    // relative to G, so it landed pastel instead of vivid.
-                    // Still reported too pale after that adjustment — per
-                    // direct request, now uses the exact same `Color.green`
-                    // as the main Today tab's VOTE! button, so the two
-                    // greens in the app are guaranteed identical rather
-                    // than two independently-tuned near-matches.
-                    .background(entry.isVotedByMe ? Color.green : Color.green.opacity(0.35))
-                    .clipShape(Capsule())
+                HStack(spacing: 6) {
+                    if entry.isVotedByMe {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 17, weight: .bold))
+                    }
+                    Text("Yes")
+                        .font(.system(size: 19, weight: .semibold))
+                }
+                .foregroundColor(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 16)
+                // Same `Color.green` as the main Today tab's VOTE! button —
+                // always full strength now, never dimmed (see selection
+                // indicator note above).
+                .background(Color.green)
+                .clipShape(Capsule())
             }
         }
         .buttonStyle(.plain)

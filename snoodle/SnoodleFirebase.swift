@@ -261,7 +261,6 @@ class UserProfileManager: ObservableObject {
             return
         }
 
-        print("👤 fetchProfiles: looking up \(uncached.count) uncached userIds: \(uncached)")
         let batches = Array(uncached).chunked(into: 30)
         var fetched: [String: UserProfile] = [:]
         let group = DispatchGroup()
@@ -277,10 +276,8 @@ class UserProfileManager: ObservableObject {
                         print("👤 fetchProfiles: ERROR \(error.localizedDescription)")
                     }
                     let docs = snapshot?.documents ?? []
-                    print("👤 fetchProfiles: got \(docs.count) profile docs for batch \(batch)")
                     docs.forEach { doc in
                         let profile = self.parseProfile(userId: doc.documentID, data: doc.data())
-                        print("👤 fetchProfiles: resolved \(doc.documentID) → '\(profile.username)'")
                         fetched[doc.documentID] = profile
                         self.cache[doc.documentID] = profile
                     }
@@ -1151,7 +1148,6 @@ class WorldGalleryManager: ObservableObject {
             completion([])
             return
         }
-        print("❤️ fetchLikedIds: checking subcollection for \(snoodles.count) doodles")
         let group = DispatchGroup()
         var likedIds = Set<String>()
 
@@ -1166,7 +1162,6 @@ class WorldGalleryManager: ObservableObject {
         }
 
         group.notify(queue: .main) {
-            print("❤️ fetchLikedIds: found \(likedIds.count) liked doodles")
             completion(likedIds)
         }
     }
@@ -1185,7 +1180,6 @@ class WorldGalleryManager: ObservableObject {
             return
         }
         let currentlyLiked = entries[idx].isLikedByMe
-        print("❤️ toggleLike: doodleId=\(snoodle.id) currentlyLiked=\(currentlyLiked)")
 
         if currentlyLiked {
             entries[idx].isLikedByMe = false
@@ -1198,8 +1192,6 @@ class WorldGalleryManager: ObservableObject {
             likeRef.setData(["userId": userId, "timestamp": Timestamp(date: Date())]) { error in
                 if let error = error {
                     print("❤️ toggleLike: WRITE FAILED \(error)")
-                } else {
-                    print("❤️ toggleLike: write SUCCESS to \(self.collection)/\(snoodle.id)/likes/\(userId)")
                 }
             }
             snoodleRef.updateData(["likes": FieldValue.increment(Int64(1))]) { error in
@@ -2029,7 +2021,6 @@ class DailyManager: ObservableObject {
         let earliest = anchor.addingTimeInterval(-86400 * Double(lookbackDays - 1))
         let anchorStr = DailyEntry.contestDateString(for: anchor)
         let earliestStr = DailyEntry.contestDateString(for: earliest)
-        print("🔍 DailyManager fetchPastWinners: querying date range \(earliestStr)...\(anchorStr)")
 
         db.collection(collection)
             .whereField("date", isGreaterThanOrEqualTo: earliestStr)
@@ -2047,7 +2038,6 @@ class DailyManager: ObservableObject {
                     print("❌ DailyManager fetchPastWinners: \(error.localizedDescription)")
                 }
                 let rawDocs = snap?.documents ?? []
-                print("🔍 DailyManager fetchPastWinners: \(rawDocs.count) raw doc(s) returned from Firestore")
                 let parsed = rawDocs.compactMap { self.parse(id: $0.documentID, data: $0.data()) }
                 if parsed.count != rawDocs.count {
                     print("⚠️ DailyManager fetchPastWinners: \(rawDocs.count - parsed.count) doc(s) failed to parse (missing/malformed imageURL, userId, date, or timestamp field)")
@@ -2070,7 +2060,6 @@ class DailyManager: ObservableObject {
                         guard winner.votes > 0 else { return nil }
                         return DailyWinnerSummary(date: date, winner: winner, entryCount: countByDate[date] ?? 1)
                     }.sorted { $0.date > $1.date }
-                    print("🔍 DailyManager fetchPastWinners: \(countByDate.count) date(s) present in range, \(summaries.count) surfaced as summaries (dates with 0 votes are omitted) — dates seen: \(countByDate.keys.sorted())")
 
                     DispatchQueue.main.async {
                         self.pastWinners = summaries

@@ -41,12 +41,9 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 
         // Request permission after short delay
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-            print("📲 Requesting notification authorization...")
             UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { granted, error in
-                print("📲 Authorization result: granted=\(granted), error=\(String(describing: error))")
                 guard granted else { return }
                 DispatchQueue.main.async {
-                    print("📲 Calling registerForRemoteNotifications")
                     UIApplication.shared.registerForRemoteNotifications()
                     // Start watchdog to catch APNs token intercepted by Firebase swizzling
                     self.startAPNsWatchdog()
@@ -64,7 +61,6 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { timer in
             attempts += 1
             if let apnsToken = Messaging.messaging().apnsToken {
-                print("🍏 Watchdog found APNs token after \(attempts) attempts")
                 timer.invalidate()
                 // Re-assign to trigger Firebase's internal association loop
                 Messaging.messaging().apnsToken = apnsToken
@@ -85,7 +81,6 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             guard let token = token else { return }
 
             if token.contains("APA91b") {
-                print("🔄 Still legacy token — deleting and forcing fresh generation...")
                 Messaging.messaging().deleteToken { error in
                     if let error = error {
                         print("❌ deleteToken error: \(error.localizedDescription)")
@@ -93,13 +88,11 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                     }
                     Messaging.messaging().token { freshToken, _ in
                         if let finalToken = freshToken {
-                            print("🚀 Fresh FCM token: \(finalToken.prefix(20))...")
                             NotificationManager.shared.saveFCMToken(finalToken)
                         }
                     }
                 }
             } else {
-                print("🚀 Real APNs-backed FCM token: \(token.prefix(20))...")
                 NotificationManager.shared.saveFCMToken(token)
             }
         }
@@ -108,8 +101,6 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
     // Called by Firebase swizzle — may or may not fire depending on SwiftUI lifecycle
     func application(_ application: UIApplication,
                      didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
-        let tokenString = deviceToken.map { String(format: "%02.2hhx", $0) }.joined()
-        print("✅ didRegisterForRemoteNotificationsWithDeviceToken fired! \(tokenString.prefix(20))...")
         Messaging.messaging().apnsToken = deviceToken
     }
 
@@ -121,9 +112,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
     // FCM token refreshed by Firebase
     func messaging(_ messaging: Messaging, didReceiveRegistrationToken fcmToken: String?) {
         guard let token = fcmToken else { return }
-        print("🔄 FCM token refreshed: \(token.prefix(20))...")
         if token.contains("APA91b") {
-            print("⚠️ Legacy APA91b token — watchdog will handle it")
             return
         }
         NotificationManager.shared.saveFCMToken(token)
