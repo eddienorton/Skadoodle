@@ -46,3 +46,5 @@ Carthage/Build/
 *.p12
 GoogleService-Info.plist
 snoodle/Secrets.swift
+scripts/*service-account*.json
+scripts/node_modules/

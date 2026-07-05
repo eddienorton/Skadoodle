@@ -1811,22 +1811,92 @@ class DailyManager: ObservableObject {
     }
 
     /// Shared subject resolver for an arbitrary date — reads `daily_prompts/{date}`,
-    /// falling back to the local mod-cycle formula (`DailyPrompt.subject(for:)`,
-    /// evaluated for *that* date, not "today") if no assignment exists yet.
+    /// then walks backward year by year (same month/day, previous years — down
+    /// to `subjectLookbackFloorYear`) before giving up, falling back to the local
+    /// mod-cycle formula (`DailyPrompt.subject(for:)`, evaluated for *that* date,
+    /// not "today") only if none of those years have an assignment either.
     /// `hasRealAssignment` tells the caller whether it's safe to cache the
-    /// result permanently (only true for a real Firestore-sourced value — see
+    /// result permanently (true for any real Firestore-sourced value, whether it
+    /// came from this exact date or an inherited prior year — see
     /// fetchTodaySubject()'s caching note).
+    ///
+    /// Why walk backward instead of collapsing `daily_prompts` to MM-DD-only
+    /// doc IDs (which would give the same "repeats every year" behavior with a
+    /// single lookup): a full YYYY-MM-DD doc ID lets any *one* year's occurrence
+    /// of a date be overridden independently (e.g. a one-off theme for a
+    /// specific future July 4th) without disturbing every other year's copy of
+    /// that same calendar day. Collapsing to MM-DD would permanently couple
+    /// every occurrence of a day together. This costs one extra Firestore read
+    /// per lookback year on a date that hasn't been reseeded yet, which is a
+    /// fine trade — walking backward means a day only ever needs to be seeded
+    /// once (in `subjectLookbackFloorYear`, the year this whole system was
+    /// built), and every later year inherits it automatically forever, with no
+    /// need to ever re-run the seed script again.
+    ///
+    /// Deliberately walks year-by-year rather than checking exactly one year
+    /// back — checking only one year back would fail if that specific
+    /// intervening year was never reseeded, even though an earlier year's real
+    /// assignment is sitting right there. **`subjectLookbackFloorYear` is an
+    /// absolute floor, not a relative "N years back" count** — an early draft of
+    /// this used a fixed `yearsBack <= 10` cap, which would have silently
+    /// stopped reaching all the way back to the original seed year once the app
+    /// had been out for more than 10 years. Floored at the actual year
+    /// `daily_prompts` was first built, so the walk always continues far enough
+    /// to reach the original baseline no matter how far in the future "today"
+    /// is.
+    ///
+    /// Feb 29 special case: 2026 (the baseline year) isn't a leap year, so
+    /// `daily_prompts/2026-02-29` can never exist — if a leap-day subject is
+    /// ever seeded, it has to live in an actual leap year (2028 is the next
+    /// one). The walk skips straight past non-leap candidate years for a Feb 29
+    /// lookup rather than querying a doc ID that could never have been written.
+    /// Builds candidate date strings from plain year/month/day integers rather
+    /// than `Calendar.date(byAdding: .year, ...)` on a `Date`, specifically to
+    /// avoid depending on Foundation's exact leap-day rollover behavior across a
+    /// year subtraction — that behavior isn't verifiable in this environment
+    /// (no Swift toolchain available here to test it), so this sidesteps it
+    /// entirely rather than assuming a particular behavior is correct.
+    private let subjectLookbackFloorYear = 2026
+
+    private func isLeapYear(_ year: Int) -> Bool {
+        (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+    }
+
     private func fetchSubject(for date: Date, completion: @escaping (_ subject: String, _ hasRealAssignment: Bool) -> Void) {
-        let dateStr = DailyEntry.contestDateString(for: date)
-        db.collection("daily_prompts").document(dateStr).getDocument { snap, error in
-            if let error {
-                print("❌ DailyManager fetchSubject(\(dateStr)): \(error.localizedDescription)")
-            }
-            let raw = snap?.data()?["subject"] as? String
-            let hasRealAssignment = raw?.isEmpty == false
-            let subject = hasRealAssignment ? raw! : DailyPrompt.subject(for: date)
-            completion(subject, hasRealAssignment)
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = DailyEntry.contestTimeZone
+        let comps = cal.dateComponents([.year, .month, .day], from: date)
+        guard let targetYear = comps.year, let month = comps.month, let day = comps.day else {
+            completion(DailyPrompt.subject(for: date), false)
+            return
         }
+
+        func tryYear(_ year: Int) {
+            guard year >= subjectLookbackFloorYear else {
+                completion(DailyPrompt.subject(for: date), false)
+                return
+            }
+            // Feb 29 can only exist in an actual leap year — skip non-leap
+            // candidate years entirely rather than querying an impossible doc ID.
+            if month == 2, day == 29, !isLeapYear(year) {
+                tryYear(year - 1)
+                return
+            }
+            let dateStr = String(format: "%04d-%02d-%02d", year, month, day)
+            db.collection("daily_prompts").document(dateStr).getDocument { snap, error in
+                if let error {
+                    print("❌ DailyManager fetchSubject(\(dateStr)): \(error.localizedDescription)")
+                }
+                let raw = snap?.data()?["subject"] as? String
+                if let raw, !raw.isEmpty {
+                    completion(raw, true)
+                } else {
+                    tryYear(year - 1)
+                }
+            }
+        }
+
+        tryYear(targetYear)
     }
 
     func fetchTodaySubject() {
