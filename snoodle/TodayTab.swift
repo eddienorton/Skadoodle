@@ -1410,25 +1410,49 @@ struct DailyVotingBoothView: View {
         .opacity(disabled ? 0.3 : 1)
     }
 
-    // Wrapped in its own ScrollView per page — same fix as DailyContestDayView's
-    // dayPage(for:rank:). Without this, RetryAsyncImage's real (post-load)
-    // aspect-ratio height can exceed the screen for a tall/portrait doodle,
-    // pushing the avatar/question/vote-buttons block below the visible area
-    // with nothing to scroll it into view. Each page still scrolls
-    // independently while the outer TabView(.page) continues to page
-    // horizontally between doodles.
+    // Fixed-rect doodle box, cover-cropped — same concept as the private/public
+    // gallery detail screens (SnoodleDetailView/WorldSnoodleDetailView), per
+    // direct feedback: "i dont want any vertical scrolling on the voting
+    // screens... there is a fixed rect that every doodle must fit into. if the
+    // natural aspect ratio doesnt match, the cover-type-styling is used."
+    // First pass used a literal fixed height (300pt) — safe on the smallest
+    // iPhone, but on an iPad (much taller usable screen) it left a big dead
+    // gap above and below, since the box didn't know to grow with the
+    // available room ("a very wide narrow strip and not filling the entire
+    // area with the style thats like the cover css"). Fixed: `.frame(maxHeight:
+    // .infinity)` instead of a literal number — this is what makes it behave
+    // like CSS `object-fit: cover` on a `height: 100%` container rather than a
+    // fixed-pixel box. The image still can't grow past whatever's left after
+    // the avatar/question/buttons block claims its own (fixed) height, since
+    // the whole page is itself bounded by the fullscreen ZStack behind it —
+    // it just now fills *all* of that remaining room instead of a hardcoded
+    // guess, so it scales correctly on any device.
     @ViewBuilder
     private func boothPage(for entry: DailyEntry) -> some View {
-        ScrollView {
-            VStack(spacing: 14) {
-                Spacer().frame(height: 64)
-
+        VStack(spacing: 14) {
+            // GeometryReader is the actual fix here — `.frame(maxWidth:
+            // .infinity, maxHeight: .infinity)` alone does NOT give this box a
+            // size independent of its own content: with no GeometryReader
+            // breaking the link, SwiftUI still lets RetryAsyncImage's aspect-
+            // ratio-driven ideal size bubble up through the frame modifier
+            // into this VStack's layout pass, so a tall/portrait doodle
+            // inflates the whole page's required height and pushes the
+            // avatar/question/vote-buttons block off the bottom of the
+            // screen — exactly the reported bug ("doodle areas are diff
+            // sizes... pushes buttons under the bottom of the screen").
+            // GeometryReader has no ideal size that depends on its child, so
+            // it reads as "just take whatever room is left" the same way a
+            // Spacer does — the VStack now sizes the fixed elements below
+            // first and this box gets the true remainder, guaranteed, no
+            // matter how tall the source image is.
+            GeometryReader { geo in
                 ZStack {
-                    RetryAsyncImage(url: URL(string: entry.imageURL))
-                        .aspectRatio(1, contentMode: .fit)
-                        .frame(maxWidth: .infinity)
-                        .padding(.horizontal, 24)
+                    RetryAsyncImage(url: URL(string: entry.imageURL), contentMode: .fill)
+                        .frame(width: max(0, geo.size.width - 48), height: max(0, geo.size.height - 24))
+                        .clipped()
                         .clipShape(RoundedRectangle(cornerRadius: 20))
+                        .padding(.horizontal, 24)
+                        .padding(.top, 24)
 
                     // Prev/Next overlaid directly on the image itself — anywhere
                     // else on screen risked landing in an unrelated spot (avatar,
@@ -1447,34 +1471,34 @@ struct DailyVotingBoothView: View {
                     }
                     .padding(.horizontal, 36)
                 }
-
-                Button {
-                    onAuthorTap(entry.userId)
-                } label: {
-                    DailyAvatarRow(entry: entry)
-                }
-                .buttonStyle(.plain)
-
-                Spacer(minLength: 8)
-
-                // Question + buttons grouped tightly together (own spacing, not the
-                // outer VStack's) so adding the question line doesn't push the
-                // buttons low enough to clip against the home indicator — only the
-                // Spacer above absorbs slack, this block's own height is fixed.
-                VStack(spacing: 10) {
-                    if !daily.yesterdaySubject.isEmpty {
-                        Text("Is this \u{201c}\(daily.yesterdaySubject)\u{201d} doodle the doodle of the day?")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(.primary)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 32)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-
-                    voteButtons(for: entry)
-                }
-                .padding(.bottom, 40)
             }
+
+            Button {
+                onAuthorTap(entry.userId)
+            } label: {
+                DailyAvatarRow(entry: entry)
+            }
+            .buttonStyle(.plain)
+
+            Spacer(minLength: 8)
+
+            // Question + buttons grouped tightly together (own spacing, not the
+            // outer VStack's) so adding the question line doesn't push the
+            // buttons low enough to clip against the home indicator — only the
+            // Spacer above absorbs slack, this block's own height is fixed.
+            VStack(spacing: 10) {
+                if !daily.yesterdaySubject.isEmpty {
+                    Text("Is this \u{201c}\(daily.yesterdaySubject)\u{201d} doodle the doodle of the day?")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.primary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 32)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                voteButtons(for: entry)
+            }
+            .padding(.bottom, 40)
         }
     }
 
@@ -2263,27 +2287,39 @@ struct DailyContestDayView: View {
         }
     }
 
-    // Wrapped in its own ScrollView per page (not one ScrollView around the
-    // whole TabView — each page scrolls independently while the TabView
-    // itself still pages horizontally). Without this, the image's full
-    // aspect-ratio height (once RetryAsyncImage finishes loading — its
-    // placeholder is shorter, which is why this only became visible after
-    // the real image popped in) could push the avatar/caption/vote-count
-    // block below the screen with no way to reach it, since there was
-    // nothing to scroll. A long caption made it worse by pushing the vote
-    // count further down still.
+    // Fixed-rect doodle box, cover-cropped — same concept as the private/public
+    // gallery detail screens and the Voting Booth's boothPage(for:), per direct
+    // feedback: no vertical scrolling on any of these doodle-browsing screens,
+    // just a fixed image rect that crops (rather than scrolls or letterboxes)
+    // whatever doesn't match its aspect ratio. Superseded the earlier
+    // ScrollView-per-page fix. Caption capped to 2 lines for the same reason —
+    // without a ScrollView, an unbounded caption could still push the vote
+    // count off-screen the same way the image used to.
+    //
+    // Uses `.frame(maxHeight: .infinity)` rather than a literal pixel height —
+    // same fix as boothPage(for:) — so the box fills whatever room is actually
+    // available instead of a fixed guess that leaves dead space on a taller
+    // screen (iPad) or risks clipping on a shorter one.
     @ViewBuilder
     private func dayPage(for entry: DailyEntry, rank: Int) -> some View {
-        ScrollView {
-            VStack(spacing: 14) {
-                Spacer().frame(height: 24)
-
+        VStack(spacing: 14) {
+            // Same GeometryReader fix as DailyVotingBoothView.boothPage(for:)
+            // — `.frame(maxWidth: .infinity, maxHeight: .infinity)` alone
+            // doesn't give this box a size independent of the image's own
+            // aspect ratio; without GeometryReader, a tall doodle's ideal
+            // size bubbles up into the VStack layout and can push the
+            // caption/vote-count row off screen the same way it did in the
+            // Voting Booth. GeometryReader reads as "take whatever's left"
+            // (no ideal size tied to its child), so the fixed elements below
+            // get sized first and this box gets the guaranteed remainder.
+            GeometryReader { geo in
                 ZStack(alignment: .topLeading) {
-                    RetryAsyncImage(url: URL(string: entry.imageURL))
-                        .aspectRatio(1, contentMode: .fit)
-                        .frame(maxWidth: .infinity)
-                        .padding(.horizontal, 24)
+                    RetryAsyncImage(url: URL(string: entry.imageURL), contentMode: .fill)
+                        .frame(width: max(0, geo.size.width - 48), height: max(0, geo.size.height - 24))
+                        .clipped()
                         .clipShape(RoundedRectangle(cornerRadius: 20))
+                        .padding(.horizontal, 24)
+                        .padding(.top, 24)
 
                     // Only the top-voted entry (rank 0, since entries already
                     // arrive votes-descending) gets the trophy badge — same
@@ -2317,33 +2353,34 @@ struct DailyContestDayView: View {
                     }
                     .padding(.horizontal, 36)
                 }
-
-                Button {
-                    onAuthorTap(entry.userId)
-                } label: {
-                    DailyAvatarRow(entry: entry)
-                }
-                .buttonStyle(.plain)
-
-                if !entry.caption.isEmpty {
-                    Text(entry.caption)
-                        .font(.system(size: 15))
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 32)
-                }
-
-                HStack(spacing: 4) {
-                    Image(systemName: "checkmark.seal.fill")
-                        .foregroundColor(.green)
-                        .font(.system(size: 15))
-                    Text("\(entry.votes) vote\(entry.votes == 1 ? "" : "s")")
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundColor(.secondary)
-                }
-
-                Spacer(minLength: 24)
             }
+
+            Button {
+                onAuthorTap(entry.userId)
+            } label: {
+                DailyAvatarRow(entry: entry)
+            }
+            .buttonStyle(.plain)
+
+            if !entry.caption.isEmpty {
+                Text(entry.caption)
+                    .font(.system(size: 15))
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 32)
+                    .lineLimit(2)
+            }
+
+            HStack(spacing: 4) {
+                Image(systemName: "checkmark.seal.fill")
+                    .foregroundColor(.green)
+                    .font(.system(size: 15))
+                Text("\(entry.votes) vote\(entry.votes == 1 ? "" : "s")")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(.secondary)
+            }
+
+            Spacer(minLength: 24)
         }
     }
 
