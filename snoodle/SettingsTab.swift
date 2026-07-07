@@ -38,6 +38,8 @@ struct SettingsTab: View {
     @State private var backfillStatus: String = ""
     @State private var isSeedingPrompts: Bool = false
     @State private var seedPromptsStatus: String = ""
+    @State private var debugClockDate: Date = AppClock.debugOverride ?? Date()
+    @State private var debugClockOverrideDisplay: Date? = AppClock.debugOverride
     @ObservedObject private var phantomSession = PhantomSessionManager.shared
     #endif
 
@@ -331,6 +333,46 @@ struct SettingsTab: View {
                         Text(seedPromptsStatus)
                             .font(.system(size: 12))
                             .foregroundColor(.secondary)
+                    }
+                }
+
+                Section(header: Text("🕐 Debug Clock").foregroundColor(.orange)) {
+                    Text("Simulates \"now\" for every Daily Doodle date calculation (today's subject, yesterday's voting window, Past Winners) — set a future date to confirm the daily_prompts year-fallback works without waiting for it to actually happen. Nothing else in the app (timestamps written to Firestore, auth, etc.) is affected.")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+
+                    if let override = debugClockOverrideDisplay {
+                        HStack {
+                            Image(systemName: "clock.badge.exclamationmark")
+                                .foregroundColor(.red)
+                            Text("Overridden to \(override.formatted(date: .abbreviated, time: .omitted))")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundColor(.red)
+                        }
+                    } else {
+                        Text("Using real time.")
+                            .font(.system(size: 13))
+                            .foregroundColor(.secondary)
+                    }
+
+                    DatePicker("Simulated date", selection: $debugClockDate, displayedComponents: [.date])
+
+                    Button(action: {
+                        AppClock.debugOverride = debugClockDate
+                        debugClockOverrideDisplay = debugClockDate
+                    }) {
+                        Label("Apply override", systemImage: "clock.arrow.circlepath")
+                            .foregroundColor(.orange)
+                    }
+
+                    if debugClockOverrideDisplay != nil {
+                        Button(role: .destructive, action: {
+                            AppClock.debugOverride = nil
+                            debugClockOverrideDisplay = nil
+                            debugClockDate = Date()
+                        }) {
+                            Label("Clear override (use real time)", systemImage: "clock.arrow.2.circlepath")
+                        }
                     }
                 }
 

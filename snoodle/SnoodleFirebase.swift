@@ -1605,6 +1605,41 @@ class FollowManager: ObservableObject {
     }
 }
 
+// MARK: - Debug Clock (DEBUG builds only)
+
+/// Lets a DEBUG build simulate "today" being a different date, so the
+/// daily_prompts year-fallback lookup (DailyManager.fetchSubject(for:)) can be
+/// tested without waiting for a real year to pass — e.g. set the override to
+/// July 4, 2027 and confirm the app correctly falls back to 2026's "Fireworks"
+/// rather than the local mod-cycle formula. RELEASE builds don't compile the
+/// override at all (see the #else below) — AppClock.now is just Date(), so
+/// there's zero chance of this ever affecting a real user's device.
+enum AppClock {
+    #if DEBUG
+    private static let overrideKey = "debugClockOverrideInterval"
+
+    /// The simulated "now", or nil if no override is set (real time).
+    static var debugOverride: Date? {
+        get {
+            let interval = UserDefaults.standard.double(forKey: overrideKey)
+            return interval > 0 ? Date(timeIntervalSince1970: interval) : nil
+        }
+        set {
+            if let newValue {
+                UserDefaults.standard.set(newValue.timeIntervalSince1970, forKey: overrideKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: overrideKey)
+            }
+        }
+    }
+
+    /// What every Daily Doodle date calculation should treat as "now".
+    static var now: Date { debugOverride ?? Date() }
+    #else
+    static var now: Date { Date() }
+    #endif
+}
+
 // MARK: - Daily Challenge
 
 /// One entry in the daily_gallery collection.
@@ -1643,7 +1678,7 @@ struct DailyEntry: Identifiable {
     // own local midnight instead). TimeZone handles the EST/EDT shift automatically.
     static let contestTimeZone = TimeZone(identifier: "America/New_York")!
 
-    static func contestDateString(for date: Date = Date()) -> String {
+    static func contestDateString(for date: Date = AppClock.now) -> String {
         let fmt = DateFormatter()
         fmt.dateFormat = "yyyy-MM-dd"
         fmt.timeZone = contestTimeZone
@@ -1686,7 +1721,7 @@ struct DailyPrompt {
         return prompts[(dayOfYear - 1) % prompts.count]
     }
 
-    static var today: String { subject(for: Date()) }
+    static var today: String { subject(for: AppClock.now) }
 }
 
 class DailyManager: ObservableObject {
@@ -1905,7 +1940,7 @@ class DailyManager: ObservableObject {
             todaySubject = cachedSubjectText
             return
         }
-        fetchSubject(for: Date()) { [weak self] subject, hasRealAssignment in
+        fetchSubject(for: AppClock.now) { [weak self] subject, hasRealAssignment in
             guard let self else { return }
             DispatchQueue.main.async {
                 self.todaySubject = subject
@@ -1934,7 +1969,7 @@ class DailyManager: ObservableObject {
     @Published var yesterdaySubject: String = ""
 
     func fetchYesterdaySubject() {
-        let yesterday = Date().addingTimeInterval(-86400)
+        let yesterday = AppClock.now.addingTimeInterval(-86400)
         fetchSubject(for: yesterday) { [weak self] subject, _ in
             DispatchQueue.main.async { self?.yesterdaySubject = subject }
         }
@@ -1983,7 +2018,7 @@ class DailyManager: ObservableObject {
     /// revealed/final version (sorted by votes, winner spotlighted) only exists
     /// once a day ages out of this window into the Past Winners archive.
     func fetchYesterday() {
-        let yesterday = DailyEntry.contestDateString(for: Date().addingTimeInterval(-86400))
+        let yesterday = DailyEntry.contestDateString(for: AppClock.now.addingTimeInterval(-86400))
         isLoadingYesterday = true
         fetchEntries(for: yesterday) { [weak self] entries in
             let displayOrder = entries.sorted { $0.timestamp < $1.timestamp }
@@ -2087,7 +2122,7 @@ class DailyManager: ObservableObject {
     /// paginated; revisit if history ever outgrows `lookbackDays`.
     func fetchPastWinners(lookbackDays: Int = 60, completion: (() -> Void)? = nil) {
         isLoadingPastWinners = true
-        let anchor = Date().addingTimeInterval(-86400 * 2)
+        let anchor = AppClock.now.addingTimeInterval(-86400 * 2)
         let earliest = anchor.addingTimeInterval(-86400 * Double(lookbackDays - 1))
         let anchorStr = DailyEntry.contestDateString(for: anchor)
         let earliestStr = DailyEntry.contestDateString(for: earliest)
@@ -2268,7 +2303,7 @@ class DailyManager: ObservableObject {
     /// the day that was just revealed and hasn't aged out of the lookback window yet.
     /// See CLAUDE.md's submission/voting window model.
     var currentVotableDate: String {
-        DailyEntry.contestDateString(for: Date().addingTimeInterval(-86400))
+        DailyEntry.contestDateString(for: AppClock.now.addingTimeInterval(-86400))
     }
 
     /// Toggles a vote on `entry`. Returns `false` (no-op, nothing written) if the

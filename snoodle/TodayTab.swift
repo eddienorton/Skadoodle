@@ -1410,62 +1410,71 @@ struct DailyVotingBoothView: View {
         .opacity(disabled ? 0.3 : 1)
     }
 
+    // Wrapped in its own ScrollView per page — same fix as DailyContestDayView's
+    // dayPage(for:rank:). Without this, RetryAsyncImage's real (post-load)
+    // aspect-ratio height can exceed the screen for a tall/portrait doodle,
+    // pushing the avatar/question/vote-buttons block below the visible area
+    // with nothing to scroll it into view. Each page still scrolls
+    // independently while the outer TabView(.page) continues to page
+    // horizontally between doodles.
     @ViewBuilder
     private func boothPage(for entry: DailyEntry) -> some View {
-        VStack(spacing: 14) {
-            Spacer().frame(height: 64)
+        ScrollView {
+            VStack(spacing: 14) {
+                Spacer().frame(height: 64)
 
-            ZStack {
-                RetryAsyncImage(url: URL(string: entry.imageURL))
-                    .aspectRatio(1, contentMode: .fit)
-                    .frame(maxWidth: .infinity)
-                    .padding(.horizontal, 24)
-                    .clipShape(RoundedRectangle(cornerRadius: 20))
+                ZStack {
+                    RetryAsyncImage(url: URL(string: entry.imageURL))
+                        .aspectRatio(1, contentMode: .fit)
+                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal, 24)
+                        .clipShape(RoundedRectangle(cornerRadius: 20))
 
-                // Prev/Next overlaid directly on the image itself — anywhere
-                // else on screen risked landing in an unrelated spot (avatar,
-                // vote button) depending on device height, easy to miss or feel
-                // out of place. Here they always flank the thing being browsed.
-                // Next is never disabled — there's always somewhere to go,
-                // either another doodle or the completion page.
-                HStack {
-                    navArrow(systemName: "chevron.left", disabled: currentIndex == 0) {
-                        goTo(currentIndex - 1)
+                    // Prev/Next overlaid directly on the image itself — anywhere
+                    // else on screen risked landing in an unrelated spot (avatar,
+                    // vote button) depending on device height, easy to miss or feel
+                    // out of place. Here they always flank the thing being browsed.
+                    // Next is never disabled — there's always somewhere to go,
+                    // either another doodle or the completion page.
+                    HStack {
+                        navArrow(systemName: "chevron.left", disabled: currentIndex == 0) {
+                            goTo(currentIndex - 1)
+                        }
+                        Spacer()
+                        navArrow(systemName: "chevron.right", disabled: false) {
+                            goTo(currentIndex + 1)
+                        }
                     }
-                    Spacer()
-                    navArrow(systemName: "chevron.right", disabled: false) {
-                        goTo(currentIndex + 1)
-                    }
-                }
-                .padding(.horizontal, 36)
-            }
-
-            Button {
-                onAuthorTap(entry.userId)
-            } label: {
-                DailyAvatarRow(entry: entry)
-            }
-            .buttonStyle(.plain)
-
-            Spacer(minLength: 8)
-
-            // Question + buttons grouped tightly together (own spacing, not the
-            // outer VStack's) so adding the question line doesn't push the
-            // buttons low enough to clip against the home indicator — only the
-            // Spacer above absorbs slack, this block's own height is fixed.
-            VStack(spacing: 10) {
-                if !daily.yesterdaySubject.isEmpty {
-                    Text("Is this \u{201c}\(daily.yesterdaySubject)\u{201d} doodle the doodle of the day?")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(.primary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 32)
-                        .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 36)
                 }
 
-                voteButtons(for: entry)
+                Button {
+                    onAuthorTap(entry.userId)
+                } label: {
+                    DailyAvatarRow(entry: entry)
+                }
+                .buttonStyle(.plain)
+
+                Spacer(minLength: 8)
+
+                // Question + buttons grouped tightly together (own spacing, not the
+                // outer VStack's) so adding the question line doesn't push the
+                // buttons low enough to clip against the home indicator — only the
+                // Spacer above absorbs slack, this block's own height is fixed.
+                VStack(spacing: 10) {
+                    if !daily.yesterdaySubject.isEmpty {
+                        Text("Is this \u{201c}\(daily.yesterdaySubject)\u{201d} doodle the doodle of the day?")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(.primary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 32)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    voteButtons(for: entry)
+                }
+                .padding(.bottom, 40)
             }
-            .padding(.bottom, 40)
         }
     }
 
