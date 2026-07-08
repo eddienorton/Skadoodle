@@ -888,6 +888,7 @@ struct DualToneStyleChip: View {
         case .zigzag:      return "waveform.path.ecg"
         case .bubble:      return "circle.grid.3x3"
         case .stars:       return "star"
+        case .tube:        return "cylinder"
         }
     }
 

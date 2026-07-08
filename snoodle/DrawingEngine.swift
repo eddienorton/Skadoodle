@@ -22,6 +22,7 @@ enum DualToneStyle: String, CaseIterable, Identifiable, Codable {
     case zigzag      = "Zigzag"
     case bubble      = "Bubble"
     case stars       = "Stars"
+    case tube        = "Tube"
     var id: String { rawValue }
 }
 
@@ -1730,6 +1731,40 @@ private func drawDualToneLine(_ line: DrawingLine, style: DualToneStyle, in cont
             context.fill(starPath(center: pt, outerR: outer, innerR: inner, rotation: rot),
                          with: .color(color))
             starIdx += 1
+        }
+
+    case .tube:
+        // Symmetric center-to-edge color gradient across the stroke's
+        // *width* — colorA down the bright center, fading out to colorB
+        // at the rim on both sides at once, the classic shaded-cylinder
+        // "3D pipe" illusion. Built with the same nested-concentric-stroke
+        // technique the (now-removed) Gold Trim pen idea used for its
+        // bevel, generalized from a fixed bronze/gold palette to whatever
+        // colorA/colorB the user picks. Every ring is centered on the same
+        // path, so the fade is naturally symmetric across the width with
+        // no separate left/right offset math needed, unlike .split/.trim.
+        if count == 1 {
+            let pt = line.points[0]
+            let r = baseW * 0.5
+            context.fill(Path(ellipseIn: CGRect(x: pt.x - r, y: pt.y - r, width: r*2, height: r*2)),
+                         with: .color(line.color))
+            return
+        }
+        let tubeSteps = 8
+        for i in 1..<count {
+            let p0 = line.points[i-1], p1 = line.points[i]
+            let taper = strokeTaper(i: i, count: count, taperFraction: 0.15)
+            let w = baseW * max(0.1, taper) * pressureAt(i, in: line)
+            var seg = Path()
+            seg.move(to: p0)
+            seg.addLine(to: p1)
+            for step in 0..<tubeSteps {
+                let t = CGFloat(step) / CGFloat(tubeSteps - 1)   // 0 = outer/edge, 1 = inner/center
+                let ringW = w * (1.0 - t * 0.86)
+                let color = blendColors(line.colorB, line.color, t: t)
+                context.stroke(seg, with: .color(color),
+                               style: StrokeStyle(lineWidth: max(0.6, ringW), lineCap: .round, lineJoin: .round))
+            }
         }
     }
 }
