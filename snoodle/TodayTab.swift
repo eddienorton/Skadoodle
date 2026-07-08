@@ -65,6 +65,16 @@ struct TodayTab: View {
                         .padding(.bottom, 32)
                 }
             }
+            // Screen background — a very light gold, close to white but
+            // clearly not white, so the three cards (each already dark/
+            // tinted) have some warmth to sit on instead of a stark plain
+            // white gap between/around them. Fixed (not a dynamic system
+            // color) since it's a deliberate warm tint, not a neutral
+            // background — same reasoning as the fixed tints already used
+            // inside the hero/submit/past-winners cards themselves.
+            // `.ignoresSafeArea()` so it fills all the way to the screen
+            // edges, not just the ScrollView's own content inset.
+            .background(Color(red: 0.98, green: 0.91, blue: 0.72).ignoresSafeArea())
             // "Today" → "Daily Doodle" — matches the feature's actual name
             // used throughout (see CLAUDE.md), and frees up "Doodle of the
             // Day" so the hero card below can show the actual subject

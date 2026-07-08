@@ -674,15 +674,30 @@ struct PenStudioSheet: View {
     @State private var recentColors: [Color] = RecentColors.load()
     @State private var showColorBPicker = false
 
-    private let allPens: [PenType] = [.pencil, .ink, .brush, .marker, .chalk, .neon, .spray, .watercolor, .dotted, .dualTone(.gradient)]
+    private let allPens: [PenType] = [.pencil, .ink, .brush, .marker, .chalk, .neon, .spray, .watercolor, .dotted, .calligraphy, .confetti, .goldTrim, .dualTone(.gradient)]
 
     var body: some View {
         NavigationView {
             ScrollView {
                 VStack(spacing: 24) {
 
-                    // Pen type grid
-                    LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 5), spacing: 12) {
+                    // Pen type grid — 6 columns. This used to be tuned to
+                    // land on an exact row count (5 cols/2 rows, then 6
+                    // cols/2 rows) so the sheet's fixed .presentationDetents
+                    // height would never clip the live PenPreviewStrip below
+                    // it. That math needs re-solving every time a pen gets
+                    // added, which doesn't scale as the roster grows (Gold
+                    // Trim below is the 13th, breaking the old 12/6=2 exact
+                    // fit) — per Eddie's call, stop chasing exact
+                    // divisibility. Everything here (grid + dual-tone
+                    // sub-picker + PenPreviewStrip) already lives inside one
+                    // shared ScrollView with a .large fallback detent, so a
+                    // partial extra row just means a bit more scrolling to
+                    // reach the preview, not clipped/unreachable content.
+                    // PenTypeCard's icon/height were shrunk once already to
+                    // fit 6 columns comfortably; no further shrinking needed
+                    // just because the row count isn't perfectly even.
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 6), spacing: 8) {
                         ForEach(allPens, id: \.displayName) { pen in
                             PenTypeCard(pen: pen, isSelected: penTypesMatch(penType, pen))
                                 .onTapGesture {
@@ -816,7 +831,9 @@ struct PenStudioSheet: View {
         case (.pencil, .pencil), (.ink, .ink), (.brush, .brush),
              (.marker, .marker), (.chalk, .chalk),
              (.neon, .neon), (.spray, .spray),
-             (.watercolor, .watercolor), (.dotted, .dotted): return true
+             (.watercolor, .watercolor), (.dotted, .dotted),
+             (.calligraphy, .calligraphy), (.confetti, .confetti),
+             (.goldTrim, .goldTrim): return true
         case (.dualTone, .dualTone): return true
         default: return false
         }
@@ -827,24 +844,31 @@ struct PenTypeCard: View {
     let pen: PenType
     let isSelected: Bool
 
+    // Sized for a 6-column grid (was 5) — icon box, icon, and label all
+    // scaled down proportionally so pens fit comfortably at this width.
+    // Label gets lineLimit + minimumScaleFactor since "Watercolor"/
+    // "Calligraphy"/"Confetti"/"Gold Trim" are long names for a narrower
+    // column.
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 6) {
             ZStack {
-                RoundedRectangle(cornerRadius: 14)
+                RoundedRectangle(cornerRadius: 12)
                     .fill(isSelected ? Color.purple.opacity(0.12) : Color(UIColor.secondarySystemBackground))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 14)
+                        RoundedRectangle(cornerRadius: 12)
                             .stroke(isSelected ? Color.purple : Color.clear, lineWidth: 2)
                     )
-                    .frame(height: 68)
+                    .frame(height: 56)
 
                 Image(systemName: pen.icon)
-                    .font(.system(size: 28, weight: .light))
+                    .font(.system(size: 22, weight: .light))
                     .foregroundColor(isSelected ? .purple : .primary)
             }
             Text(pen.displayName)
-                .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
+                .font(.system(size: 10, weight: isSelected ? .semibold : .regular))
                 .foregroundColor(isSelected ? .purple : .secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
         }
     }
 }
@@ -2340,6 +2364,9 @@ struct DrawScreen: View {
         case "spray":      return .spray
         case "watercolor": return .watercolor
         case "dotted":     return .dotted
+        case "calligraphy": return .calligraphy
+        case "confetti":   return .confetti
+        case "gold trim":  return .goldTrim
         case "dualtone":   return .dualTone(style)
         default:           return .pencil
         }

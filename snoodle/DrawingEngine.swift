@@ -34,6 +34,9 @@ enum PenType: Equatable {
     case spray
     case watercolor
     case dotted
+    case calligraphy
+    case confetti
+    case goldTrim
     case dualTone(DualToneStyle)
 
     var displayName: String {
@@ -47,6 +50,9 @@ enum PenType: Equatable {
         case .spray:    return "Spray"
         case .watercolor: return "Watercolor"
         case .dotted:   return "Dotted"
+        case .calligraphy: return "Calligraphy"
+        case .confetti: return "Confetti"
+        case .goldTrim: return "Gold Trim"
         case .dualTone: return "Dual Tone"
         }
     }
@@ -62,6 +68,9 @@ enum PenType: Equatable {
         case .spray:    return "aqi.medium"
         case .watercolor: return "drop.fill"
         case .dotted:   return "ellipsis"
+        case .calligraphy: return "signature"
+        case .confetti: return "sparkles"
+        case .goldTrim: return "photo.artframe"
         case .dualTone: return "wand.and.stars"
         }
     }
@@ -727,8 +736,248 @@ func renderLine(_ line: DrawingLine, in context: inout GraphicsContext, canvasCo
         drawWatercolorLine(line, in: &context)
     case .dotted:
         drawDottedLine(line, in: &context)
+    case .calligraphy:
+        drawCalligraphyLine(line, in: &context)
+    case .confetti:
+        drawConfettiLine(line, in: &context)
+    case .goldTrim:
+        drawGoldTrimLine(line, in: &context)
     case .dualTone(let style):
         drawDualToneLine(line, style: style, in: &context)
+    }
+}
+
+/// Simulates a flat calligraphy nib held at a fixed angle. Unlike every other
+/// pen here, width doesn't vary with pressure alone — it varies with the
+/// *travel direction* of the stroke relative to the nib's fixed angle: full
+/// width when travel is perpendicular to the nib edge, near-zero when travel
+/// runs along it. That's the actual mechanic that makes calligraphy read as
+/// calligraphy (bold diagonals, thin near-verticals/horizontals) rather than
+/// just another pressure-tapered line.
+///
+/// **Bug fixed:** the first version computed travel angle from the tight
+/// adjacent-point delta (points[i-1] to points[i]) — reported live as "the
+/// angle doesn't matter, width is the same no matter what." That two-point
+/// delta is dominated by natural hand jitter between consecutive raw touch
+/// samples, which swings the local angle around somewhat randomly regardless
+/// of the stroke's actual macro direction — a rapidly, near-randomly
+/// fluctuating width across many short overlapping round-capped segments
+/// visually averages out to what looks like one constant medium width,
+/// exactly matching the report. Every other direction-dependent pen in this
+/// file (.braid/.hairy/.thorns) avoids this by sampling a *wider* window —
+/// points[i-1] to points[i+1] — for local direction, which smooths out that
+/// jitter. Switched to the same convention here.
+private func drawCalligraphyLine(_ line: DrawingLine, in context: inout GraphicsContext) {
+    let baseW = line.lineWidth
+    let count = line.points.count
+    guard count > 0 else { return }
+
+    // 45° is the classic calligraphy nib hold. A constant is fine for v1 —
+    // exposing it as a user-adjustable angle is a natural follow-up, not a
+    // blocker for the core look.
+    let nibAngle: CGFloat = .pi / 4
+    let minWidthFraction: CGFloat = 0.12  // thinnest stroke never fully vanishes
+
+    if count == 1 {
+        let pt = line.points[0]
+        let r = baseW * 0.5
+        context.fill(Path(ellipseIn: CGRect(x: pt.x - r, y: pt.y - r, width: r*2, height: r*2)),
+                     with: .color(line.color))
+        return
+    }
+
+    for i in 1..<count {
+        let p0 = line.points[i-1], p1 = line.points[i]
+        // Wider window for direction — same lo/hi convention as .braid/.hairy/
+        // .thorns — instead of the raw (p0,p1) delta, which is too noisy.
+        let lo = max(0, i-1), hi = min(count-1, i+1)
+        let dx = line.points[hi].x - line.points[lo].x
+        let dy = line.points[hi].y - line.points[lo].y
+        let travelAngle = (dx == 0 && dy == 0) ? atan2(p1.y - p0.y, p1.x - p0.x) : atan2(dy, dx)
+        let angleFactor = abs(sin(travelAngle - nibAngle))
+        let taper = strokeTaper(i: i, count: count, taperFraction: 0.15)
+        let w = baseW * max(minWidthFraction, angleFactor) * max(0.08, taper) * pressureAt(i, in: line)
+
+        var seg = Path()
+        seg.move(to: p0)
+        seg.addLine(to: p1)
+        context.stroke(seg, with: .color(line.color),
+                       style: StrokeStyle(lineWidth: w, lineCap: .round, lineJoin: .round))
+    }
+}
+
+/// Small rotated confetti pieces scattered along the path — no core stroke,
+/// same "the pieces ARE the stroke" convention as .bubble/.stars. Colors
+/// cycle through 4 deterministic variants built from the two colors the user
+/// actually picked (colorA, colorB, and a lightened blend of each) rather
+/// than arbitrary random RGB — keeps confetti relating to the chosen palette
+/// instead of looking unrelated to it. Rotation/size/perpendicular-and-along
+/// jitter all use the same sin-hash deterministic pseudo-random technique as
+/// .hairy/.thorns (seeded by an incrementing piece index, so it's stable
+/// frame to frame, not re-randomized on every redraw).
+private func drawConfettiLine(_ line: DrawingLine, in context: inout GraphicsContext) {
+    let baseW = line.lineWidth
+    let count = line.points.count
+    guard count > 0 else { return }
+
+    if count == 1 {
+        let pt = line.points[0]
+        context.fill(confettiPiece(center: pt, size: baseW * 0.55, rotation: 0),
+                     with: .color(line.color))
+        return
+    }
+
+    let pieceSize    = baseW * 0.55
+    let pieceSpacing = baseW * 1.1
+
+    var arcLen = [CGFloat](repeating: 0, count: count)
+    for i in 1..<count {
+        arcLen[i] = arcLen[i-1] + hypot(line.points[i].x - line.points[i-1].x,
+                                         line.points[i].y - line.points[i-1].y)
+    }
+
+    var nextPieceAt: CGFloat = 0
+    var pieceIdx = 0
+    for i in 0..<count {
+        guard arcLen[i] >= nextPieceAt else { continue }
+        nextPieceAt += pieceSpacing
+
+        let pt = line.points[i]
+        let lo = max(0, i-1), hi = min(count-1, i+1)
+        let ddx = line.points[hi].x - line.points[lo].x
+        let ddy = line.points[hi].y - line.points[lo].y
+        let dlen = hypot(ddx, ddy)
+        let nx: CGFloat = dlen > 0 ? -ddy / dlen : 0
+        let ny: CGFloat = dlen > 0 ?  ddx / dlen : 1
+
+        let s = CGFloat(pieceIdx)
+        let rRot  = fabs(sin(s * 91.3  + 1.7))
+        let rSize = fabs(sin(s * 43.9  + 2.3))
+        let rSide =      sin(s * 17.1  + 3.1)   // signed — which side of the path it lands on
+        let rAlong = fabs(sin(s * 61.7 + 4.4))
+
+        let pressure = pressureAt(i, in: line)
+        let size = pieceSize * (0.6 + rSize * 0.7) * pressure
+        let rotation = rRot * 2 * CGFloat.pi
+        let perpOffset = rSide * pieceSize * 0.9
+        let alongOffset = (rAlong - 0.5) * pieceSize * 0.6
+        let center = CGPoint(x: pt.x + nx * perpOffset - ny * alongOffset,
+                              y: pt.y + ny * perpOffset + nx * alongOffset)
+
+        let color: Color
+        switch pieceIdx % 4 {
+        case 0:  color = line.color
+        case 1:  color = line.colorB
+        case 2:  color = blendColors(line.color, .white, t: 0.45)
+        default: color = blendColors(line.colorB, .white, t: 0.45)
+        }
+
+        // Every third piece is a small circle instead of a rounded rect —
+        // classic confetti mixes both shapes, keeps it from reading as a
+        // single stamped repeating unit.
+        let shape: Path = pieceIdx % 3 == 0
+            ? Path(ellipseIn: CGRect(x: center.x - size/2, y: center.y - size/2, width: size, height: size))
+            : confettiPiece(center: center, size: size, rotation: rotation)
+        context.fill(shape, with: .color(color))
+        pieceIdx += 1
+    }
+}
+
+/// A small rotated rounded-rect confetti piece centered at `center`.
+private func confettiPiece(center: CGPoint, size: CGFloat, rotation: CGFloat) -> Path {
+    let rect = CGRect(x: -size/2, y: -size/3, width: size, height: size * 0.66)
+    let piece = Path(roundedRect: rect, cornerRadius: size * 0.15)
+    let transform = CGAffineTransform(rotationAngle: rotation)
+        .concatenating(CGAffineTransform(translationX: center.x, y: center.y))
+    return piece.applying(transform)
+}
+
+/// Draws with the same ornate carved-gold-molding material used for the
+/// Daily Doodle hero card's frame (`GradientFrame`/`OrnateGoldFrame` in
+/// TodayTab.swift) — Eddie's own idea after seeing that frame: "can you draw
+/// with that?" Rather than port `ScallopRingShape` (a closed Bezier ring
+/// built for a fixed rounded-rect perimeter) as-is — a true parallel-offset
+/// curve for an arbitrary open freehand path is a much harder problem
+/// (self-intersections and cusps at sharp turns) — this reproduces the same
+/// *look* with the per-segment nested-stroke technique already established
+/// in this file (.braid/.hairy/.thorns/.calligraphy): each segment is
+/// stroked several times at decreasing width with a dark-to-light
+/// interpolated color, mirroring `GradientFrame`'s concentric rings but
+/// walked along a line instead of a rounded rect, plus a thin dark
+/// rope-twist center seam (mirroring `OrnateGoldFrame`'s seam stroke) and
+/// small bright bump highlights at regular arc-length intervals standing in
+/// for `ScallopRingShape`'s scalloped bulges. Always renders in a fixed
+/// bronze/gold palette regardless of the user's selected pen color — it's a
+/// material, not a tintable stroke, same spirit as the frame it's borrowed
+/// from. `Color.shaded(_:)` (defined in TodayTab.swift) and `blendColors`
+/// (this file) do the color math, same helpers the source frame uses.
+private func drawGoldTrimLine(_ line: DrawingLine, in context: inout GraphicsContext) {
+    let baseW = line.lineWidth
+    let count = line.points.count
+    guard count > 0 else { return }
+
+    let darkBronze = Color(red: 0.42, green: 0.27, blue: 0.15)
+    let lightGold  = Color(red: 0.94, green: 0.83, blue: 0.53)
+    let seamColor  = darkBronze.shaded(-0.35)
+
+    if count == 1 {
+        let pt = line.points[0]
+        let r = baseW * 0.5
+        context.fill(Path(ellipseIn: CGRect(x: pt.x - r, y: pt.y - r, width: r*2, height: r*2)),
+                     with: .color(lightGold))
+        return
+    }
+
+    // Nested-stroke bevel: each segment is drawn `ringSteps` times, widest +
+    // darkest first (outer edge) down to narrowest + lightest last (inner
+    // edge) — the same dark-to-light concentric idea as GradientFrame's 16
+    // rings, just walked along a line instead of a static rounded-rect
+    // perimeter. Kept lower than GradientFrame's 16 (a single long-lived
+    // static shape) since this redraws per *segment* along a potentially
+    // long freehand stroke.
+    let ringSteps = 7
+    for i in 1..<count {
+        let p0 = line.points[i-1], p1 = line.points[i]
+        let taper = strokeTaper(i: i, count: count, taperFraction: 0.12)
+        let w = baseW * max(0.2, taper) * pressureAt(i, in: line)
+        var seg = Path()
+        seg.move(to: p0)
+        seg.addLine(to: p1)
+        for step in 0..<ringSteps {
+            let t = CGFloat(step) / CGFloat(ringSteps - 1)   // 0 = outer/dark, 1 = inner/light
+            let ringW = w * (1.0 - t * 0.78)
+            let color = blendColors(darkBronze, lightGold, t: t)
+            context.stroke(seg, with: .color(color),
+                           style: StrokeStyle(lineWidth: max(0.6, ringW), lineCap: .round, lineJoin: .round))
+        }
+    }
+
+    // Thin dark rope-twist seam down the very center of the whole stroke —
+    // same device OrnateGoldFrame uses on top of its own ribbon.
+    var full = Path()
+    full.move(to: line.points[0])
+    for i in 1..<count { full.addLine(to: line.points[i]) }
+    context.stroke(full, with: .color(seamColor),
+                   style: StrokeStyle(lineWidth: max(0.6, baseW * 0.08), lineCap: .round, lineJoin: .round))
+
+    // Scalloped highlight bumps at regular arc-length intervals — stands in
+    // for ScallopRingShape's sinusoidal bulges without needing true
+    // parallel-offset curve geometry on an open path. Same sin-hash
+    // deterministic pseudo-random technique as .hairy/.thorns/.confetti for
+    // the size jitter, so it's stable frame to frame, not re-randomized.
+    let wavelength = max(6, baseW * 0.85)
+    var cumulative: CGFloat = 0
+    var bumpIdx = 0
+    for i in 1..<count {
+        let p0 = line.points[i-1], p1 = line.points[i]
+        cumulative += hypot(p1.x - p0.x, p1.y - p0.y)
+        guard cumulative >= wavelength else { continue }
+        cumulative = 0
+        let jitter = fabs(sin(CGFloat(bumpIdx) * 57.3 + 2.1))
+        let bumpR = baseW * pressureAt(i, in: line) * (0.10 + jitter * 0.06)
+        context.fill(Path(ellipseIn: CGRect(x: p1.x - bumpR, y: p1.y - bumpR, width: bumpR*2, height: bumpR*2)),
+                     with: .color(lightGold.opacity(0.9)))
+        bumpIdx += 1
     }
 }
 
