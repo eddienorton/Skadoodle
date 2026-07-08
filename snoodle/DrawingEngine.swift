@@ -16,6 +16,7 @@ enum DualToneStyle: String, CaseIterable, Identifiable, Codable {
     case reactive    = "Reactive"
     case alternating = "Alternating"
     case braid       = "Braid"
+    case trim        = "Trim"
     case hairy       = "Hairy"
     case thorns      = "Thorns"
     case zigzag      = "Zigzag"
@@ -36,7 +37,6 @@ enum PenType: Equatable {
     case dotted
     case calligraphy
     case confetti
-    case goldTrim
     case dualTone(DualToneStyle)
 
     var displayName: String {
@@ -52,7 +52,6 @@ enum PenType: Equatable {
         case .dotted:   return "Dotted"
         case .calligraphy: return "Calligraphy"
         case .confetti: return "Confetti"
-        case .goldTrim: return "Gold Trim"
         case .dualTone: return "Dual Tone"
         }
     }
@@ -70,7 +69,6 @@ enum PenType: Equatable {
         case .dotted:   return "ellipsis"
         case .calligraphy: return "signature"
         case .confetti: return "sparkles"
-        case .goldTrim: return "photo.artframe"
         case .dualTone: return "wand.and.stars"
         }
     }
@@ -740,8 +738,6 @@ func renderLine(_ line: DrawingLine, in context: inout GraphicsContext, canvasCo
         drawCalligraphyLine(line, in: &context)
     case .confetti:
         drawConfettiLine(line, in: &context)
-    case .goldTrim:
-        drawGoldTrimLine(line, in: &context)
     case .dualTone(let style):
         drawDualToneLine(line, style: style, in: &context)
     }
@@ -890,95 +886,6 @@ private func confettiPiece(center: CGPoint, size: CGFloat, rotation: CGFloat) ->
     let transform = CGAffineTransform(rotationAngle: rotation)
         .concatenating(CGAffineTransform(translationX: center.x, y: center.y))
     return piece.applying(transform)
-}
-
-/// Draws with the same ornate carved-gold-molding material used for the
-/// Daily Doodle hero card's frame (`GradientFrame`/`OrnateGoldFrame` in
-/// TodayTab.swift) — Eddie's own idea after seeing that frame: "can you draw
-/// with that?" Rather than port `ScallopRingShape` (a closed Bezier ring
-/// built for a fixed rounded-rect perimeter) as-is — a true parallel-offset
-/// curve for an arbitrary open freehand path is a much harder problem
-/// (self-intersections and cusps at sharp turns) — this reproduces the same
-/// *look* with the per-segment nested-stroke technique already established
-/// in this file (.braid/.hairy/.thorns/.calligraphy): each segment is
-/// stroked several times at decreasing width with a dark-to-light
-/// interpolated color, mirroring `GradientFrame`'s concentric rings but
-/// walked along a line instead of a rounded rect, plus a thin dark
-/// rope-twist center seam (mirroring `OrnateGoldFrame`'s seam stroke) and
-/// small bright bump highlights at regular arc-length intervals standing in
-/// for `ScallopRingShape`'s scalloped bulges. Always renders in a fixed
-/// bronze/gold palette regardless of the user's selected pen color — it's a
-/// material, not a tintable stroke, same spirit as the frame it's borrowed
-/// from. `Color.shaded(_:)` (defined in TodayTab.swift) and `blendColors`
-/// (this file) do the color math, same helpers the source frame uses.
-private func drawGoldTrimLine(_ line: DrawingLine, in context: inout GraphicsContext) {
-    let baseW = line.lineWidth
-    let count = line.points.count
-    guard count > 0 else { return }
-
-    let darkBronze = Color(red: 0.42, green: 0.27, blue: 0.15)
-    let lightGold  = Color(red: 0.94, green: 0.83, blue: 0.53)
-    let seamColor  = darkBronze.shaded(-0.35)
-
-    if count == 1 {
-        let pt = line.points[0]
-        let r = baseW * 0.5
-        context.fill(Path(ellipseIn: CGRect(x: pt.x - r, y: pt.y - r, width: r*2, height: r*2)),
-                     with: .color(lightGold))
-        return
-    }
-
-    // Nested-stroke bevel: each segment is drawn `ringSteps` times, widest +
-    // darkest first (outer edge) down to narrowest + lightest last (inner
-    // edge) — the same dark-to-light concentric idea as GradientFrame's 16
-    // rings, just walked along a line instead of a static rounded-rect
-    // perimeter. Kept lower than GradientFrame's 16 (a single long-lived
-    // static shape) since this redraws per *segment* along a potentially
-    // long freehand stroke.
-    let ringSteps = 7
-    for i in 1..<count {
-        let p0 = line.points[i-1], p1 = line.points[i]
-        let taper = strokeTaper(i: i, count: count, taperFraction: 0.12)
-        let w = baseW * max(0.2, taper) * pressureAt(i, in: line)
-        var seg = Path()
-        seg.move(to: p0)
-        seg.addLine(to: p1)
-        for step in 0..<ringSteps {
-            let t = CGFloat(step) / CGFloat(ringSteps - 1)   // 0 = outer/dark, 1 = inner/light
-            let ringW = w * (1.0 - t * 0.78)
-            let color = blendColors(darkBronze, lightGold, t: t)
-            context.stroke(seg, with: .color(color),
-                           style: StrokeStyle(lineWidth: max(0.6, ringW), lineCap: .round, lineJoin: .round))
-        }
-    }
-
-    // Thin dark rope-twist seam down the very center of the whole stroke —
-    // same device OrnateGoldFrame uses on top of its own ribbon.
-    var full = Path()
-    full.move(to: line.points[0])
-    for i in 1..<count { full.addLine(to: line.points[i]) }
-    context.stroke(full, with: .color(seamColor),
-                   style: StrokeStyle(lineWidth: max(0.6, baseW * 0.08), lineCap: .round, lineJoin: .round))
-
-    // Scalloped highlight bumps at regular arc-length intervals — stands in
-    // for ScallopRingShape's sinusoidal bulges without needing true
-    // parallel-offset curve geometry on an open path. Same sin-hash
-    // deterministic pseudo-random technique as .hairy/.thorns/.confetti for
-    // the size jitter, so it's stable frame to frame, not re-randomized.
-    let wavelength = max(6, baseW * 0.85)
-    var cumulative: CGFloat = 0
-    var bumpIdx = 0
-    for i in 1..<count {
-        let p0 = line.points[i-1], p1 = line.points[i]
-        cumulative += hypot(p1.x - p0.x, p1.y - p0.y)
-        guard cumulative >= wavelength else { continue }
-        cumulative = 0
-        let jitter = fabs(sin(CGFloat(bumpIdx) * 57.3 + 2.1))
-        let bumpR = baseW * pressureAt(i, in: line) * (0.10 + jitter * 0.06)
-        context.fill(Path(ellipseIn: CGRect(x: p1.x - bumpR, y: p1.y - bumpR, width: bumpR*2, height: bumpR*2)),
-                     with: .color(lightGold.opacity(0.9)))
-        bumpIdx += 1
-    }
 }
 
 private func strokeTaper(i: Int, count: Int, taperFraction: CGFloat) -> CGFloat {
@@ -1510,6 +1417,74 @@ private func drawDualToneLine(_ line: DrawingLine, style: DualToneStyle, in cont
             batchStart = batchEnd
         }
 
+    case .trim:
+        // Three parallel adjacent lines — the middle line uses the live
+        // canvas pen color (colorA), the two outer lines use the second
+        // color set in Pen Studio (colorB) with a soft blur, giving a
+        // soft-edged trim flanking a crisp core line. Started life as a
+        // standalone "Gold Trim" pen (nested bevel rings + rope seam +
+        // scalloped bumps, modeled on the Daily Doodle hero card's frame)
+        // but was simplified and folded into Dual Tone per direct
+        // feedback — the fixed bronze/gold palette and the bump dots are
+        // both gone; colors now come from whatever colorA/colorB the user
+        // has picked, same as every other Dual Tone style. Perpendicular
+        // offset direction uses the same wider lo/hi window as
+        // .braid/.hairy/.thorns to avoid raw-delta jitter.
+        if count == 1 {
+            let pt = line.points[0]
+            let r = baseW * 0.22
+            context.fill(Path(ellipseIn: CGRect(x: pt.x - r, y: pt.y - r, width: r*2, height: r*2)),
+                         with: .color(line.color))
+            return
+        }
+        let trimLineW  = baseW * 0.32
+        let trimSpacing = baseW * 0.55
+        let trimBlur   = baseW * 0.12
+
+        // Outer two lines — blurred, colorB. Both drawn inside one
+        // drawLayer/blur scope so all their overlapping segments
+        // composite into one solid shape *before* the blur is applied,
+        // rather than blurring each short round-capped segment
+        // individually (which would show seams/scalloping).
+        context.drawLayer { layer in
+            layer.addFilter(.blur(radius: max(0.5, trimBlur)))
+            for i in 1..<count {
+                let p0 = line.points[i-1], p1 = line.points[i]
+                let lo = max(0, i-1), hi = min(count-1, i+1)
+                let dx = line.points[hi].x - line.points[lo].x
+                let dy = line.points[hi].y - line.points[lo].y
+                let len = hypot(dx, dy)
+                guard len > 0 else { continue }
+                let nx = -dy/len, ny = dx/len
+                let taper = strokeTaper(i: i, count: count, taperFraction: 0.15)
+                let w = trimLineW * max(0.15, taper) * pressureAt(i, in: line)
+                let off = trimSpacing * max(0.15, taper) * pressureAt(i, in: line)
+
+                var left = Path()
+                left.move(to: CGPoint(x: p0.x - nx*off, y: p0.y - ny*off))
+                left.addLine(to: CGPoint(x: p1.x - nx*off, y: p1.y - ny*off))
+                layer.stroke(left, with: .color(line.colorB),
+                             style: StrokeStyle(lineWidth: w, lineCap: .round, lineJoin: .round))
+
+                var right = Path()
+                right.move(to: CGPoint(x: p0.x + nx*off, y: p0.y + ny*off))
+                right.addLine(to: CGPoint(x: p1.x + nx*off, y: p1.y + ny*off))
+                layer.stroke(right, with: .color(line.colorB),
+                             style: StrokeStyle(lineWidth: w, lineCap: .round, lineJoin: .round))
+            }
+        }
+
+        // Middle line — crisp, colorA, drawn on top of the blurred pair.
+        for i in 1..<count {
+            let taper = strokeTaper(i: i, count: count, taperFraction: 0.15)
+            let w = trimLineW * max(0.15, taper) * pressureAt(i, in: line)
+            var seg = Path()
+            seg.move(to: line.points[i-1])
+            seg.addLine(to: line.points[i])
+            context.stroke(seg, with: .color(line.color),
+                           style: StrokeStyle(lineWidth: w, lineCap: .round, lineJoin: .round))
+        }
+
     case .hairy:
         // Core stroke (colorA) with perpendicular hairs of varying length/angle (colorB).
         // Pressure scales core width and hair size.
@@ -1520,7 +1495,7 @@ private func drawDualToneLine(_ line: DrawingLine, style: DualToneStyle, in cont
         }
         let hairCoreW   = baseW * 0.35
         let hairW       = baseW * 0.13
-        let hairBaseLen = baseW * 1.1
+        let hairBaseLen = baseW * 0.4   // shortened per feedback — was 1.1
         let hairSpacing = baseW * 0.75
 
         var hairArcLen = [CGFloat](repeating: 0, count: count)

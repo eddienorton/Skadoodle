@@ -286,7 +286,6 @@ struct DoodleStampCreatorView: View {
         case "dotted":     return .dotted
         case "calligraphy": return .calligraphy
         case "confetti":   return .confetti
-        case "gold trim":  return .goldTrim
         case "dualtone":   return .dualTone(style)
         default:           return .pencil
         }

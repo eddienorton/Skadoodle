@@ -41,7 +41,6 @@ extension PenType: Codable {
         case .dotted:      try c.encode("dotted",      forKey: .type)
         case .calligraphy: try c.encode("calligraphy", forKey: .type)
         case .confetti:    try c.encode("confetti",    forKey: .type)
-        case .goldTrim:    try c.encode("goldTrim",    forKey: .type)
         case .dualTone(let style):
             try c.encode("dualTone", forKey: .type)
             try c.encode(style.rawValue, forKey: .style)
@@ -62,7 +61,6 @@ extension PenType: Codable {
         case "dotted":     self = .dotted
         case "calligraphy": self = .calligraphy
         case "confetti":    self = .confetti
-        case "goldTrim":    self = .goldTrim
         case "dualTone":
             let raw = try c.decode(String.self, forKey: .style)
             self = .dualTone(DualToneStyle(rawValue: raw) ?? .gradient)

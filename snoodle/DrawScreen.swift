@@ -674,7 +674,7 @@ struct PenStudioSheet: View {
     @State private var recentColors: [Color] = RecentColors.load()
     @State private var showColorBPicker = false
 
-    private let allPens: [PenType] = [.pencil, .ink, .brush, .marker, .chalk, .neon, .spray, .watercolor, .dotted, .calligraphy, .confetti, .goldTrim, .dualTone(.gradient)]
+    private let allPens: [PenType] = [.pencil, .ink, .brush, .marker, .chalk, .neon, .spray, .watercolor, .dotted, .calligraphy, .confetti, .dualTone(.gradient)]
 
     var body: some View {
         NavigationView {
@@ -832,8 +832,7 @@ struct PenStudioSheet: View {
              (.marker, .marker), (.chalk, .chalk),
              (.neon, .neon), (.spray, .spray),
              (.watercolor, .watercolor), (.dotted, .dotted),
-             (.calligraphy, .calligraphy), (.confetti, .confetti),
-             (.goldTrim, .goldTrim): return true
+             (.calligraphy, .calligraphy), (.confetti, .confetti): return true
         case (.dualTone, .dualTone): return true
         default: return false
         }
@@ -847,8 +846,7 @@ struct PenTypeCard: View {
     // Sized for a 6-column grid (was 5) — icon box, icon, and label all
     // scaled down proportionally so pens fit comfortably at this width.
     // Label gets lineLimit + minimumScaleFactor since "Watercolor"/
-    // "Calligraphy"/"Confetti"/"Gold Trim" are long names for a narrower
-    // column.
+    // "Calligraphy"/"Confetti" are long names for a narrower column.
     var body: some View {
         VStack(spacing: 6) {
             ZStack {
@@ -884,6 +882,7 @@ struct DualToneStyleChip: View {
         case .reactive:    return "arrow.up.left.and.arrow.down.right"
         case .alternating: return "alternatingcurrent"
         case .braid:       return "link"
+        case .trim:        return "line.3.horizontal"
         case .hairy:       return "sun.min"
         case .thorns:      return "bolt"
         case .zigzag:      return "waveform.path.ecg"
@@ -2366,7 +2365,6 @@ struct DrawScreen: View {
         case "dotted":     return .dotted
         case "calligraphy": return .calligraphy
         case "confetti":   return .confetti
-        case "gold trim":  return .goldTrim
         case "dualtone":   return .dualTone(style)
         default:           return .pencil
         }
