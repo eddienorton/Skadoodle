@@ -1439,7 +1439,7 @@ private func drawDualToneLine(_ line: DrawingLine, style: DualToneStyle, in cont
             return
         }
         let trimLineW  = baseW * 0.32
-        let trimSpacing = baseW * 0.55
+        let trimSpacing = baseW * 0.36   // brought closer per feedback — was 0.55
         let trimBlur   = baseW * 0.12
 
         // Outer two lines — blurred, colorB. Both drawn inside one
@@ -1734,15 +1734,34 @@ private func drawDualToneLine(_ line: DrawingLine, style: DualToneStyle, in cont
         }
 
     case .tube:
-        // Symmetric center-to-edge color gradient across the stroke's
-        // *width* — colorA down the bright center, fading out to colorB
-        // at the rim on both sides at once, the classic shaded-cylinder
-        // "3D pipe" illusion. Built with the same nested-concentric-stroke
-        // technique the (now-removed) Gold Trim pen idea used for its
-        // bevel, generalized from a fixed bronze/gold palette to whatever
-        // colorA/colorB the user picks. Every ring is centered on the same
-        // path, so the fade is naturally symmetric across the width with
-        // no separate left/right offset math needed, unlike .split/.trim.
+        // N genuinely continuous whole-path lines, each stroked exactly
+        // once — not per-segment redraws. The previous version restroked
+        // all N parallel lines at every point-to-point segment (up to
+        // `lineCount` × `count` separate `context.stroke` calls for one
+        // pen stroke), flagged directly: "your line consists of a zillion
+        // lines... if you do a lot of it the app will become less and
+        // less responsive... its kinda dangerous." Rebuilt on Eddie's own
+        // described technique: precompute each point's outward normal
+        // once (same wider lo/hi window every direction-dependent pen in
+        // this file uses), then for each of the N line indices build one
+        // continuous offset `Path` spanning every point in the stroke and
+        // stroke it a single time in that line's fixed gradient color —
+        // "a number of parallel lines whereby you manually change the
+        // color of the line to what the proper gradient graduation color
+        // would be... if it had 11 lines numbered 0-10, 0 and 10 would
+        // both be [the edge color], 1 and 9 a step closer, ... til you got
+        // to 5 which would be [the center color]." Total stroke calls for
+        // the whole style: exactly `lineCount`, regardless of how many
+        // points are in the stroke.
+        //
+        // Trade-off, called out rather than hidden: this style no longer
+        // tapers to a point at the stroke's start/end the way every
+        // per-segment pen in this file does — a single Path+StrokeStyle
+        // stroke can't vary width along its own length without building a
+        // custom filled variable-width shape, which would reintroduce the
+        // same per-point cost this rebuild is specifically avoiding. Also
+        // no longer reacts to live pressure along the stroke for the same
+        // reason — width is fixed per line for the whole stroke.
         if count == 1 {
             let pt = line.points[0]
             let r = baseW * 0.5
@@ -1750,21 +1769,34 @@ private func drawDualToneLine(_ line: DrawingLine, style: DualToneStyle, in cont
                          with: .color(line.color))
             return
         }
-        let tubeSteps = 8
-        for i in 1..<count {
-            let p0 = line.points[i-1], p1 = line.points[i]
-            let taper = strokeTaper(i: i, count: count, taperFraction: 0.15)
-            let w = baseW * max(0.1, taper) * pressureAt(i, in: line)
-            var seg = Path()
-            seg.move(to: p0)
-            seg.addLine(to: p1)
-            for step in 0..<tubeSteps {
-                let t = CGFloat(step) / CGFloat(tubeSteps - 1)   // 0 = outer/edge, 1 = inner/center
-                let ringW = w * (1.0 - t * 0.86)
-                let color = blendColors(line.colorB, line.color, t: t)
-                context.stroke(seg, with: .color(color),
-                               style: StrokeStyle(lineWidth: max(0.6, ringW), lineCap: .round, lineJoin: .round))
+        var tubeLineCount = Int(baseW.rounded())
+        if tubeLineCount % 2 == 0 { tubeLineCount += 1 }         // force odd — always a true center line
+        tubeLineCount = max(3, min(tubeLineCount, 25))           // sane bounds at extreme thickness slider values
+        let tubeHalf = tubeLineCount / 2
+        let tubeSlotWidth = baseW / CGFloat(tubeLineCount)
+        let tubeLineW = max(0.6, tubeSlotWidth * 1.15)   // slight overlap so adjacent lines don't leave hairline gaps
+
+        var tubeNormals = [(CGFloat, CGFloat)](repeating: (0, 1), count: count)
+        for i in 0..<count {
+            let lo = max(0, i-1), hi = min(count-1, i+1)
+            let dx = line.points[hi].x - line.points[lo].x
+            let dy = line.points[hi].y - line.points[lo].y
+            let len = hypot(dx, dy)
+            tubeNormals[i] = len > 0 ? (-dy/len, dx/len) : (0, 1)
+        }
+
+        for lineIdx in -tubeHalf...tubeHalf {
+            let t = CGFloat(abs(lineIdx)) / CGFloat(tubeHalf)   // 0 at center, 1 at outer edge
+            let color = blendColors(line.color, line.colorB, t: t)
+            let offset = CGFloat(lineIdx) * tubeSlotWidth
+            var path = Path()
+            for i in 0..<count {
+                let (nx, ny) = tubeNormals[i]
+                let pt = CGPoint(x: line.points[i].x + nx * offset, y: line.points[i].y + ny * offset)
+                if i == 0 { path.move(to: pt) } else { path.addLine(to: pt) }
             }
+            context.stroke(path, with: .color(color),
+                           style: StrokeStyle(lineWidth: tubeLineW, lineCap: .round, lineJoin: .round))
         }
     }
 }
