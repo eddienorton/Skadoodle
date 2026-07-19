@@ -168,6 +168,12 @@ class SnoodleStore: ObservableObject {
 
     func delete(_ entry: SnoodleEntry) {
         try? FileManager.default.removeItem(at: entry.imageURL)
+        // Also remove the paired .skadoodle re-editable file, if one exists — previously
+        // only the flattened image was deleted here, silently leaking a .skadoodle file
+        // on disk (harmless orphan, just wasted space) every time a single doodle was
+        // deleted one at a time rather than via "Clear Local Doodles" (which wipes the
+        // whole Doodles directory indiscriminately and so never had this problem).
+        try? FileManager.default.removeItem(at: entry.skadoodleURL)
         entries.removeAll { $0.id == entry.id }
         persist()
     }

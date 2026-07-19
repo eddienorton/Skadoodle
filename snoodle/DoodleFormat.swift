@@ -41,6 +41,11 @@ extension PenType: Codable {
         case .dotted:      try c.encode("dotted",      forKey: .type)
         case .calligraphy: try c.encode("calligraphy", forKey: .type)
         case .confetti:    try c.encode("confetti",    forKey: .type)
+        case .airbrush:    try c.encode("airbrush",    forKey: .type)
+        case .dashed:      try c.encode("dashed",      forKey: .type)
+        case .hearts:      try c.encode("hearts",      forKey: .type)
+        case .sparkle:     try c.encode("sparkle",     forKey: .type)
+        case .splatter:    try c.encode("splatter",    forKey: .type)
         case .dualTone(let style):
             try c.encode("dualTone", forKey: .type)
             try c.encode(style.rawValue, forKey: .style)
@@ -61,6 +66,12 @@ extension PenType: Codable {
         case "dotted":     self = .dotted
         case "calligraphy": self = .calligraphy
         case "confetti":    self = .confetti
+        case "airbrush":    self = .airbrush
+        case "dashed":      self = .dashed
+        case "hearts":      self = .hearts
+        case "chevron":     self = .sparkle  // legacy .skadoodle files with old Chevron strokes decode as Sparkle
+        case "sparkle":     self = .sparkle
+        case "splatter":    self = .splatter
         case "dualTone":
             let raw = try c.decode(String.self, forKey: .style)
             self = .dualTone(DualToneStyle(rawValue: raw) ?? .gradient)
@@ -191,6 +202,14 @@ struct SkadoodleDocument: Codable {
     var bgSaturation: Double
     var chapterBreaks: [ChapterBreak] = []          // user-placed pause markers for timelapse video
     var layerOrderChanges: [LayerOrderChange] = []  // user-initiated reorder events for timelapse video playback
+    // 3.1+: user-set total length (seconds) of the content portion (draw reveal + chapter
+    // pauses + stamp fades combined) of the exported timelapse. Does NOT include the fixed
+    // 2s finished-doodle hold or the ~4.5s branded outro — those always play after, unaffected,
+    // same as a movie's runtime not counting the credits. nil = legacy behavior: draw reveal
+    // is a fixed ~10s (~300 frames) regardless of pauses/stamps, exactly as before this field
+    // existed. Old .skadoodle files decode this as nil automatically (synthesized Codable
+    // treats a missing key on an Optional as absent, not an error).
+    var targetContentDurationSeconds: Double? = nil
 }
 
 // MARK: - LayerEntry Codable

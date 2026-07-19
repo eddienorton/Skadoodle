@@ -478,18 +478,9 @@ struct BackgroundEditorView: View {
         let x = (cW - drawW) / 2 + backgroundOffset.width
         let y = (cH - drawH) / 2 + backgroundOffset.height
         let renderer = UIGraphicsImageRenderer(size: CGSize(width: cW, height: cH))
-        let baked = renderer.image { _ in
+        return renderer.image { _ in
             img.draw(in: CGRect(x: x, y: y, width: drawW, height: drawH))
         }
-        // UIGraphicsImageRenderer(size:) with no explicit format defaults to the device's
-        // screen scale (2x/3x), not 1x — so the baked image's real pixel buffer is
-        // canvasSize(points) × deviceScale, not canvasSize(points) itself. Every other
-        // background-image entry point in the app (ImagePickerCallback, BackgroundPhotoHistory,
-        // restoreSkadoodleData's safety net) caps to 1600px on the longest side; this bake path
-        // was the one place that convention was skipped, so zooming/panning in the Effects
-        // screen before tapping Done silently re-inflated an already-capped background back up
-        // to full device-scale resolution. Downsample the same way as everywhere else.
-        return baked.downsampled(toMaxDimension: 1600)
     }
 
     func renderSnapshot(size: CGSize) {
@@ -684,55 +675,6 @@ struct CanvasColorPickerView: View {
 
 // MARK: - Pen Studio
 
-/// Groups PenType cases into a handful of tabs so the picker can keep growing
-/// without re-tuning grid column counts / card sizes every time a pen is
-/// added (see the old 6-column-grid comment history in PenStudioSheet for how
-/// much churn that caused — a new pen just gets appended to its category's
-/// array now, no layout math involved). Dual Tone is its own case rather than
-/// a plain PenType entry since it already has its own dedicated sub-picker UI.
-enum PenCategory: Hashable {
-    case basic, paint, pattern, dualTone
-
-    var displayName: String {
-        switch self {
-        case .basic:    return "Basic"
-        case .paint:    return "Paint"
-        case .pattern:  return "Pattern"
-        case .dualTone: return "Dual Tone"
-        }
-    }
-
-    var icon: String {
-        switch self {
-        case .basic:    return "pencil"
-        case .paint:    return "paintpalette"
-        case .pattern:  return "square.grid.2x2"
-        case .dualTone: return "circle.righthalf.filled"
-        }
-    }
-}
-
-struct CategoryTabChip: View {
-    let category: PenCategory
-    let isSelected: Bool
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: category.icon).font(.system(size: 13))
-            Text(category.displayName).font(.system(size: 13, weight: .medium))
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .background(isSelected ? Color.purple : Color(UIColor.secondarySystemBackground))
-        .foregroundColor(isSelected ? .white : .primary)
-        .cornerRadius(20)
-        .overlay(
-            RoundedRectangle(cornerRadius: 20)
-                .stroke(isSelected ? Color.clear : Color.gray.opacity(0.25), lineWidth: 1)
-        )
-    }
-}
-
 struct PenStudioSheet: View {
     @Binding var penType: PenType
     @Binding var colorB: Color
@@ -742,61 +684,115 @@ struct PenStudioSheet: View {
     @State private var selectedDualStyle: DualToneStyle = .gradient
     @State private var recentColors: [Color] = RecentColors.load()
     @State private var showColorBPicker = false
-    @State private var selectedCategory: PenCategory = .basic
 
-    // Pens grouped by category instead of one flat grid — see PenCategory's
-    // doc comment above for why. Adding a new pen is just appending it to
-    // the right array here; no grid/column math to re-tune. categoryOrder
-    // controls tab display order (dictionaries have no stable order of
-    // their own). Dual Tone isn't in this dict — it's handled as its own
-    // branch in body since it already has its own dedicated sub-picker UI.
-    private let penCategories: [PenCategory: [PenType]] = [
-        .basic:   [.pencil, .ink, .marker, .chalk, .calligraphy, .neon],
-        .paint:   [.brush, .watercolor, .spray, .airbrush],
-        .pattern: [.dotted, .confetti, .dashed, .hearts, .sparkle, .splatter]
-    ]
-    private let categoryOrder: [PenCategory] = [.basic, .paint, .pattern, .dualTone]
+    private let allPens: [PenType] = [.pencil, .ink, .brush, .marker, .chalk, .neon, .spray, .watercolor, .dotted, .calligraphy, .confetti, .dualTone(.gradient)]
 
     var body: some View {
         NavigationView {
             ScrollView {
-                VStack(spacing: 20) {
+                VStack(spacing: 24) {
 
-                    // MARK: Category tabs
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 10) {
-                            ForEach(categoryOrder, id: \.self) { cat in
-                                CategoryTabChip(category: cat, isSelected: selectedCategory == cat)
-                                    .onTapGesture {
-                                        withAnimation(.easeInOut(duration: 0.2)) { selectedCategory = cat }
-                                        if cat == .dualTone {
-                                            penType = .dualTone(selectedDualStyle)
-                                            UserDefaults.standard.set("dualtone", forKey: "lastPenTypeName")
-                                            UserDefaults.standard.set(selectedDualStyle.rawValue, forKey: "lastDualToneStyle")
+                    // Pen type grid — 6 columns. This used to be tuned to
+                    // land on an exact row count (5 cols/2 rows, then 6
+                    // cols/2 rows) so the sheet's fixed .presentationDetents
+                    // height would never clip the live PenPreviewStrip below
+                    // it. That math needs re-solving every time a pen gets
+                    // added, which doesn't scale as the roster grows (Gold
+                    // Trim below is the 13th, breaking the old 12/6=2 exact
+                    // fit) — per Eddie's call, stop chasing exact
+                    // divisibility. Everything here (grid + dual-tone
+                    // sub-picker + PenPreviewStrip) already lives inside one
+                    // shared ScrollView with a .large fallback detent, so a
+                    // partial extra row just means a bit more scrolling to
+                    // reach the preview, not clipped/unreachable content.
+                    // PenTypeCard's icon/height were shrunk once already to
+                    // fit 6 columns comfortably; no further shrinking needed
+                    // just because the row count isn't perfectly even.
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 6), spacing: 8) {
+                        ForEach(allPens, id: \.displayName) { pen in
+                            PenTypeCard(pen: pen, isSelected: penTypesMatch(penType, pen))
+                                .onTapGesture {
+                                    if pen.isDualTone {
+                                        penType = .dualTone(selectedDualStyle)
+                                        UserDefaults.standard.set("dualtone", forKey: "lastPenTypeName")
+                                        UserDefaults.standard.set(selectedDualStyle.rawValue, forKey: "lastDualToneStyle")
+                                    } else {
+                                        penType = pen
+                                        UserDefaults.standard.set(pen.displayName.lowercased(), forKey: "lastPenTypeName")
+                                    }
+                                }
+                        }
+                    }
+                    .padding(.horizontal, 20)
+
+                    // Dual tone options — shown only when dual tone is selected
+                    if penType.isDualTone {
+                        VStack(alignment: .leading, spacing: 14) {
+                            Text("Dual Tone Style")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(.secondary)
+                                .padding(.horizontal, 20)
+
+                            ScrollViewReader { proxy in
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    HStack(spacing: 10) {
+                                        ForEach(DualToneStyle.allCases) { style in
+                                            DualToneStyleChip(style: style, isSelected: penType.dualToneStyle == style)
+                                                .id(style.id)
+                                                .onTapGesture {
+                                                    selectedDualStyle = style
+                                                    penType = .dualTone(style)
+                                                    UserDefaults.standard.set(style.rawValue, forKey: "lastDualToneStyle")
+                                                }
                                         }
                                     }
-                            }
-                        }
-                        .padding(.horizontal, 20)
-                    }
-
-                    // MARK: Selected category content
-                    if selectedCategory == .dualTone {
-                        dualToneContent
-                    } else {
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 14) {
-                                ForEach(penCategories[selectedCategory] ?? [], id: \.displayName) { pen in
-                                    PenTypeCard(pen: pen, isSelected: penTypesMatch(penType, pen))
-                                        .onTapGesture {
-                                            penType = pen
-                                            UserDefaults.standard.set(pen.displayName.lowercased(), forKey: "lastPenTypeName")
-                                        }
+                                    .padding(.horizontal, 20)
+                                }
+                                .onAppear {
+                                    proxy.scrollTo(penType.dualToneStyle.id, anchor: .center)
                                 }
                             }
-                            .padding(.horizontal, 20)
-                            .padding(.vertical, 4)
+
+                            // Second color picker
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("Second Color")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundColor(.secondary)
+                                    .padding(.horizontal, 20)
+
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    HStack(spacing: 12) {
+                                        Button { showColorBPicker = true } label: {
+                                            ZStack {
+                                                Circle().fill(Color(UIColor.secondarySystemBackground))
+                                                    .frame(width: 36, height: 36)
+                                                Image(systemName: "plus.circle.fill")
+                                                    .font(.system(size: 24))
+                                                    .foregroundColor(.blue)
+                                            }
+                                        }
+                                        .colorPickerSheet(isPresented: $showColorBPicker, color: $colorB) { picked in
+                                            recentColors = RecentColors.add(picked)
+                                            colorB = picked
+                                            saveColorB(picked)
+                                        }
+                                        ForEach(recentColors, id: \.self) { color in
+                                            ColorSwatchView(color: color, size: 36,
+                                                            isSelected: colorB.isApproximatelyEqual(to: color),
+                                                            selectionColor: .purple)
+                                                .shadow(color: .black.opacity(0.08), radius: 2)
+                                                .onTapGesture {
+                                                    colorB = color
+                                                    saveColorB(color)
+                                                }
+                                        }
+                                    }
+                                    .padding(.horizontal, 20)
+                                    .padding(.vertical, 10)
+                                }
+                            }
                         }
+                        .transition(.opacity.combined(with: .move(edge: .top)))
                     }
 
                     // Live preview
@@ -815,10 +811,6 @@ struct PenStudioSheet: View {
                 }
             }
             .onAppear {
-                // Land on whichever tab the current pen actually belongs to,
-                // not always Basic — reopening Pen Studio on, say, Watercolor
-                // should show the Texture tab already selected.
-                selectedCategory = categoryFor(penType)
                 if penType.isDualTone {
                     selectedDualStyle = penType.dualToneStyle
                 }
@@ -830,92 +822,11 @@ struct PenStudioSheet: View {
                 }
             }
         }
-        // Content is shorter now than the old multi-row grid in every case —
-        // even the Dual Tone tab, since the grid itself no longer sits above
-        // the sub-picker. Estimated, not yet confirmed on a real device (see
-        // standing caveat elsewhere in this file's history) — worth a real
-        // look to see if either detent needs nudging once this is on screen.
-        // Compact detent bumped 300→400 (iPad) / 0.4→0.52 (iPhone) — the first estimate
-        // was too small and clipped PenPreviewStrip at the bottom on the non-Dual-Tone
-        // tabs (category tabs + a card row + the preview strip add up to more height
-        // than a single guess accounted for). Confirmed too short on device.
         .presentationDetents(UIDevice.current.userInterfaceIdiom == .pad
-            ? [.height(selectedCategory == .dualTone ? 480 : 400), .large]
-            : (selectedCategory == .dualTone ? [.fraction(0.62), .large] : [.fraction(0.52), .large]))
-        .frame(minHeight: UIDevice.current.userInterfaceIdiom == .pad ? (selectedCategory == .dualTone ? 480 : 400) : 0)
-        .animation(.easeInOut(duration: 0.2), value: selectedCategory)
-    }
-
-    @ViewBuilder
-    private var dualToneContent: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Dual Tone Style")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundColor(.secondary)
-                .padding(.horizontal, 20)
-
-            ScrollViewReader { proxy in
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 10) {
-                        ForEach(DualToneStyle.allCases) { style in
-                            DualToneStyleChip(style: style, isSelected: penType.dualToneStyle == style)
-                                .id(style.id)
-                                .onTapGesture {
-                                    selectedDualStyle = style
-                                    penType = .dualTone(style)
-                                    UserDefaults.standard.set(style.rawValue, forKey: "lastDualToneStyle")
-                                }
-                        }
-                    }
-                    .padding(.horizontal, 20)
-                }
-                .onAppear {
-                    proxy.scrollTo(penType.dualToneStyle.id, anchor: .center)
-                }
-            }
-
-            // Second color picker
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Second Color")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(.secondary)
-                    .padding(.horizontal, 20)
-
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 12) {
-                        Button { showColorBPicker = true } label: {
-                            ZStack {
-                                Circle().fill(Color(UIColor.secondarySystemBackground))
-                                    .frame(width: 36, height: 36)
-                                Image(systemName: "plus.circle.fill")
-                                    .font(.system(size: 24))
-                                    .foregroundColor(.blue)
-                            }
-                        }
-                        .colorPickerSheet(isPresented: $showColorBPicker, color: $colorB) { picked in
-                            recentColors = RecentColors.add(picked)
-                            colorB = picked
-                            saveColorB(picked)
-                        }
-                        ForEach(recentColors, id: \.self) { color in
-                            ColorSwatchView(color: color, size: 36,
-                                            isSelected: colorB.isApproximatelyEqual(to: color),
-                                            selectionColor: .purple)
-                                .shadow(color: .black.opacity(0.08), radius: 2)
-                                .onTapGesture {
-                                    // No reorder on select — same reasoning as colorCircle above.
-                                    // Reorders only when actually used to draw (onStrokeCommitted).
-                                    colorB = color
-                                    saveColorB(color)
-                                }
-                        }
-                    }
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 10)
-                }
-            }
-        }
-        .transition(.opacity.combined(with: .move(edge: .top)))
+            ? [.height(penType.isDualTone ? 643 : 427), .large]
+            : (penType.isDualTone ? [.fraction(0.83), .large] : [.fraction(0.57), .large]))
+        .frame(minHeight: UIDevice.current.userInterfaceIdiom == .pad ? (penType.isDualTone ? 643 : 427) : 0)
+        .animation(.easeInOut(duration: 0.2), value: penType.isDualTone)
     }
 
     private func saveColorB(_ color: Color) {
@@ -932,23 +843,10 @@ struct PenStudioSheet: View {
              (.marker, .marker), (.chalk, .chalk),
              (.neon, .neon), (.spray, .spray),
              (.watercolor, .watercolor), (.dotted, .dotted),
-             (.calligraphy, .calligraphy), (.confetti, .confetti),
-             (.airbrush, .airbrush), (.dashed, .dashed),
-             (.hearts, .hearts), (.sparkle, .sparkle),
-             (.splatter, .splatter): return true
+             (.calligraphy, .calligraphy), (.confetti, .confetti): return true
         case (.dualTone, .dualTone): return true
         default: return false
         }
-    }
-
-    private func categoryFor(_ pen: PenType) -> PenCategory {
-        if pen.isDualTone { return .dualTone }
-        for cat in categoryOrder {
-            if let pens = penCategories[cat], pens.contains(where: { penTypesMatch($0, pen) }) {
-                return cat
-            }
-        }
-        return .basic
     }
 }
 
@@ -956,33 +854,31 @@ struct PenTypeCard: View {
     let pen: PenType
     let isSelected: Bool
 
-    // Sized for a per-category horizontal scroll row (was a fixed 6-column
-    // grid holding all pens at once) — only ~4-5 cards are visible at a
-    // time now, so there's room to size up rather than keep shrinking icon/
-    // label every time a pen is added. Fixed width keeps cards a consistent
-    // size regardless of label length ("Watercolor"/"Calligraphy" vs "Ink").
+    // Sized for a 6-column grid (was 5) — icon box, icon, and label all
+    // scaled down proportionally so pens fit comfortably at this width.
+    // Label gets lineLimit + minimumScaleFactor since "Watercolor"/
+    // "Calligraphy"/"Confetti" are long names for a narrower column.
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 6) {
             ZStack {
-                RoundedRectangle(cornerRadius: 14)
+                RoundedRectangle(cornerRadius: 12)
                     .fill(isSelected ? Color.purple.opacity(0.12) : Color(UIColor.secondarySystemBackground))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 14)
+                        RoundedRectangle(cornerRadius: 12)
                             .stroke(isSelected ? Color.purple : Color.clear, lineWidth: 2)
                     )
-                    .frame(width: 72, height: 72)
+                    .frame(height: 56)
 
                 Image(systemName: pen.icon)
-                    .font(.system(size: 28, weight: .light))
+                    .font(.system(size: 22, weight: .light))
                     .foregroundColor(isSelected ? .purple : .primary)
             }
             Text(pen.displayName)
-                .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
+                .font(.system(size: 10, weight: isSelected ? .semibold : .regular))
                 .foregroundColor(isSelected ? .purple : .secondary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.75)
         }
-        .frame(width: 78)
     }
 }
 
@@ -990,10 +886,22 @@ struct DualToneStyleChip: View {
     let style: DualToneStyle
     let isSelected: Bool
 
-    // Icon now lives on DualToneStyle itself (DrawingEngine.swift) — shared
-    // with PenType.icon's .dualTone case so the main pen button and this
-    // chip row always show the identical icon for a given style.
-    var icon: String { style.icon }
+    var icon: String {
+        switch style {
+        case .gradient:    return "arrow.left.to.line.alt"
+        case .split:       return "rectangle.split.2x1"
+        case .reactive:    return "arrow.up.left.and.arrow.down.right"
+        case .alternating: return "alternatingcurrent"
+        case .braid:       return "link"
+        case .trim:        return "line.3.horizontal"
+        case .hairy:       return "sun.min"
+        case .thorns:      return "bolt"
+        case .zigzag:      return "waveform.path.ecg"
+        case .bubble:      return "circle.grid.3x3"
+        case .stars:       return "star"
+        case .tube:        return "cylinder"
+        }
+    }
 
     var body: some View {
         HStack(spacing: 6) {
@@ -1306,17 +1214,6 @@ struct DrawScreen: View {
     @State private var layerOrder: [LayerEntry] = []
     @State private var currentLine: DrawingLine? = nil   // live preview during active stroke
 
-    #if DEBUG
-    // Live Apple Pencil pressure readout — for calibrating how much force the current pressure
-    // curve actually needs. Fed by DrawingCanvas.onPencilPressureDebug (DrawingEngine.swift).
-    // Session min/max persists for the life of this screen so light vs. hard presses can be
-    // compared; tapping the HUD resets it. DEBUG-only, never compiles into a shipped build.
-    @State private var debugPressure: CGFloat = 0
-    @State private var debugWidthScale: CGFloat = 0
-    @State private var debugSessionMin: CGFloat = 1
-    @State private var debugSessionMax: CGFloat = 0
-    #endif
-
     @State private var lineWidth: CGFloat = CGFloat(UserDefaults.standard.double(forKey: "lastLineWidth") == 0 ? 4 : UserDefaults.standard.double(forKey: "lastLineWidth"))
     @State private var otherWidth: CGFloat = CGFloat(UserDefaults.standard.double(forKey: "lastEraserWidth") == 0 ? 20 : UserDefaults.standard.double(forKey: "lastEraserWidth"))
     @State private var isEraser: Bool = false
@@ -1347,11 +1244,6 @@ struct DrawScreen: View {
     @State private var redoStack: [CanvasSnapshot] = []
     @AppStorage("lastPenColorIndex") private var selectedColorIndex: Int = 0
     @State private var recentColors: [Color] = RecentColors.load()
-    // Bumped whenever recentColors reorders due to actual use (onStrokeCommitted) so the
-    // pen-color ScrollView can auto-scroll back to the start — the promoted color(s) always
-    // land within the first slot or two, but the row itself doesn't know to follow them there.
-    @State private var colorRowScrollTrigger: Int = 0
-    private let colorRowStartID = "penColorRowStart"
     @State private var showPenColorPicker = false
     @State private var penPickerColor: Color = .black
     @State private var selectedCanvasColor: Color = RecentCanvasColors.loadSelected()
@@ -2560,12 +2452,6 @@ struct DrawScreen: View {
         case "dotted":     return .dotted
         case "calligraphy": return .calligraphy
         case "confetti":   return .confetti
-        case "airbrush":   return .airbrush
-        case "dashed":     return .dashed
-        case "hearts":     return .hearts
-        case "chevron":    return .sparkle  // legacy persisted last-pen-type name
-        case "sparkle":    return .sparkle
-        case "splatter":   return .splatter
         case "dualtone":   return .dualTone(style)
         default:           return .pencil
         }
@@ -2770,10 +2656,6 @@ struct DrawScreen: View {
         let isSelected = !isEraser && currentColor.isApproximatelyEqual(to: color)
         ColorSwatchView(color: color, size: 30, isSelected: isSelected)
             .onTapGesture {
-                // Selecting a swatch does NOT reorder the row — reordering happens only when
-                // the color is actually used to draw a stroke (see onStrokeCommitted), not
-                // merely selected/browsed. Per direct decision: tap-to-reorder felt jumpy while
-                // just comparing colors, and conflated "recently used" with "manually pinned."
                 if let i = recentColors.firstIndex(where: { $0.isApproximatelyEqual(to: color) }) {
                     selectedColorIndex = i
                 }
@@ -2816,45 +2698,6 @@ struct DrawScreen: View {
             stampMagicMenuView(id: id, stamp: stamp)
         }
     }
-
-    // Unconditional wrapper so the call site's `.overlay(...)` modifier chain never needs its own
-    // #if DEBUG (Swift doesn't reliably support #if around one link in a modifier chain the same
-    // way it supports it around a whole declaration) — branches internally instead.
-    @ViewBuilder
-    var debugPressureOverlay: some View {
-        #if DEBUG
-        debugPressureHUD
-        #else
-        EmptyView()
-        #endif
-    }
-
-    #if DEBUG
-    // Live pencil pressure readout, for calibrating how much force the current pressure curve
-    // actually needs. Top row: instantaneous normalized pressure (0...1, raw force/maximumPossibleForce)
-    // and the resulting stroke-width multiplier it's currently producing. Bottom row: the lightest
-    // and heaviest pressure seen since this screen appeared — tap the HUD to reset that range.
-    @ViewBuilder
-    var debugPressureHUD: some View {
-        VStack(spacing: 2) {
-            Text(String(format: "pressure: %.2f   width: ×%.2f", debugPressure, debugWidthScale))
-            Text(String(format: "session range: %.2f – %.2f   (tap to reset)", debugSessionMin, debugSessionMax))
-                .font(.system(size: 10, design: .monospaced))
-                .opacity(0.8)
-        }
-        .font(.system(size: 12, weight: .semibold, design: .monospaced))
-        .foregroundColor(.white)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(Color.black.opacity(0.65))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .padding(.top, 6)
-        .onTapGesture {
-            debugSessionMin = 1
-            debugSessionMax = 0
-        }
-    }
-    #endif
 
     // Extracted to reduce body complexity
     @ViewBuilder
@@ -2918,144 +2761,6 @@ struct DrawScreen: View {
             width:  min(max(savedMenuOffsetX, minX), maxX),
             height: min(max(savedMenuOffsetY, -vertLimit), vertLimit)
         )
-    }
-
-    // Extracted so the compiler can type-check the main canvas's many callbacks + modifier chain
-    // independently — this expression (DrawingCanvas's ~10 closures plus .contentShape/
-    // .allowsHitTesting/.simultaneousGesture/.background/.onAppear/.onChange all chained onto one
-    // statement) hit a real "unable to type-check in reasonable time" compiler error once
-    // onStrokeCommitted was added as one more trailing closure — same class of timeout as
-    // doodleDrawingCanvas() in CustomStampViews.swift and windowPinchView right below.
-    @ViewBuilder
-    func mainDrawingCanvasView(geo: GeometryProxy) -> some View {
-        DrawingCanvas(
-            lines: activeLayerLinesBinding,
-            currentColor: currentColor,
-            lineWidth: $lineWidth,
-            isEraser: $isEraser,
-            canvasColor: .clear,
-            backgroundImage: canvasBackgroundImage,
-            backgroundOffset: backgroundOffset,
-            penType: currentPenType,
-            colorB: dualToneColorB,
-            currentStamps: placedStamps,
-            isLongPressing: isLongPressing,
-            stampResizeTargetId: stampResizeTargetId,
-            isStampSelected: selectedStampId != nil,
-            drawingEnabled: !isStampMode,
-            onBeforeDraw: {
-                if showLegacyImportBanner { withAnimation { showLegacyImportBanner = false } }
-                pushUndoSnapshot()
-                scheduleAutoSave()
-                // Create a new layer when:
-                // 1. No drawing layers exist (lazy first-stroke creation), or
-                // 2. Top of stack is a stamp and no drawing layer is selected / stamp is selected
-                //    (working at the front edge), or
-                // 3. pendingInsertAboveStampId is set — user selected a stamp whose immediate
-                //    neighbor above is another stamp; new layer inserts between them.
-                // 4. Pen↔eraser switch — eraser and draw strokes live in separate layers so
-                //    the video timeline can distinguish scenes from transitions.
-                let topIsStamp = layerOrder.last.map { if case .stamp = $0 { return true } else { return false } } ?? false
-                let switchingToEraser = isEraser && !lastStrokeWasEraser && !drawingLayers.isEmpty
-                let switchingToPen    = !isEraser && lastStrokeWasEraser && !drawingLayers.isEmpty
-                let needsNewLayer = drawingLayers.isEmpty ||
-                    (topIsStamp && !explicitLayerSelection) ||
-                    pendingInsertAboveStampId != nil ||
-                    switchingToEraser || switchingToPen
-                if needsNewLayer {
-                    // Auto-insert a 3s chapter break at draw→erase transitions so the
-                    // finished scene holds before the wipe. No break on erase→draw.
-                    if switchingToEraser {
-                        chapterBreaks.append(ChapterBreak(timestamp: Date(), holdDuration: 3.0))
-                    }
-                    let newLayer = DrawingLayer()
-                    drawingLayers.append(newLayer)
-                    if let insertAbove = pendingInsertAboveStampId,
-                       let insertIdx = layerOrder.firstIndex(where: { $0.id == insertAbove }) {
-                        // Insert just above the target stamp, not at the top.
-                        layerOrder.insert(.drawing(newLayer.id), at: insertIdx + 1)
-                    } else {
-                        layerOrder.append(.drawing(newLayer.id))
-                    }
-                    pendingInsertAboveStampId = nil
-                    userSelectedLayerId = newLayer.id
-                    explicitLayerSelection = true   // prevent another new layer on the very next stroke
-                    selectedStampId = nil
-                    showStampMagicMenu = false
-                }
-                lastStrokeWasEraser = isEraser
-            },
-            onEraserCommitted: { _ in },
-            onStampModeDragOnEmpty: { startPoint in
-                // Draw on empty canvas even in stamp mode — don't auto-switch modes.
-                // The only way to switch to pen mode is the pen button.
-                // Returns true to start drawing immediately without waiting for re-render.
-                let hit = topmostStampHit(at: startPoint, layerOrder: layerOrder, stamps: placedStamps)
-                return hit == nil   // draw if empty canvas, do nothing if over a stamp
-            },
-            onPencilPressureDebug: { pressure, widthScale in
-                #if DEBUG
-                debugPressure = pressure
-                debugWidthScale = widthScale
-                if pressure < debugSessionMin { debugSessionMin = pressure }
-                if pressure > debugSessionMax { debugSessionMax = pressure }
-                #endif
-            },
-            onStrokeCommitted: { line in
-                // Reorder recent colors only on actual canvas use, not on mere
-                // selection in the picker — per direct decision, tapping a swatch
-                // should not reposition the row.
-                // Add colorB FIRST, then the primary color SECOND — RecentColors.add always
-                // moves whatever it's given to the very front, so adding line.color last is
-                // what guarantees it — not colorB — ends up as the true most-recent (index 0).
-                // colorB still gets promoted (to index 1) since it was genuinely used too, but
-                // it should never be able to bump the primary/current color out of first place.
-                if line.penType.isDualTone {
-                    recentColors = RecentColors.add(line.colorB)
-                }
-                recentColors = RecentColors.add(line.color)
-                // Keep the "current color" indicator pointing at whichever color was actually
-                // just drawn with. selectedColorIndex is a raw array index — re-locate it
-                // explicitly (should now always resolve to 0) rather than assuming a fixed
-                // value, so the next stroke (drawn without touching the picker) still uses the
-                // same color as this one.
-                if let i = recentColors.firstIndex(where: { $0.isApproximatelyEqual(to: line.color) }) {
-                    selectedColorIndex = i
-                }
-                // The row itself should follow the reorder — the promoted color(s) always
-                // land within the first slot or two, but a scrolled-away row won't show that
-                // on its own. colorRowScrollTrigger is watched by the ScrollViewReader below.
-                colorRowScrollTrigger += 1
-            },
-            currentLine: $currentLine
-        )
-            .contentShape(Rectangle())
-            .allowsHitTesting(!isLongPressing)
-            .simultaneousGesture(
-                SpatialTapGesture()
-                    .onEnded { value in
-                        let loc = value.location
-                        if let hit = topmostStampHit(at: loc, layerOrder: layerOrder, stamps: placedStamps) {
-                            selectedStampId = hit.id
-                            showStampMagicMenu = true
-                        } else {
-                            selectedStampId = nil
-                            showStampMagicMenu = false
-                        }
-                    }
-            )
-            .background(GeometryReader { innerGeo in
-                Color.clear
-                    .onAppear {
-                        let frame = innerGeo.frame(in: .global)
-                        canvasOriginInWindow = CGPoint(x: frame.minX, y: frame.minY)
-                    }
-                    .onChange(of: innerGeo.frame(in: .global)) { _, frame in
-                        canvasOriginInWindow = CGPoint(x: frame.minX, y: frame.minY)
-                    }
-            })
-            .onAppear { canvasSize = geo.size }
-            .onChange(of: geo.size) { _, newSize in canvasSize = newSize }
     }
 
     // Extracted so the compiler can type-check WindowPinchView's many callbacks independently.
@@ -3785,7 +3490,100 @@ struct DrawScreen: View {
                         // at the top of this ZStack (a few lines above). Passing canvasColor here
                         // would add a second semi-transparent layer on top, double-stacking the color
                         // and making the eraser unable to match the correct composited background.
-                        mainDrawingCanvasView(geo: geo)
+                        DrawingCanvas(
+                            lines: activeLayerLinesBinding,
+                            currentColor: currentColor,
+                            lineWidth: $lineWidth,
+                            isEraser: $isEraser,
+                            canvasColor: .clear,
+                            backgroundImage: canvasBackgroundImage,
+                            backgroundOffset: backgroundOffset,
+                            penType: currentPenType,
+                            colorB: dualToneColorB,
+                            currentStamps: placedStamps,
+                            isLongPressing: isLongPressing,
+                            stampResizeTargetId: stampResizeTargetId,
+                            isStampSelected: selectedStampId != nil,
+                            drawingEnabled: !isStampMode,
+                            onBeforeDraw: {
+                                if showLegacyImportBanner { withAnimation { showLegacyImportBanner = false } }
+                                pushUndoSnapshot()
+                                scheduleAutoSave()
+                                // Create a new layer when:
+                                // 1. No drawing layers exist (lazy first-stroke creation), or
+                                // 2. Top of stack is a stamp and no drawing layer is selected / stamp is selected
+                                //    (working at the front edge), or
+                                // 3. pendingInsertAboveStampId is set — user selected a stamp whose immediate
+                                //    neighbor above is another stamp; new layer inserts between them.
+                                // 4. Pen↔eraser switch — eraser and draw strokes live in separate layers so
+                                //    the video timeline can distinguish scenes from transitions.
+                                let topIsStamp = layerOrder.last.map { if case .stamp = $0 { return true } else { return false } } ?? false
+                                let switchingToEraser = isEraser && !lastStrokeWasEraser && !drawingLayers.isEmpty
+                                let switchingToPen    = !isEraser && lastStrokeWasEraser && !drawingLayers.isEmpty
+                                let needsNewLayer = drawingLayers.isEmpty ||
+                                    (topIsStamp && !explicitLayerSelection) ||
+                                    pendingInsertAboveStampId != nil ||
+                                    switchingToEraser || switchingToPen
+                                if needsNewLayer {
+                                    // Auto-insert a 3s chapter break at draw→erase transitions so the
+                                    // finished scene holds before the wipe. No break on erase→draw.
+                                    if switchingToEraser {
+                                        chapterBreaks.append(ChapterBreak(timestamp: Date(), holdDuration: 3.0))
+                                    }
+                                    let newLayer = DrawingLayer()
+                                    drawingLayers.append(newLayer)
+                                    if let insertAbove = pendingInsertAboveStampId,
+                                       let insertIdx = layerOrder.firstIndex(where: { $0.id == insertAbove }) {
+                                        // Insert just above the target stamp, not at the top.
+                                        layerOrder.insert(.drawing(newLayer.id), at: insertIdx + 1)
+                                    } else {
+                                        layerOrder.append(.drawing(newLayer.id))
+                                    }
+                                    pendingInsertAboveStampId = nil
+                                    userSelectedLayerId = newLayer.id
+                                    explicitLayerSelection = true   // prevent another new layer on the very next stroke
+                                    selectedStampId = nil
+                                    showStampMagicMenu = false
+                                }
+                                lastStrokeWasEraser = isEraser
+                            },
+                            onEraserCommitted: { _ in },
+                            onStampModeDragOnEmpty: { startPoint in
+                                // Draw on empty canvas even in stamp mode — don't auto-switch modes.
+                                // The only way to switch to pen mode is the pen button.
+                                // Returns true to start drawing immediately without waiting for re-render.
+                                let hit = topmostStampHit(at: startPoint, layerOrder: layerOrder, stamps: placedStamps)
+                                return hit == nil   // draw if empty canvas, do nothing if over a stamp
+                            },
+                            currentLine: $currentLine
+                        )
+                            .contentShape(Rectangle())
+                            .allowsHitTesting(!isLongPressing)
+                            .simultaneousGesture(
+                                SpatialTapGesture()
+                                    .onEnded { value in
+                                        let loc = value.location
+                                        if let hit = topmostStampHit(at: loc, layerOrder: layerOrder, stamps: placedStamps) {
+                                            selectedStampId = hit.id
+                                            showStampMagicMenu = true
+                                        } else {
+                                            selectedStampId = nil
+                                            showStampMagicMenu = false
+                                        }
+                                    }
+                            )
+                            .background(GeometryReader { geo in
+                                Color.clear
+                                    .onAppear {
+                                        let frame = geo.frame(in: .global)
+                                        canvasOriginInWindow = CGPoint(x: frame.minX, y: frame.minY)
+                                    }
+                                    .onChange(of: geo.frame(in: .global)) { _, frame in
+                                        canvasOriginInWindow = CGPoint(x: frame.minX, y: frame.minY)
+                                    }
+                            })
+                            .onAppear { canvasSize = geo.size }
+                            .onChange(of: geo.size) { _, newSize in canvasSize = newSize }
 
                         // Render all layers in z-order: drawings and stamps fully interleaved
                         ForEach(layerOrder) { entry in
@@ -3821,7 +3619,6 @@ struct DrawScreen: View {
                     }
                     .cornerRadius(12)
                     .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.gray.opacity(0.25), lineWidth: 1))
-                    .overlay(alignment: .top) { debugPressureOverlay }
                     .padding(.horizontal, 16)
                     .padding(.top, 12)
 
@@ -3850,45 +3647,39 @@ struct DrawScreen: View {
                                 isEraser = true
                             }
 
-                            ScrollViewReader { colorRowProxy in
-                                ScrollView(.horizontal, showsIndicators: false) {
-                                    HStack(spacing: 10) {
-                                        // + opens system ColorPicker
-                                        Button {
-                                            penPickerColor = currentColor
-                                            // Force false→true even if stuck true (stale-picker
-                                            // state from cancelled-swipe + X-tap sequence) so
-                                            // updateUIView fires and the stale guard in
-                                            // _ColorPickerPresenter clears the stuck state.
-                                            showPenColorPicker = false
-                                            DispatchQueue.main.async { showPenColorPicker = true }
-                                        } label: {
-                                            ZStack {
-                                                Circle().fill(Color(UIColor.secondarySystemBackground))
-                                                    .frame(width: 30, height: 30)
-                                                Image(systemName: "plus.circle.fill")
-                                                    .font(.system(size: 22))
-                                                    .foregroundColor(.blue)
-                                            }
-                                        }
-                                        .id(colorRowStartID)
-                                        .colorPickerSheet(isPresented: $showPenColorPicker, color: $penPickerColor) { picked in
-                                            recentColors = RecentColors.add(picked)
-                                            selectedColorIndex = 0
-                                            if isEraser { swap(&lineWidth, &otherWidth) }
-                                            isEraser = false
-                                        }
-                                        ForEach(recentColors, id: \.self) { color in
-                                            colorCircle(color)
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 10) {
+                                    // + opens system ColorPicker
+                                    Button {
+                                        penPickerColor = currentColor
+                                        // Force false→true even if stuck true (stale-picker
+                                        // state from cancelled-swipe + X-tap sequence) so
+                                        // updateUIView fires and the stale guard in
+                                        // _ColorPickerPresenter clears the stuck state.
+                                        showPenColorPicker = false
+                                        DispatchQueue.main.async { showPenColorPicker = true }
+                                    } label: {
+                                        ZStack {
+                                            Circle().fill(Color(UIColor.secondarySystemBackground))
+                                                .frame(width: 30, height: 30)
+                                            Image(systemName: "plus.circle.fill")
+                                                .font(.system(size: 22))
+                                                .foregroundColor(.blue)
                                         }
                                     }
-                                    .padding(.leading, 9)
-                                    .padding(.trailing, 16)
-                                    .padding(.vertical, 8)
+                                    .colorPickerSheet(isPresented: $showPenColorPicker, color: $penPickerColor) { picked in
+                                        recentColors = RecentColors.add(picked)
+                                        selectedColorIndex = 0
+                                        if isEraser { swap(&lineWidth, &otherWidth) }
+                                        isEraser = false
+                                    }
+                                    ForEach(recentColors, id: \.self) { color in
+                                        colorCircle(color)
+                                    }
                                 }
-                                .onChange(of: colorRowScrollTrigger) { _, _ in
-                                    withAnimation { colorRowProxy.scrollTo(colorRowStartID, anchor: .leading) }
-                                }
+                                .padding(.leading, 9)
+                                .padding(.trailing, 16)
+                                .padding(.vertical, 8)
                             }
                             .padding(.trailing, 4)
                         }
@@ -4724,21 +4515,12 @@ struct WindowPinchView: UIViewRepresentable {
 
         // Pencil touches go straight to DrawingCanvas — never intercepted at window level.
         // Window-level recognizers (pinch, rotation, pan, long press) are finger-only.
-        // Exception: stampPanRecognizer. In stamp mode there's nothing for the pencil to
-        // draw (drawingEnabled is already false there), so a pencil touch on an unselected
-        // stamp should instant-drag it exactly like a finger does instead of doing nothing
-        // until the stamp is selected first. gestureRecognizerShouldBegin still independently
-        // gates this on parent.isStampMode + an actual stamp hit, so pencil drawing in draw
-        // mode is completely unaffected — this only ever lets the recognizer through when it
-        // was already going to be a no-op for anything else.
         // For the tap recognizer: also reject taps that land on interactive UIKit/SwiftUI
         // elements (picker cells, buttons, scroll views) so they never reach handleWindowTap.
         // This prevents picker taps from deselecting a just-placed stamp — no SwiftUI state
         // or render-cycle timing involved; shouldReceive fires before the gesture begins.
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-            if touch.type == .pencil || touch.type == .stylus {
-                guard gestureRecognizer === stampPanRecognizer else { return false }
-            }
+            guard touch.type != .pencil && touch.type != .stylus else { return false }
             // Block all window-level gestures when a sheet or picker is open over the canvas.
             if parent.blockGestures { return false }
             var view: UIView? = touch.view

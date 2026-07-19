@@ -286,6 +286,12 @@ struct DoodleStampCreatorView: View {
         case "dotted":     return .dotted
         case "calligraphy": return .calligraphy
         case "confetti":   return .confetti
+        case "airbrush":   return .airbrush
+        case "dashed":     return .dashed
+        case "hearts":     return .hearts
+        case "chevron":    return .sparkle  // legacy persisted last-pen-type name
+        case "sparkle":    return .sparkle
+        case "splatter":   return .splatter
         case "dualtone":   return .dualTone(style)
         default:           return .pencil
         }
@@ -294,6 +300,10 @@ struct DoodleStampCreatorView: View {
     @State private var showPenStudio: Bool = false
     @AppStorage("doodleStampColorIndex") private var selectedColorIndex: Int = 0
     @State private var recentColors: [Color] = RecentColors.load()
+    // Bumped whenever recentColors reorders due to actual use (onStrokeCommitted) so the
+    // color ScrollView can auto-scroll back to the start — matches DrawScreen's own trigger.
+    @State private var colorRowScrollTrigger: Int = 0
+    private let colorRowStartID = "doodleColorRowStart"
     @State private var showDoodleColorPicker = false
     @State private var doodlePickerColor: Color = .black
 
@@ -346,6 +356,8 @@ struct DoodleStampCreatorView: View {
         let isSelected = !isEraser && color.isApproximatelyEqual(to: currentColor)
         ColorSwatchView(color: color, size: 30, isSelected: isSelected, selectionColor: .blue)
             .onTapGesture {
+                // No reorder on select — matches DrawScreen's colorCircle. Reorders only when
+                // actually used to draw (onStrokeCommitted).
                 if let i = recentColors.firstIndex(where: { $0.isApproximatelyEqual(to: color) }) {
                     selectedColorIndex = i
                 }
@@ -623,6 +635,25 @@ struct DoodleStampCreatorView: View {
             isStampSelected: selectedStampId != nil,
             renderLines: true,
             onBeforeDraw: { undoStack.append(makeDoodleSnapshot()); redoStack = [] },
+            onStrokeCommitted: { line in
+                // Reorder recent colors only on actual canvas use, not on mere selection in the
+                // picker — matches DrawScreen's DrawingCanvas call site.
+                // Add colorB FIRST, then the primary color SECOND — see DrawScreen's call site
+                // for the full explanation. Adding line.color last guarantees it's the one that
+                // ends up at index 0, not colorB.
+                if line.penType.isDualTone {
+                    recentColors = RecentColors.add(line.colorB)
+                }
+                recentColors = RecentColors.add(line.color)
+                // Keep the "current color" indicator pointing at whichever color was actually
+                // just drawn with — same fix as DrawScreen's call site. Re-locate it explicitly
+                // (should now always resolve to 0) rather than assuming a fixed value.
+                if let i = recentColors.firstIndex(where: { $0.isApproximatelyEqual(to: line.color) }) {
+                    selectedColorIndex = i
+                }
+                // Row follows the reorder — see colorRowScrollTrigger's declaration comment.
+                colorRowScrollTrigger += 1
+            },
             currentLine: $doodleCurrentLine
         )
         .contentShape(Rectangle())
@@ -1005,29 +1036,35 @@ struct DoodleStampCreatorView: View {
                                 }
                             }
 
-                            ScrollView(.horizontal, showsIndicators: false) {
-                                HStack(spacing: 10) {
-                                    Button {
-                                        doodlePickerColor = currentColor
-                                        showDoodleColorPicker = true
-                                    } label: {
-                                        ZStack {
-                                            Circle()
-                                                .fill(Color(UIColor.secondarySystemBackground))
-                                                .frame(width: 30, height: 30)
-                                                .overlay(Circle().stroke(Color.gray.opacity(0.4), lineWidth: 1))
-                                            Image(systemName: "plus")
-                                                .font(.system(size: 14, weight: .semibold))
-                                                .foregroundColor(.primary)
+                            ScrollViewReader { colorRowProxy in
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    HStack(spacing: 10) {
+                                        Button {
+                                            doodlePickerColor = currentColor
+                                            showDoodleColorPicker = true
+                                        } label: {
+                                            ZStack {
+                                                Circle()
+                                                    .fill(Color(UIColor.secondarySystemBackground))
+                                                    .frame(width: 30, height: 30)
+                                                    .overlay(Circle().stroke(Color.gray.opacity(0.4), lineWidth: 1))
+                                                Image(systemName: "plus")
+                                                    .font(.system(size: 14, weight: .semibold))
+                                                    .foregroundColor(.primary)
+                                            }
+                                        }
+                                        .id(colorRowStartID)
+                                        ForEach(recentColors, id: \.self) { color in
+                                            colorCircle(color)
                                         }
                                     }
-                                    ForEach(recentColors, id: \.self) { color in
-                                        colorCircle(color)
-                                    }
+                                    .padding(.leading, 9)
+                                    .padding(.trailing, 16)
+                                    .padding(.vertical, 8)
                                 }
-                                .padding(.leading, 9)
-                                .padding(.trailing, 16)
-                                .padding(.vertical, 8)
+                                .onChange(of: colorRowScrollTrigger) { _, _ in
+                                    withAnimation { colorRowProxy.scrollTo(colorRowStartID, anchor: .leading) }
+                                }
                             }
                             .padding(.trailing, 4)
                         }

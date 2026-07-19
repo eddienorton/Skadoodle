@@ -40,12 +40,65 @@ struct AsyncImageFromData: View {
     }
 }
 
+/// Hidden tap-to-edit caption override — no dedicated button anywhere. Tapping
+/// the AI-generated caption text on your own doodle (private or world gallery)
+/// opens this sheet. Deliberately can't save an empty caption: the caption Text
+/// itself is the only tap surface, so clearing it would remove the one way back
+/// in to edit it again.
+struct CaptionEditSheet: View {
+    let initialText: String
+    let onSave: (String) -> Void
+    @Environment(\.dismiss) var dismiss
+    @State private var text: String
+
+    init(initialText: String, onSave: @escaping (String) -> Void) {
+        self.initialText = initialText
+        self.onSave = onSave
+        _text = State(initialValue: initialText)
+    }
+
+    private var trimmed: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    var body: some View {
+        NavigationView {
+            VStack {
+                TextEditor(text: $text)
+                    .frame(minHeight: 120)
+                    .padding(8)
+                    .background(Color(UIColor.secondarySystemBackground))
+                    .cornerRadius(10)
+                    .padding(.horizontal)
+                    .padding(.top, 16)
+                Spacer()
+            }
+            .navigationTitle("Edit Caption")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Save") {
+                        onSave(trimmed)
+                        dismiss()
+                    }
+                    .fontWeight(.bold)
+                    .disabled(trimmed.isEmpty)
+                }
+            }
+        }
+        .presentationDetents([.height(260)])
+        .presentationDragIndicator(.visible)
+    }
+}
+
 struct SnoodleDetailView: View {
     @EnvironmentObject var store: SnoodleStore
     @Environment(\.dismiss) var dismiss
 
     let entries: [SnoodleEntry]   // the navigable list (all or day subset)
     let startIndex: Int
+    @State private var editingCaptionEntry: SnoodleEntry? = nil
 
     @State private var currentIndex: Int = 0
     @State private var dragOffset: CGFloat = 0
@@ -138,6 +191,18 @@ struct SnoodleDetailView: View {
         .onAppear {
             currentIndex = min(startIndex, max(0, currentEntries.count - 1))
         }
+        .sheet(item: $editingCaptionEntry) { entry in
+            CaptionEditSheet(initialText: entry.caption) { newCaption in
+                var updated = entry
+                updated.caption = newCaption
+                store.save(updated)
+                // Keep the community copy in sync, if this doodle is posted.
+                if let worldId = entry.worldGalleryId {
+                    WorldGalleryManager.shared.updateCaption(
+                        snoodleId: worldId, keywords: entry.keywords, newCaption: newCaption)
+                }
+            }
+        }
     }
 
     func card(for entry: SnoodleEntry) -> some View {
@@ -156,6 +221,10 @@ struct SnoodleDetailView: View {
                         .foregroundColor(.white)
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 32)
+                        // Hidden tap-to-edit — private gallery entries are always
+                        // "yours" (no per-user ownership model exists yet), so no
+                        // ownership check is needed here, unlike the world gallery.
+                        .onTapGesture { editingCaptionEntry = entry }
                 }
                 Text(dateFmt.string(from: entry.timestamp))
                     .font(.system(size: 13))
@@ -323,6 +392,9 @@ struct GalleryTab: View {
     @State private var selectedArtistId: String? = nil
 
     func applyWorldQuery() {
+        // New feed/filter — stale tile-visibility bookkeeping from the old one shouldn't
+        // drive the scroll indicator until the new grid's own tiles report in.
+        visibleWorldIndices.removeAll()
         if let artistId = selectedArtistId {
             worldManager.setQuery(.artist(artistId))
         } else if feedMode == .following {
@@ -341,6 +413,108 @@ struct GalleryTab: View {
     private let dateFmt: DateFormatter = {
         let df = DateFormatter(); df.dateFormat = "MMM d"; return df
     }()
+
+    // MARK: - Scroll position indicator (World Gallery grid)
+    // Floating "date + #N of total" pill that appears while actively scrolling the
+    // community grid and fades out shortly after scrolling stops — same idea as Photos'
+    // floating date header, but with a position count too since the collection can run
+    // into the hundreds and "where am I" isn't obvious from a date alone.
+    @State private var visibleWorldIndices: Set<Int> = []
+    @State private var showScrollIndicator: Bool = false
+    @State private var scrollIndicatorHideTask: Task<Void, Never>? = nil
+    private let scrollIndicatorDateFmt: DateFormatter = {
+        let df = DateFormatter(); df.dateFormat = "MMM d, yyyy"; return df
+    }()
+
+    /// Topmost currently-visible tile in the grid, tracked via onAppear/onDisappear per
+    /// tile (cheap, matches the existing pagination-trigger convention on the same tiles)
+    /// rather than raw scroll-offset math, which would need to account for header/strip
+    /// heights above the grid and isn't worth the complexity for an approximate indicator.
+    private var scrollIndicatorInfo: (dateText: String, position: Int, total: Int)? {
+        guard let idx = visibleWorldIndices.min(), displayedWorldEntries.indices.contains(idx) else { return nil }
+        let entry = displayedWorldEntries[idx]
+        let total = worldManager.totalCount > 0 ? worldManager.totalCount : displayedWorldEntries.count
+        return (scrollIndicatorDateFmt.string(from: entry.timestamp), idx + 1, total)
+    }
+
+    @ViewBuilder private var scrollPositionIndicator: some View {
+        if let info = scrollIndicatorInfo {
+            VStack(spacing: 2) {
+                Text(info.dateText)
+                    .font(.system(size: 15, weight: .semibold))
+                Text("#\(info.position) of \(info.total)")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(.thinMaterial, in: Capsule())
+            .shadow(color: .black.opacity(0.15), radius: 4, y: 2)
+            .opacity(showScrollIndicator ? 1 : 0)
+            .animation(.easeInOut(duration: 0.2), value: showScrollIndicator)
+            .padding(.top, 8)
+            .allowsHitTesting(false)
+        }
+    }
+
+    /// Called on every scroll offset change — shows the indicator and (re)schedules its
+    /// fade-out, so it stays visible while actively scrolling and disappears ~0.9s after
+    /// the user stops, rather than lingering or needing a manual dismiss.
+    private func pokeScrollIndicator() {
+        showScrollIndicator = true
+        scrollIndicatorHideTask?.cancel()
+        scrollIndicatorHideTask = Task {
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run { showScrollIndicator = false }
+        }
+    }
+
+    // MARK: - Scroll position indicator (private gallery grid)
+    // Same idea and mechanism as the World Gallery one above, kept as a separate,
+    // parallel implementation rather than a shared generic helper — the two grids use
+    // different entry types (WorldSnoodle vs. SnoodleEntry) and different total-count
+    // sources (Firestore aggregation vs. just filteredEntries.count locally), so sharing
+    // would mean more indirection than the ~30 lines it'd save.
+    @State private var visiblePrivateIndices: Set<Int> = []
+    @State private var showPrivateScrollIndicator: Bool = false
+    @State private var privateScrollIndicatorHideTask: Task<Void, Never>? = nil
+
+    private var privateScrollIndicatorInfo: (dateText: String, position: Int, total: Int)? {
+        guard let idx = visiblePrivateIndices.min(), filteredEntries.indices.contains(idx) else { return nil }
+        let entry = filteredEntries[idx]
+        return (scrollIndicatorDateFmt.string(from: entry.timestamp), idx + 1, filteredEntries.count)
+    }
+
+    @ViewBuilder private var privateScrollPositionIndicator: some View {
+        if let info = privateScrollIndicatorInfo {
+            VStack(spacing: 2) {
+                Text(info.dateText)
+                    .font(.system(size: 15, weight: .semibold))
+                Text("#\(info.position) of \(info.total)")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(.thinMaterial, in: Capsule())
+            .shadow(color: .black.opacity(0.15), radius: 4, y: 2)
+            .opacity(showPrivateScrollIndicator ? 1 : 0)
+            .animation(.easeInOut(duration: 0.2), value: showPrivateScrollIndicator)
+            .padding(.top, 8)
+            .allowsHitTesting(false)
+        }
+    }
+
+    private func pokePrivateScrollIndicator() {
+        showPrivateScrollIndicator = true
+        privateScrollIndicatorHideTask?.cancel()
+        privateScrollIndicatorHideTask = Task {
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run { showPrivateScrollIndicator = false }
+        }
+    }
 
     func searchWorldPeople(_ q: String) {
         let trimmed = q.trimmingCharacters(in: .whitespaces).lowercased()
@@ -381,6 +555,7 @@ struct GalleryTab: View {
             try? await Task.sleep(nanoseconds: 400_000_000)  // 400ms debounce
             guard !Task.isCancelled else { return }
             await MainActor.run {
+                visibleWorldIndices.removeAll()
                 worldManager.setQuery(.search(trimmed))
             }
         }
@@ -506,9 +681,13 @@ struct GalleryTab: View {
                                         detailSelection = DetailSelection(entries: displayedWorldEntries, startIndex: i)
                                     })
                                     .onAppear {
+                                        visibleWorldIndices.insert(i)
                                         if i == displayedWorldEntries.count - 1 {
                                             worldManager.fetchNextPage()
                                         }
+                                    }
+                                    .onDisappear {
+                                        visibleWorldIndices.remove(i)
                                     }
 
                                 }
@@ -524,6 +703,10 @@ struct GalleryTab: View {
                         .refreshable {
                             await worldManager.refresh()
                         }
+                        .onScrollGeometryChange(for: CGFloat.self, of: { $0.contentOffset.y }) { oldValue, newValue in
+                            if oldValue != newValue { pokeScrollIndicator() }
+                        }
+                        .overlay(alignment: .top) { scrollPositionIndicator }
                     }
                 } else if store.entries.isEmpty {
                     VStack(spacing: 20) {
@@ -556,12 +739,19 @@ struct GalleryTab: View {
                                 ForEach(filteredEntries.indices, id: \.self) { i in
                                     SnoodleTile(entry: filteredEntries[i], dateFmt: dateFmt)
                                         .onTapGesture { selectedIndex = i }
+                                        .onAppear { visiblePrivateIndices.insert(i) }
+                                        .onDisappear { visiblePrivateIndices.remove(i) }
                                 }
                             }
                             .padding(12)
                         }
                     }
                     .id(privateGalleryRefreshID)
+                    .onScrollGeometryChange(for: CGFloat.self, of: { $0.contentOffset.y }) { oldValue, newValue in
+                        if oldValue != newValue { pokePrivateScrollIndicator() }
+                    }
+                    .overlay(alignment: .top) { privateScrollPositionIndicator }
+                    .onChange(of: query) { _, _ in visiblePrivateIndices.removeAll() }
                 }
             }
             .navigationTitle(showingWorld ? "Community Doodles" : "Private Doodles")
@@ -881,9 +1071,20 @@ struct WorldSnoodleTile: View {
     var onImageTap: (() -> Void)? = nil
     @State private var showLikesList = false
     @ObservedObject private var worldManager = WorldGalleryManager.shared
+    @EnvironmentObject var store: SnoodleStore
 
     var entry: WorldSnoodle {
         worldManager.entries.first(where: { $0.id == initialEntry.id }) ?? initialEntry
+    }
+
+    // A community post can be played as a timelapse only if this device still has the
+    // paired local .skadoodle file for it — the world_gallery doc itself never stores
+    // the layer/stroke data, only the flattened image. Same match strategy as caption
+    // sync and "Remove from Community" elsewhere in this file: worldGalleryId first,
+    // fall back to timestamp proximity for older entries that predate that field.
+    var matchingLocalEntry: SnoodleEntry? {
+        store.entries.first(where: { $0.worldGalleryId == entry.id })
+            ?? store.entries.first(where: { abs($0.timestamp.timeIntervalSince(entry.timestamp)) < 60 })
     }
 
     var body: some View {
@@ -895,6 +1096,11 @@ struct WorldSnoodleTile: View {
                     .cornerRadius(8)
                     .contentShape(Rectangle())
                     .onTapGesture { onImageTap?() }
+                    .overlay(alignment: .bottom) {
+                        if let local = matchingLocalEntry, local.hasSkadoodleFile {
+                            TilePlayBadge(entry: local)
+                        }
+                    }
             }
             .aspectRatio(3/4, contentMode: .fit)
             Text(entry.caption.isEmpty ? "Untitled" : entry.caption)
@@ -1057,6 +1263,7 @@ struct WorldSnoodleDetailView: View {
     @State private var dragOffset: CGFloat = 0
     @State private var loadedWorldImage: UIImage? = nil
     @State private var isZoomed = false
+    @State private var editingCaptionEntry: WorldSnoodle? = nil
     enum ActiveSheet: Identifiable {
         case comments(String)
         case authorProfile(String)
@@ -1172,6 +1379,22 @@ struct WorldSnoodleDetailView: View {
                     .presentationDragIndicator(.visible)
             }
         }
+        .sheet(item: $editingCaptionEntry) { entry in
+            CaptionEditSheet(initialText: entry.caption) { newCaption in
+                WorldGalleryManager.shared.updateCaption(
+                    snoodleId: entry.id, keywords: entry.keywords, newCaption: newCaption)
+                // Keep the private copy in sync, if one exists on this device.
+                // Same match strategy as "Remove from Community" above: worldGalleryId
+                // first, fall back to timestamp proximity.
+                let local = store.entries.first(where: { $0.worldGalleryId == entry.id })
+                    ?? store.entries.first(where: { abs($0.timestamp.timeIntervalSince(entry.timestamp)) < 60 })
+                if let local = local {
+                    var updated = local
+                    updated.caption = newCaption
+                    store.save(updated)
+                }
+            }
+        }
     }
 
     func worldCard(entry: WorldSnoodle) -> some View {
@@ -1185,6 +1408,13 @@ struct WorldSnoodleDetailView: View {
                         .foregroundColor(.white)
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 32)
+                        // Hidden tap-to-edit — only on your own doodle, mirrors the
+                        // trash-vs-report ownership check just below in this same card.
+                        .onTapGesture {
+                            if auth.userId == entry.userId {
+                                editingCaptionEntry = entry
+                            }
+                        }
                 }
                 // Author row — date left, artist pill right
                 HStack {

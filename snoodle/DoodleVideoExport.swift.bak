@@ -547,24 +547,12 @@ final class DoodleTimelapseExporter: ObservableObject {
         }
 
         // Returns true if there is any already-drawn content (layer or stamp) above layerId
-        // in document.layerOrder — the one true FINAL arrangement, not the mutable
-        // zLayerOrder. Same root cause/fix as the .stamp case's hasContentAboveInFinalOrder
-        // further down: zLayerOrder only updates when a .reorder event actually fires, seeded
-        // from whichever historical LayerOrderChange snapshot was most recently replayed — a
-        // layer created/placed between two reorders (e.g. a new drawing layer started right
-        // after a stamp was placed) frequently isn't listed in zLayerOrder yet at the moment
-        // its own strokes are drawn, so checking against it can silently drop already-placed
-        // content (like that stamp) out of the below/above split entirely — it vanishes from
-        // the video until a later reorder event happens to rebuild things correctly. Confirmed
-        // via a real report: a stamp placed right before a fresh stroke disappeared the moment
-        // drawing began, then reappeared once an actual Layers-panel reorder fired later.
-        // document.layerOrder is stable and never changes mid-export, so cross-referencing it
-        // against what's already been drawn (layerLines/doneStamps) is correct regardless of
-        // which historical reorder snapshot zLayerOrder happens to be sitting on right now.
+        // in zLayerOrder. When true, incremental compositing would place the stroke on top
+        // of that content — wrong. Fall back to rebuildComposite for correct z-order.
         func hasContentAbove(layerId: UUID) -> Bool {
-            guard let layerIdx = document.layerOrder.firstIndex(where: { $0.id == layerId }) else { return false }
+            guard let layerIdx = zLayerOrder.firstIndex(where: { $0.id == layerId }) else { return false }
             let doneIds = Set(doneStamps.map { $0.id })
-            for entry in document.layerOrder[(layerIdx + 1)...] {
+            for entry in zLayerOrder[(layerIdx + 1)...] {
                 switch entry {
                 case .drawing(let id): if layerLines[id] != nil { return true }
                 case .stamp(let id):   if doneIds.contains(id)  { return true }
@@ -606,15 +594,13 @@ final class DoodleTimelapseExporter: ObservableObject {
                     //      prevLayerImg → holeyImg; composite belowComp + holeyImg + aboveComp.
                     //      Holes in holeyImg are transparent → belowComp shows through (correct reveal).
 
-                    // Split against document.layerOrder (stable, final), not zLayerOrder —
-                    // same reasoning as hasContentAbove above.
-                    guard let layerIdxInOrder = document.layerOrder.firstIndex(where: { $0.id == layerId }),
+                    guard let layerIdxInOrder = zLayerOrder.firstIndex(where: { $0.id == layerId }),
                           let layerTmpl = document.drawingLayers.first(where: { $0.id == layerId }) else {
                         layerLines[layerId, default: []].append(line); continue
                     }
 
-                    let belowEntries = Array(document.layerOrder[0..<layerIdxInOrder])
-                    let aboveEntries = Array(document.layerOrder[(layerIdxInOrder + 1)...])
+                    let belowEntries = Array(zLayerOrder[0..<layerIdxInOrder])
+                    let aboveEntries = Array(zLayerOrder[(layerIdxInOrder + 1)...])
                     let doneIds = Set(doneStamps.map { $0.id })
 
                     func splitLayers(_ entries: [LayerEntry]) -> [DrawingLayer] {
@@ -853,102 +839,13 @@ final class DoodleTimelapseExporter: ObservableObject {
                     bgOpacity: 1.0, bgBlur: 0.0, bgBrightness: 0.0, bgSaturation: 1.0
                 )
 
-                // Fast path (the overwhelmingly common case — a newly placed stamp is
-                // topmost, nothing already-visible sits above it): fade straight onto
-                // runningComposite, exactly as before this fix.
-                //
-                // Slow path (the stamp is destined to sit BEHIND already-visible
-                // content): the fast path is wrong here — it just paints on top of
-                // whatever's already composited regardless of the stamp's real
-                // position. Same below/above split technique the .stroke case above
-                // already uses for strokes on a non-topmost layer: render everything
-                // below the stamp's position (opaque) and everything above it
-                // (transparent) once, then sandwich the fading stamp between them.
-                //
-                // Deliberately checked against document.layerOrder (the one true FINAL
-                // arrangement) instead of the mutable zLayerOrder used elsewhere in this
-                // function. Confirmed via diagnostic logging during development: zLayerOrder
-                // only updates when a .reorder event actually fires, and it's initialized
-                // from whichever historical LayerOrderChange snapshot was recorded — most
-                // stamps get created BETWEEN two reorder events (or before the one that
-                // finally repositions everything), so at the moment they're placed,
-                // zLayerOrder frequently doesn't list them at all yet, and hasContentAbove
-                // falls back to the fast path almost every time even when the stamp's real
-                // destination clearly already has content drawn above it. document.layerOrder
-                // is stable and never changes mid-export, so cross-referencing it against
-                // what's already been drawn (layerLines/doneStamps) correctly answers "will
-                // there be already-drawn content above this stamp" regardless of which
-                // historical reorder snapshot zLayerOrder happens to be sitting on right now.
-                func hasContentAboveInFinalOrder(id: UUID) -> Bool {
-                    guard let idx = document.layerOrder.firstIndex(where: { $0.id == id }) else { return false }
-                    let doneIds = Set(doneStamps.map { $0.id })
-                    for entry in document.layerOrder[(idx + 1)...] {
-                        switch entry {
-                        case .drawing(let did): if layerLines[did] != nil { return true }
-                        case .stamp(let sid):   if doneIds.contains(sid)  { return true }
-                        }
-                    }
-                    return false
-                }
-                let stampNeedsFull = hasContentAboveInFinalOrder(id: stamp.id)
-
-                var belowComp: UIImage? = nil
-                var aboveComp: UIImage? = nil
-                if stampNeedsFull, let stampIdx = document.layerOrder.firstIndex(where: { $0.id == stamp.id }) {
-                    let belowEntries = Array(document.layerOrder[0..<stampIdx])
-                    let aboveEntries = Array(document.layerOrder[(stampIdx + 1)...])
-                    let doneIds = Set(doneStamps.map { $0.id })
-                    func splitLayers(_ entries: [LayerEntry]) -> [DrawingLayer] {
-                        entries.compactMap { e -> DrawingLayer? in
-                            guard case .drawing(let id) = e,
-                                  let lines = layerLines[id],
-                                  let tmpl  = document.drawingLayers.first(where: { $0.id == id })
-                            else { return nil }
-                            return DrawingLayer(id: id, lines: lines, opacity: tmpl.opacity, createdAt: tmpl.createdAt)
-                        }
-                    }
-                    func splitStamps(_ entries: [LayerEntry]) -> [PlacedStamp] {
-                        doneStamps.filter { s in entries.contains(where: { $0.id == s.id }) }
-                    }
-                    func splitOrder(_ entries: [LayerEntry]) -> [LayerEntry] {
-                        entries.filter { e in
-                            switch e {
-                            case .drawing(let id): return layerLines[id] != nil
-                            case .stamp(let id):   return doneIds.contains(id)
-                            }
-                        }
-                    }
-                    belowComp = renderCanvasWithStamps(
-                        drawingLayers: splitLayers(belowEntries), stamps: splitStamps(belowEntries),
-                        layerOrder: splitOrder(belowEntries), size: pointSize,
-                        canvasColor: opaqueCanvasColor, backgroundImage: bgImage, backgroundOffset: bgOffset,
-                        bgOpacity: document.bgOpacity, bgBlur: document.bgBlur,
-                        bgBrightness: document.bgBrightness, bgSaturation: document.bgSaturation
-                    )
-                    aboveComp = renderCanvasWithStamps(
-                        drawingLayers: splitLayers(aboveEntries), stamps: splitStamps(aboveEntries),
-                        layerOrder: splitOrder(aboveEntries), size: pointSize,
-                        canvasColor: .clear, backgroundImage: nil, backgroundOffset: .zero,
-                        bgOpacity: 1.0, bgBlur: 0.0, bgBrightness: 0.0, bgSaturation: 1.0
-                    )
-                }
-
                 // Fade in over fadeSteps frames by compositing at increasing alpha
                 for step in 1...fadeSteps {
                     if cancelled { break }
                     let stepAlpha = CGFloat(step) / CGFloat(fadeSteps)
-                    let composited: UIImage
-                    if let belowComp, let aboveComp {
-                        composited = UIGraphicsImageRenderer(size: pointSize, format: imgFormat).image { _ in
-                            belowComp.draw(at: .zero)
-                            stampDelta.draw(at: .zero, blendMode: .normal, alpha: stepAlpha)
-                            aboveComp.draw(at: .zero)
-                        }
-                    } else {
-                        composited = UIGraphicsImageRenderer(size: pointSize, format: imgFormat).image { _ in
-                            runningComposite.draw(at: .zero)
-                            stampDelta.draw(at: .zero, blendMode: .normal, alpha: stepAlpha)
-                        }
+                    let composited = UIGraphicsImageRenderer(size: pointSize, format: imgFormat).image { _ in
+                        runningComposite.draw(at: .zero)
+                        stampDelta.draw(at: .zero, blendMode: .normal, alpha: stepAlpha)
                     }
                     guard let buf = pixelBuffer(from: composited, pixelSize: pixelSize, pool: pool) else { continue }
                     holdBuffer = buf
@@ -956,30 +853,12 @@ final class DoodleTimelapseExporter: ObservableObject {
                     frameIndex += 1
                 }
 
-                // Bake the stamp into runningComposite so it's correct going forward, not
-                // just during the fade animation. Fast path: paint on top, same as before.
-                // Slow path: composite from the SAME belowComp/aboveComp already built above
-                // (both derived from document.layerOrder) — deliberately NOT rebuildComposite(),
-                // which relies on the mutable zLayerOrder. That would be wrong here for the
-                // same reason explained above: zLayerOrder frequently doesn't list this stamp
-                // yet at this point in the timeline, so filtering through it would silently
-                // drop the stamp out of the composite entirely rather than just mis-position
-                // it — a worse bug (the stamp vanishing until a later reorder event happens to
-                // reintroduce it) than the one this fix exists to solve.
-                if stampNeedsFull, let belowComp, let aboveComp {
-                    doneStamps.append(stamp)
-                    runningComposite = UIGraphicsImageRenderer(size: pointSize, format: imgFormat).image { _ in
-                        belowComp.draw(at: .zero)
-                        stampDelta.draw(at: .zero, blendMode: .normal, alpha: 1.0)
-                        aboveComp.draw(at: .zero)
-                    }
-                } else {
-                    runningComposite = UIGraphicsImageRenderer(size: pointSize, format: imgFormat).image { _ in
-                        runningComposite.draw(at: .zero)
-                        stampDelta.draw(at: .zero, blendMode: .normal, alpha: 1.0)
-                    }
-                    doneStamps.append(stamp)
+                // Bake stamp into runningComposite at full authored opacity
+                runningComposite = UIGraphicsImageRenderer(size: pointSize, format: imgFormat).image { _ in
+                    runningComposite.draw(at: .zero)
+                    stampDelta.draw(at: .zero, blendMode: .normal, alpha: 1.0)
                 }
+                doneStamps.append(stamp)
 
             case .chapter(let cb):
                 // Hold on current composite for the chapter break duration — reuse same pixel buffer

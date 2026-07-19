@@ -36,6 +36,11 @@ private enum TimelineItem: Identifiable {
 struct VideoTimelineView: View {
     let document: SkadoodleDocument
     @Binding var chapterBreaks: [ChapterBreak]
+    // 3.1+: target length (seconds) of the content portion (draw reveal + pauses + stamp
+    // fades). nil = legacy fixed ~10s draw reveal. See computeContentDurationBudget in
+    // DoodleVideoExport.swift for the one formula shared by this live preview and the
+    // actual export, so the number shown here always matches what you get.
+    @Binding var targetContentDurationSeconds: Double?
     let thumbnails: [UUID: UIImage]
     let canvasSize: CGSize
     @Environment(\.dismiss) private var dismiss
@@ -45,10 +50,33 @@ struct VideoTimelineView: View {
     @State private var exportedURL: URL? = nil
     @State private var showPlayer = false
 
+    /// Total drawn points across all layers — the real ceiling on how long a point-by-point
+    /// reveal can honestly stretch (see computeContentDurationBudget's totalPoints doc comment).
+    private var totalPoints: Int {
+        document.drawingLayers.flatMap { $0.lines }.reduce(0) { $0 + $1.points.count }
+    }
+
+    /// Resolves the current target (or the legacy default if none is set) against the
+    /// live chapter breaks and stamp count — recomputed on every access so it always
+    /// reflects the latest pauses, exactly what the real export will produce.
+    private var durationBudget: ContentDurationBudget {
+        computeContentDurationBudget(
+            targetSeconds: targetContentDurationSeconds,
+            chapterBreaks: chapterBreaks,
+            stampCount: document.placedStamps.count,
+            totalPoints: totalPoints
+        )
+    }
+
+    private func formatSeconds(_ s: Double) -> String {
+        s == s.rounded() ? "\(Int(s))s" : String(format: "%.1fs", s)
+    }
+
     /// Document with the latest chapter breaks (which may have been edited in this view).
     private var exportDocument: SkadoodleDocument {
         var d = document
         d.chapterBreaks = chapterBreaks
+        d.targetContentDurationSeconds = targetContentDurationSeconds
         return d
     }
 
@@ -80,6 +108,83 @@ struct VideoTimelineView: View {
         return false
     }
 
+    // MARK: - Duration control
+
+    // Preset target lengths, per direct feedback that a slider (and an on/off toggle framing
+    // "no length" as a state, when every video has *some* length) both overstate the decision —
+    // this is a pick-one row, same interaction as the chapter-break duration presets below.
+    //
+    // No "Default" chip — tried that (a chip that set targetContentDurationSeconds = nil,
+    // the old fixed-~10s-draw legacy behavior) and dropped it per direct feedback: "i think i
+    // understand but the user wont [understand what Default means]." nil is still a fully
+    // valid value structurally (old .skadoodle files can decode it, computeContentDurationBudget
+    // still has its nil branch), it's just never something this screen sets on purpose anymore —
+    // every numbered chip sets a real, concrete target. See the .onAppear below and the
+    // targetContentDurationSeconds default value in DrawScreen.swift for how a stray nil
+    // (an old file opened for re-edit) gets upgraded the moment it would matter.
+    private let durationPresets: [Double] = [10, 20, 30, 45, 60, 90]
+
+    @ViewBuilder
+    private var durationSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Video Length")
+                .font(.system(size: 14, weight: .medium))
+
+            HStack(spacing: 8) {
+                ForEach(durationPresets, id: \.self) { d in
+                    durationChip(label: "\(Int(d))s", isSelected: targetContentDurationSeconds == d) {
+                        targetContentDurationSeconds = d
+                    }
+                }
+            }
+
+            // Live breakdown always shown — every choice here is a real length.
+            let budget = durationBudget
+            HStack(spacing: 4) {
+                Text("Pauses: \(formatSeconds(budget.pauseSeconds))")
+                Text("+")
+                Text("Draw: \(formatSeconds(budget.displayDrawSeconds))")
+                Text("=")
+                Text("Total: \(formatSeconds(budget.resolvedTotalSeconds))")
+                    .fontWeight(.semibold)
+            }
+            .font(.system(size: 12))
+            .foregroundColor(.secondary)
+
+            if let target = targetContentDurationSeconds, budget.wasBumped {
+                Text("Your pauses need more room than \(formatSeconds(target)) — length increased to \(formatSeconds(budget.resolvedTotalSeconds)) to fit them.")
+                    .font(.system(size: 11))
+                    .foregroundColor(.orange)
+            }
+
+            if let target = targetContentDurationSeconds, budget.wasCapped {
+                Text("Not enough drawing detail to fill \(formatSeconds(target)) — reveal will only take \(formatSeconds(budget.resolvedTotalSeconds)). Draw more, or add a chapter pause to reach your target.")
+                    .font(.system(size: 11))
+                    .foregroundColor(.orange)
+            }
+
+            Text("Doesn't include the finishing hold or the branded ending — those always play after, same as a movie's runtime not counting the credits.")
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+        }
+        .padding(.horizontal, 20)
+        .padding(.bottom, 12)
+    }
+
+    @ViewBuilder
+    private func durationChip(label: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(label)
+                .font(.system(size: 13, weight: .medium))
+                .padding(.horizontal, 12)
+                .frame(height: 34)
+                .background(isSelected ? Color.blue : Color(white: 0.93))
+                .foregroundColor(isSelected ? .white : .primary)
+                .clipShape(RoundedRectangle(cornerRadius: 9))
+        }
+        .buttonStyle(.plain)
+    }
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
@@ -89,7 +194,9 @@ struct VideoTimelineView: View {
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 20)
                     .padding(.top, 12)
-                    .padding(.bottom, 16)
+                    .padding(.bottom, 12)
+
+                durationSection
 
                 Divider()
 
@@ -159,6 +266,9 @@ struct VideoTimelineView: View {
             }
             .navigationTitle("Video Timeline")
             .navigationBarTitleDisplayMode(.inline)
+            .onAppear {
+                if targetContentDurationSeconds == nil { targetContentDurationSeconds = 20 }
+            }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     if exporter.isExporting {

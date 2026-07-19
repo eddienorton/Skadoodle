@@ -22,7 +22,6 @@ struct PreProcessedSegmentation: Identifiable {
     let objects: [SegmentedObject]
 }
 
-
 struct SubmitButton: View {
     let entry: SnoodleEntry
     @EnvironmentObject var store: SnoodleStore
@@ -875,12 +874,28 @@ struct StampToolButton: View {
             guard !items.isEmpty else { return }
             Task {
                 await MainActor.run { isLoadingPhotos = true }
-                var loaded: [UIImage] = []
-                for item in items {
-                    if let data = try? await item.loadTransferable(type: Data.self),
-                       let img = UIImage(data: data) {
-                        loaded.append(img)
+                // Load every item concurrently rather than one at a time — with the
+                // sequential version, each stuck/iCloud-stalled photo ate its own 15s
+                // timeout back-to-back (3 bad photos = 45+ seconds). Running them in
+                // parallel bounds the whole batch to ~15s no matter how many are stuck,
+                // since every timeout clock starts at the same moment. Index-tagged so
+                // results can be reassembled in original selection order even though
+                // tasks complete in whatever order they finish.
+                let loaded: [UIImage] = await withTaskGroup(of: (Int, UIImage?).self) { group in
+                    for (idx, item) in items.enumerated() {
+                        group.addTask {
+                            if let data = await Self.loadTransferableWithTimeout(item, seconds: 15),
+                               let img = UIImage(data: data) {
+                                return (idx, img)
+                            }
+                            return (idx, nil)
+                        }
                     }
+                    var byIndex: [Int: UIImage] = [:]
+                    for await (idx, img) in group {
+                        if let img { byIndex[idx] = img }
+                    }
+                    return items.indices.compactMap { byIndex[$0] }
                 }
                 await MainActor.run {
                     isLoadingPhotos = false
@@ -951,6 +966,28 @@ struct StampToolButton: View {
             Button("Cancel", role: .cancel) {
                 pendingPhotos = []
             }
+        }
+    }
+
+    /// Races `item.loadTransferable(type: Data.self)` against a plain timer. Needed because
+    /// that call has no built-in timeout — if the picked asset is iCloud-only and the
+    /// download stalls (bad network, etc.), it can hang forever with no thrown error, which
+    /// would otherwise leave a multi-photo import's "Loading photos…" spinner stuck
+    /// permanently on just one bad photo out of the batch. Whichever finishes first wins;
+    /// the loser is cancelled. A genuine load failure and a timeout both surface as nil here,
+    /// which the caller already treats identically (skip this photo, move to the next).
+    static func loadTransferableWithTimeout(_ item: PhotosPickerItem, seconds: Double) async -> Data? {
+        await withTaskGroup(of: Data?.self) { group in
+            group.addTask {
+                (try? await item.loadTransferable(type: Data.self)) ?? nil
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
         }
     }
 
@@ -1791,6 +1828,8 @@ struct TextStampComposer: View {
                                 }
                                 ForEach(recentColors, id: \.self) { color in
                                     Button {
+                                        // No reorder on select — reorders when the stamp is
+                                        // actually placed (see the Place button action below).
                                         selectedTextColor = color
                                     } label: {
                                         ColorSwatchView(color: color, size: 32,
@@ -1843,7 +1882,10 @@ struct TextStampComposer: View {
                                     recentColors = RecentColors.add(picked)
                                 }
                                 ForEach(recentColors, id: \.self) { color in
-                                    Button { selectedTextBgColor = color } label: {
+                                    Button {
+                                        // No reorder on select — reorders on actual placement.
+                                        selectedTextBgColor = color
+                                    } label: {
                                         ColorSwatchView(color: color, size: 32,
                                                         isSelected: selectedTextBgColor.isApproximatelyEqual(to: color),
                                                         selectionColor: .purple)
@@ -1885,7 +1927,10 @@ struct TextStampComposer: View {
                                         recentColors = RecentColors.add(picked)
                                     }
                                     ForEach(recentColors, id: \.self) { color in
-                                        Button { shadowColor = color } label: {
+                                        Button {
+                                            // No reorder on select — reorders on actual placement.
+                                            shadowColor = color
+                                        } label: {
                                             ColorSwatchView(color: color, size: 32,
                                                             isSelected: shadowColor.isApproximatelyEqual(to: color),
                                                             selectionColor: .gray)
@@ -1924,6 +1969,16 @@ struct TextStampComposer: View {
         .safeAreaInset(edge: .bottom) {
             // Place button — always visible above keyboard
             Button {
+                // Reorder recent colors only now — the stamp is actually being placed on the
+                // canvas, not just previewed while composing. Matches the pen's onStrokeCommitted
+                // model: selection alone never reorders, actual use does.
+                recentColors = RecentColors.add(selectedTextColor)
+                if selectedTextBgColor != .clear {
+                    recentColors = RecentColors.add(selectedTextBgColor)
+                }
+                if shadowEnabled {
+                    recentColors = RecentColors.add(shadowColor)
+                }
                 onPlace(textInput, selectedFontId, selectedFontStyle, selectedAlignment,
                         selectedTextColor, selectedTextBgColor,
                         shadowEnabled, shadowColor, shadowBlur, shadowOffsetX, shadowOffsetY)

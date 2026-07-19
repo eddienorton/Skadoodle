@@ -379,6 +379,7 @@ class UserProfileManager: ObservableObject {
                     "layoutStyle": "grid",
                     "isPublic": true,
                     "links": [],
+                    "joinedAt": Timestamp(date: Date()),
                     "updatedAt": Timestamp(date: Date())
                 ]
                 Firestore.firestore().collection("users").document(userId).setData(defaultData) { _ in
@@ -456,7 +457,7 @@ extension Array {
 
 struct WorldSnoodle: Identifiable {
     let id: String
-    let caption: String
+    var caption: String
     let keywords: [String]
     let timestamp: Date
     let userId: String
@@ -695,6 +696,13 @@ class WorldGalleryManager: ObservableObject {
     private var lastDocumentSnapshot: QueryDocumentSnapshot? = nil
     private var listenerRegistration: ListenerRegistration? = nil
     private let pageSize = 20
+    // True once a raw Firestore page comes back shorter than pageSize (the real end of
+    // the collection). Deliberately NOT derived from entries.count % pageSize == 0 —
+    // that was the old check, and it silently breaks forever the moment even one doc in
+    // a page fails to parse (parseDocuments drops malformed docs via compactMap), since
+    // a locally-short entries array then never divides evenly by pageSize again even
+    // though Firestore's own cursor is still valid and more docs exist server-side.
+    private var reachedEnd: Bool = false
 
     var isFetchStale: Bool {
         guard let lastFetch else { return true }
@@ -721,6 +729,7 @@ class WorldGalleryManager: ObservableObject {
         currentQuery = query
         entries = []
         lastDocumentSnapshot = nil
+        reachedEnd = false
         switch query {
         case .everyone:
             simpleFetch()
@@ -737,6 +746,7 @@ class WorldGalleryManager: ObservableObject {
         await withCheckedContinuation { continuation in
             stopListening()
             isLoading = false  // reset in case stuck
+            reachedEnd = false
             db.collection(collection)
                 .order(by: "timestamp", descending: true)
                 .limit(to: pageSize)
@@ -745,6 +755,7 @@ class WorldGalleryManager: ObservableObject {
                     DispatchQueue.main.async {
                         self.isLoading = false
                         guard let docs = snapshot?.documents else { continuation.resume(); return }
+                        self.reachedEnd = docs.count < self.pageSize
                         self.lastDocumentSnapshot = docs.last
                         self.currentQuery = .everyone
                         let snoodles = self.parseDocuments(docs)
@@ -762,6 +773,7 @@ class WorldGalleryManager: ObservableObject {
         guard !isLoading else { return }
         stopListening()
         isLoading = true
+        reachedEnd = false
         db.collection(collection)
             .order(by: "timestamp", descending: true)
             .limit(to: pageSize)
@@ -773,6 +785,7 @@ class WorldGalleryManager: ObservableObject {
                         return
                     }
                     guard let docs = snapshot?.documents else { return }
+                    self.reachedEnd = docs.count < self.pageSize
                     self.lastDocumentSnapshot = docs.last
                     let snoodles = self.parseDocuments(docs)
                     self.entries = snoodles
@@ -901,6 +914,7 @@ class WorldGalleryManager: ObservableObject {
     private func fetchArtist(userId: String) {
         guard !isLoading else { return }
         isLoading = true
+        reachedEnd = false
         db.collection(collection)
             .whereField("userId", isEqualTo: userId)
             .order(by: "timestamp", descending: true)
@@ -910,6 +924,7 @@ class WorldGalleryManager: ObservableObject {
                 DispatchQueue.main.async {
                     self.isLoading = false
                     guard let docs = snapshot?.documents else { return }
+                    self.reachedEnd = docs.count < self.pageSize
                     self.lastDocumentSnapshot = docs.last
                     let snoodles = self.parseDocuments(docs)
                     self.entries = snoodles
@@ -925,8 +940,13 @@ class WorldGalleryManager: ObservableObject {
             return
         }
         isLoading = true
+        reachedEnd = false
         let batches = userIds.chunked(into: 30)
         var allSnoodles: [WorldSnoodle] = []
+        // No single shared cursor here (see fetchNextPage's .following case), so "reached
+        // end" is approximated per-batch: if every batch's raw response came back short of
+        // pageSize, none of them can have more results waiting.
+        var anyBatchFull = false
         let group = DispatchGroup()
 
         for batch in batches {
@@ -938,7 +958,9 @@ class WorldGalleryManager: ObservableObject {
                 .getDocuments { [weak self] snapshot, _ in
                     defer { group.leave() }
                     guard let self = self else { return }
-                    let snoodles = self.parseDocuments(snapshot?.documents ?? [])
+                    let docs = snapshot?.documents ?? []
+                    if docs.count >= self.pageSize { anyBatchFull = true }
+                    let snoodles = self.parseDocuments(docs)
                     allSnoodles.append(contentsOf: snoodles)
                 }
         }
@@ -946,6 +968,7 @@ class WorldGalleryManager: ObservableObject {
         group.notify(queue: .main) { [weak self] in
             guard let self = self else { return }
             self.isLoading = false
+            self.reachedEnd = !anyBatchFull
             let sorted = allSnoodles.sorted { $0.timestamp > $1.timestamp }
             self.entries = sorted
             self.applyProfilesAndLikes(to: sorted)
@@ -960,6 +983,7 @@ class WorldGalleryManager: ObservableObject {
         let primaryTerm = termLower.components(separatedBy: .whitespaces).first(where: { !$0.isEmpty }) ?? termLower
         guard !primaryTerm.isEmpty else { return }
         isLoading = true
+        reachedEnd = false
         db.collection(collection)
             .whereField("searchIndex", arrayContains: primaryTerm)
             .order(by: "timestamp", descending: true)
@@ -969,6 +993,7 @@ class WorldGalleryManager: ObservableObject {
                 DispatchQueue.main.async {
                     self.isLoading = false
                     guard let docs = snapshot?.documents else { return }
+                    self.reachedEnd = docs.count < self.pageSize
                     self.lastDocumentSnapshot = docs.last
                     let snoodles = self.parseDocuments(docs)
                     self.entries = snoodles
@@ -982,7 +1007,7 @@ class WorldGalleryManager: ObservableObject {
     /// Fetch the next page and append to entries (called as user scrolls to bottom).
     /// Respects the active query so artist/following filters stay scoped on pagination.
     func fetchNextPage() {
-        guard entries.count % pageSize == 0, entries.count > 0 else { return }
+        guard !reachedEnd, entries.count > 0 else { return }
         guard !isLoading else { return }
 
         switch currentQuery {
@@ -1029,6 +1054,7 @@ class WorldGalleryManager: ObservableObject {
             isLoading = true
             let batches = userIds.chunked(into: 30)
             var allNew: [WorldSnoodle] = []
+            var anyBatchFull = false
             let group = DispatchGroup()
             for batch in batches {
                 group.enter()
@@ -1040,12 +1066,15 @@ class WorldGalleryManager: ObservableObject {
                     .getDocuments { [weak self] snapshot, _ in
                         defer { group.leave() }
                         guard let self = self else { return }
-                        allNew.append(contentsOf: self.parseDocuments(snapshot?.documents ?? []))
+                        let docs = snapshot?.documents ?? []
+                        if docs.count >= self.pageSize { anyBatchFull = true }
+                        allNew.append(contentsOf: self.parseDocuments(docs))
                     }
             }
             group.notify(queue: .main) { [weak self] in
                 guard let self = self else { return }
                 self.isLoading = false
+                self.reachedEnd = !anyBatchFull
                 let page = Array(allNew.sorted { $0.timestamp > $1.timestamp }.prefix(self.pageSize))
                 guard !page.isEmpty else { return }
                 self.entries.append(contentsOf: page)
@@ -1059,7 +1088,8 @@ class WorldGalleryManager: ObservableObject {
     private func appendNextPage(_ docs: [QueryDocumentSnapshot]?) {
         DispatchQueue.main.async {
             self.isLoading = false
-            guard let docs = docs, !docs.isEmpty else { return }
+            guard let docs = docs, !docs.isEmpty else { self.reachedEnd = true; return }
+            self.reachedEnd = docs.count < self.pageSize
             self.lastDocumentSnapshot = docs.last
             let newSnoodles = self.parseDocuments(docs)
             self.entries.append(contentsOf: newSnoodles)
@@ -1197,6 +1227,33 @@ class WorldGalleryManager: ObservableObject {
             snoodleRef.updateData(["likes": FieldValue.increment(Int64(1))]) { error in
                 if let error = error { print("❤️ toggleLike: counter update FAILED \(error)") }
             }
+        }
+    }
+
+    /// Overrides a world_gallery doc's caption (hidden tap-to-edit feature — see
+    /// GalleryTab.swift's CaptionEditSheet). `keywords` is passed in by the caller
+    /// (rather than looked up here) since this may be invoked for a doc that isn't
+    /// in the currently-loaded `entries` feed (e.g. a profile-scoped detail view).
+    /// Rebuilds searchIndex the same way submit() does, so search stays accurate
+    /// after the override.
+    func updateCaption(snoodleId: String, keywords: [String], newCaption: String) {
+        let trimmed = newCaption.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let captionWords = trimmed.lowercased()
+            .components(separatedBy: .whitespacesAndNewlines)
+            .map { $0.trimmingCharacters(in: .punctuationCharacters) }
+            .filter { !$0.isEmpty }
+        let searchIndex = Array(Set(keywords.map { $0.lowercased() } + captionWords))
+
+        if let idx = entries.firstIndex(where: { $0.id == snoodleId }) {
+            entries[idx].caption = trimmed
+        }
+
+        db.collection(collection).document(snoodleId).updateData([
+            "caption": trimmed,
+            "searchIndex": searchIndex
+        ]) { error in
+            if let error = error { print("✏️ updateCaption: WRITE FAILED \(error)") }
         }
     }
 

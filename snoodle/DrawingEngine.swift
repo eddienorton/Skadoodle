@@ -19,11 +19,30 @@ enum DualToneStyle: String, CaseIterable, Identifiable, Codable {
     case trim        = "Trim"
     case hairy       = "Hairy"
     case thorns      = "Thorns"
-    case zigzag      = "Zigzag"
     case bubble      = "Bubble"
     case stars       = "Stars"
     case tube        = "Tube"
     var id: String { rawValue }
+
+    /// One precise icon per sub-style — the single source of truth for both
+    /// the style-picker chips (DualToneStyleChip) and the main pen toolbar
+    /// button, so whichever style is actually active is what's shown, not a
+    /// single generic "Dual Tone" icon regardless of which of the 12 is on.
+    var icon: String {
+        switch self {
+        case .gradient:    return "arrow.left.to.line.alt"
+        case .split:       return "rectangle.split.2x1"
+        case .reactive:    return "arrow.up.left.and.arrow.down.right"
+        case .alternating: return "alternatingcurrent"
+        case .braid:       return "link"
+        case .trim:        return "line.3.horizontal"
+        case .hairy:       return "sun.min"
+        case .thorns:      return "bolt"
+        case .bubble:      return "circle.grid.3x3"
+        case .stars:       return "star"
+        case .tube:        return "cylinder"
+        }
+    }
 }
 
 enum PenType: Equatable {
@@ -38,6 +57,11 @@ enum PenType: Equatable {
     case dotted
     case calligraphy
     case confetti
+    case airbrush
+    case dashed
+    case hearts
+    case sparkle
+    case splatter
     case dualTone(DualToneStyle)
 
     var displayName: String {
@@ -53,6 +77,11 @@ enum PenType: Equatable {
         case .dotted:   return "Dotted"
         case .calligraphy: return "Calligraphy"
         case .confetti: return "Confetti"
+        case .airbrush: return "Airbrush"
+        case .dashed:   return "Dashed"
+        case .hearts:   return "Hearts"
+        case .sparkle:  return "Sparkle"
+        case .splatter: return "Splatter"
         case .dualTone: return "Dual Tone"
         }
     }
@@ -70,7 +99,12 @@ enum PenType: Equatable {
         case .dotted:   return "ellipsis"
         case .calligraphy: return "signature"
         case .confetti: return "sparkles"
-        case .dualTone: return "wand.and.stars"
+        case .airbrush: return "wind"
+        case .dashed:   return "square.dashed"
+        case .hearts:   return "heart.fill"
+        case .sparkle:  return "sparkle"
+        case .splatter: return "burst.fill"
+        case .dualTone(let style): return style.icon
         }
     }
 
@@ -162,6 +196,19 @@ struct DrawingCanvas: View {
     var onBeforeDraw: (() -> Void)? = nil      // called once at stroke start; caller should push undo snapshot
     var onEraserCommitted: ((DrawingLine) -> Void)? = nil  // called when an eraser stroke lands; caller may redirect to another layer
     var onStampModeDragOnEmpty: ((CGPoint) -> Bool)? = nil // called when stamp mode is on and drag starts; return true = switched to draw mode
+    // Live pencil-pressure readout for calibration/debugging — fires on every pencil move with
+    // (normalized pressure 0...1, the width multiplier actually applied to that point). Property
+    // itself is unconditional (Swift doesn't reliably support #if around a single labeled argument
+    // in a multi-line call's argument list — this avoids that entirely); DrawScreen only ever wires
+    // real behavior into it inside #if DEBUG, so it's an inert always-nil-in-effect no-op in release.
+    var onPencilPressureDebug: ((CGFloat, CGFloat) -> Void)? = nil
+    // Fires once a stroke actually commits (pen lift), with the finalized line — not on mere
+    // color selection. This is the hook for "recent colors" reordering: per direct decision,
+    // selecting a color in the picker shouldn't reorder the row (felt jumpy while just
+    // comparing colors), only actually drawing with it should — same mental model as stamps
+    // reordering on placement, not on preview. Caller should skip line.isEraser strokes, since
+    // the eraser's "color" is just the canvas color, not a real pen-color selection.
+    var onStrokeCommitted: ((DrawingLine) -> Void)? = nil
     @Binding var currentLine: DrawingLine?     // live preview; updated during stroke, nil when idle
 
     @State private var lastPoint: CGPoint? = nil
@@ -237,7 +284,7 @@ struct DrawingCanvas: View {
                 if var line = currentLine, line.points.count > 1 {
                     line.timestamp = Date()
                     lines.append(line)
-                    if line.isEraser { onEraserCommitted?(line) }
+                    if line.isEraser { onEraserCommitted?(line) } else { onStrokeCommitted?(line) }
                 }
                 currentLine = nil; lastPoint = nil; lastTime = nil; lastSpeed = nil
             }
@@ -282,10 +329,44 @@ struct DrawingCanvas: View {
                     let targetW: CGFloat
                     if isEraser {
                         targetW = lineWidth
+                    } else if isPencil && penType == .pencil {
+                        // Pencil pressure model v5, per direct request — a pure constant additive
+                        // boost (v4, +30 always) felt right for thin presets but "hardly noticeable"
+                        // on the biggest ones. Hybrid now: boost = a flat constant PLUS a fraction of
+                        // the selected thickness itself, so thin presets still get a big-feeling boost
+                        // (dominated by the constant) while thick presets scale up more too (the ratio
+                        // term catches up). Tuned so thickness 1's boost ≈ 50–60 and thickness 130's
+                        // boost roughly doubles it: boostConstant=50, boostRatio=0.6 → thickness 1 boost
+                        // ≈50.6 (max≈51.6), thickness 130 boost ≈128 (max≈258, ~2x). Both are first
+                        // guesses, easy to retune once felt on device. `ramp` still eases in over the
+                        // stroke's first 8 points so touch-down starts right at the floor.
+                        //
+                        // Deliberately gated to penType == .pencil, not just isPencil (real Apple
+                        // Pencil hardware) — this formula's wide boost range was tuned specifically for
+                        // the Pencil tool's own width. Every OTHER pen reads its rendered width back
+                        // through pressureAt() as a multiplier on its own geometry (Neon's glow passes,
+                        // Chalk's texture, Calligraphy's angle factor, every Dual Tone style, etc.) —
+                        // those were all empirically tuned against the old, much narrower pressure band
+                        // below, so feeding them this wide a range blew them out (Neon rendering "way
+                        // too big" was the tell). Real Pencil hardware used with any pen OTHER than the
+                        // Pencil tool falls through to the narrow band in the branch below instead.
+                        let boostConstant: CGFloat = 50.0
+                        let boostRatio: CGFloat = 0.6
+                        let maxBoost = boostConstant + lineWidth * boostRatio
+                        let fullRangeW = lineWidth + maxBoost * pressure
+                        targetW = max(1.0, lineWidth + (fullRangeW - lineWidth) * ramp)
+                        #if DEBUG
+                        onPencilPressureDebug?(pressure, targetW / max(lineWidth, 0.01))
+                        #endif
                     } else if isPencil {
+                        // Real Apple Pencil hardware, but a pen other than Pencil is selected. Uses the
+                        // original, narrow pressure band every other pen's own width multipliers were
+                        // actually tuned against (roughly 0.3x-1.3x of the selected thickness) — not the
+                        // wide v5 range above, which is Pencil-tool-specific. See the comment on the
+                        // penType == .pencil branch for why this split exists.
                         let clampedPressure = min(pressure, 0.6 + ramp * 0.4)
-                        let pressureScale = 0.3 + clampedPressure * 1.0  // 0.3x–1.3x
-                        targetW = max(1.0, lineWidth * pressureScale * ramp)
+                        let pressureScale = 0.3 + clampedPressure * 1.0
+                        targetW = lineWidth * pressureScale
                     } else {
                         targetW = lineWidth * ramp + 1.0 * (1.0 - ramp)
                     }
@@ -317,7 +398,7 @@ struct DrawingCanvas: View {
                             updated.append(finalLine)
                             lines = updated
                             redrawTrigger += 1
-                            if finalLine.isEraser { onEraserCommitted?(finalLine) }
+                            if finalLine.isEraser { onEraserCommitted?(finalLine) } else { onStrokeCommitted?(finalLine) }
                             // Clear live preview AFTER committed stroke lands in lines — prevents flicker
                             currentLine = nil
                         }
@@ -425,7 +506,9 @@ struct DrawingLayerCanvas: View {
     var body: some View {
         Canvas { context, size in
             for line in lines { renderLine(line, in: &context, canvasColor: canvasColor, backgroundImage: backgroundImage, backgroundOffset: backgroundOffset, canvasSize: size, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation, baseCanvasColor: baseCanvasColor) }
-            if let c = currentLine { renderLine(c, in: &context, canvasColor: canvasColor, backgroundImage: backgroundImage, backgroundOffset: backgroundOffset, canvasSize: size, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation, baseCanvasColor: baseCanvasColor) }
+            // isLivePreview: true only for the actively-drawing stroke — this is the one line whose
+            // point count is still growing frame to frame, which is what the flag exists to guard.
+            if let c = currentLine { renderLine(c, in: &context, canvasColor: canvasColor, backgroundImage: backgroundImage, backgroundOffset: backgroundOffset, canvasSize: size, bgOpacity: bgOpacity, bgBlur: bgBlur, bgBrightness: bgBrightness, bgSaturation: bgSaturation, baseCanvasColor: baseCanvasColor, isLivePreview: true) }
         }
         .allowsHitTesting(false)
     }
@@ -646,9 +729,15 @@ class PencilTouchView: UIView {
         let isPencilTouch = activeTouch!.type == .pencil || activeTouch!.type == .stylus
         touchBeganWithStampSelected = isPencilTouch && isStampSelected
         touchBeginPoint = point
-        // Pencil: use real pressure. Finger: fixed 0.5 (no pressure sensor)
+        // Pencil: use real pressure. Finger: fixed 0.5 (no pressure sensor).
+        // force==0 falls back to 0.0, not 0.5 — a zero reading is a real Apple Pencil quirk at the
+        // very start of contact (sensor hasn't stabilized yet) and right at lift-off (force dropping
+        // toward zero), so it should read as "light/no pressure," not "medium." A 0.5 fallback was
+        // harmless under the old ±30% pressure-scale formula but produces a large, obviously-wrong
+        // mark under the new full-range mapping — this was the actual cause of the "max-thick ball
+        // at the start/end of a stroke even with very little pressure" report.
         let pressure: CGFloat = activeTouch!.type == .pencil || activeTouch!.type == .stylus
-            ? (activeTouch!.force > 0 ? activeTouch!.force / activeTouch!.maximumPossibleForce : 0.5)
+            ? (activeTouch!.force > 0 ? activeTouch!.force / activeTouch!.maximumPossibleForce : 0.0)
             : 0.5
         if touchBeganWithStampSelected {
             // Defer: don't push undo snapshot or set lastPoint until we know this
@@ -677,9 +766,10 @@ class PencilTouchView: UIView {
                     deferredBeganArgs = nil
                 }
             }
-            // Pencil: use real pressure. Finger: fixed 0.5 (no pressure sensor)
+            // Pencil: use real pressure. Finger: fixed 0.5 (no pressure sensor).
+            // See touchesBegan's comment above — force==0 falls back to 0.0, not 0.5.
             let pressure: CGFloat = touch.type == .pencil || touch.type == .stylus
-                ? (touch.force > 0 ? touch.force / touch.maximumPossibleForce : 0.5)
+                ? (touch.force > 0 ? touch.force / touch.maximumPossibleForce : 0.0)
                 : 0.5
             let isPencilMove = touch.type == .pencil || touch.type == .stylus
             onMoved?(point, pressure, isPencilMove)
@@ -708,7 +798,7 @@ class PencilTouchView: UIView {
 
 /// Single rendering function used by both the live SwiftUI Canvas and the UIImage export.
 /// All pen types are implemented here so they stay in sync.
-func renderLine(_ line: DrawingLine, in context: inout GraphicsContext, canvasColor: Color, backgroundImage: UIImage? = nil, backgroundOffset: CGSize = .zero, canvasSize: CGSize = .zero, bgOpacity: Double = 1.0, bgBlur: Double = 0.0, bgBrightness: Double = 0.0, bgSaturation: Double = 1.0, baseCanvasColor: Color = .white) {
+func renderLine(_ line: DrawingLine, in context: inout GraphicsContext, canvasColor: Color, backgroundImage: UIImage? = nil, backgroundOffset: CGSize = .zero, canvasSize: CGSize = .zero, bgOpacity: Double = 1.0, bgBlur: Double = 0.0, bgBrightness: Double = 0.0, bgSaturation: Double = 1.0, baseCanvasColor: Color = .white, isLivePreview: Bool = false) {
     guard line.points.count > 0 else { return }
 
     if line.isEraser {
@@ -718,7 +808,13 @@ func renderLine(_ line: DrawingLine, in context: inout GraphicsContext, canvasCo
 
     switch line.penType {
     case .pencil:
-        drawTaperedLine(line, color: line.color, in: &context, taperFraction: 0.2, minTaper: 0.08, opacity: 1.0)
+        // No taper at all — head or tail, live or committed — per direct request. WYSIWYG: if you
+        // want a tapered pen-lift point at the end of a stroke, ease off the pencil yourself instead
+        // of the app faking it. The head-taper zone had its own bug on top of that (see strokeTaper's
+        // comment): its boundary is a fraction of the stroke's still-growing live length, so already-
+        // drawn early points could drift back into the taper zone and get re-thinned mid-draw — the
+        // reported "whole line wiggles while dragging." Suppressing both zones fixes that too.
+        drawTaperedLine(line, color: line.color, in: &context, taperFraction: 0.2, minTaper: 0.08, opacity: 1.0, suppressTailTaperWhileLive: true, suppressHeadTaperWhileLive: true)
     case .ink:
         drawInkLine(line, in: &context)
     case .brush:
@@ -739,6 +835,16 @@ func renderLine(_ line: DrawingLine, in context: inout GraphicsContext, canvasCo
         drawCalligraphyLine(line, in: &context)
     case .confetti:
         drawConfettiLine(line, in: &context)
+    case .airbrush:
+        drawAirbrushLine(line, in: &context)
+    case .dashed:
+        drawDashedLine(line, in: &context)
+    case .hearts:
+        drawHeartsLine(line, in: &context)
+    case .sparkle:
+        drawSparkleLine(line, in: &context)
+    case .splatter:
+        drawSplatterLine(line, in: &context)
     case .dualTone(let style):
         drawDualToneLine(line, style: style, in: &context)
     }
@@ -792,7 +898,10 @@ private func drawCalligraphyLine(_ line: DrawingLine, in context: inout Graphics
         let dy = line.points[hi].y - line.points[lo].y
         let travelAngle = (dx == 0 && dy == 0) ? atan2(p1.y - p0.y, p1.x - p0.x) : atan2(dy, dx)
         let angleFactor = abs(sin(travelAngle - nibAngle))
-        let taper = strokeTaper(i: i, count: count, taperFraction: 0.15)
+        // No taper — same "no changes after it's laid down" rule as every other pen fixed this
+        // session. Contributed to the reported "more pronounced delay" alongside the live-recompute
+        // bug itself.
+        let taper = strokeTaper(i: i, count: count, taperFraction: 0.15, suppressTail: true, suppressHead: true)
         let w = baseW * max(minWidthFraction, angleFactor) * max(0.08, taper) * pressureAt(i, in: line)
 
         var seg = Path()
@@ -889,10 +998,20 @@ private func confettiPiece(center: CGPoint, size: CGFloat, rotation: CGFloat) ->
     return piece.applying(transform)
 }
 
-private func strokeTaper(i: Int, count: Int, taperFraction: CGFloat) -> CGFloat {
+// A stroke's taper (both head AND tail) is computed as a fraction of the CURRENT total point
+// count — while a stroke is still actively growing, that denominator changes on every redraw, so
+// a fixed point's fractional position `t` keeps drifting even though its real pressure never
+// changed. This causes two distinct bugs: (1) tail — the newest point (wherever the pen currently
+// is) always sits at t≈1, so it's permanently taper-thinned no matter how hard you press; (2) head
+// — for a point already drawn, `i` stays fixed but `count` keeps growing, so `t = i/(count-1)`
+// keeps *shrinking* over time, meaning an early point that already settled at full width can drift
+// back inside the taper zone and get artificially re-thinned well after the fact — visible as the
+// whole stroke "wiggling" while actively drawing. suppressTail/suppressHead skip each check
+// independently so a live in-progress render pass can opt out of either or both.
+private func strokeTaper(i: Int, count: Int, taperFraction: CGFloat, suppressTail: Bool = false, suppressHead: Bool = false) -> CGFloat {
     let t = CGFloat(i) / CGFloat(max(count - 1, 1))
-    if t < taperFraction { return t / taperFraction }
-    if t > (1.0 - taperFraction) { return (1.0 - t) / taperFraction }
+    if !suppressHead, t < taperFraction { return t / taperFraction }
+    if !suppressTail, t > (1.0 - taperFraction) { return (1.0 - t) / taperFraction }
     return 1.0
 }
 
@@ -943,7 +1062,8 @@ private func drawEraserLine(_ line: DrawingLine, in context: inout GraphicsConte
 }
 
 private func drawTaperedLine(_ line: DrawingLine, color: Color, in context: inout GraphicsContext,
-                              taperFraction: CGFloat, minTaper: CGFloat, opacity: CGFloat) {
+                              taperFraction: CGFloat, minTaper: CGFloat, opacity: CGFloat,
+                              suppressTailTaperWhileLive: Bool = false, suppressHeadTaperWhileLive: Bool = false) {
     let baseW = line.lineWidth
     let count = line.points.count
     if count == 1 {
@@ -958,7 +1078,7 @@ private func drawTaperedLine(_ line: DrawingLine, color: Color, in context: inou
     // to avoid overlapping round caps blotching at slow speeds
     var i = 1
     while i < count {
-        let taper = strokeTaper(i: i, count: count, taperFraction: taperFraction)
+        let taper = strokeTaper(i: i, count: count, taperFraction: taperFraction, suppressTail: suppressTailTaperWhileLive, suppressHead: suppressHeadTaperWhileLive)
         let pressure = i < line.widths.count ? line.widths[i] / baseW : 1.0
         let w = baseW * max(minTaper, taper) * pressure
         // Extend path as long as width stays within 15% of current
@@ -967,7 +1087,7 @@ private func drawTaperedLine(_ line: DrawingLine, color: Color, in context: inou
         path.addLine(to: line.points[i])
         var j = i + 1
         while j < count {
-            let nextTaper = strokeTaper(i: j, count: count, taperFraction: taperFraction)
+            let nextTaper = strokeTaper(i: j, count: count, taperFraction: taperFraction, suppressTail: suppressTailTaperWhileLive, suppressHead: suppressHeadTaperWhileLive)
             let nextPressure = j < line.widths.count ? line.widths[j] / baseW : 1.0
             let nextW = baseW * max(minTaper, nextTaper) * nextPressure
             if abs(nextW - w) / max(w, 0.01) > 0.15 { break }
@@ -990,7 +1110,12 @@ private func drawInkLine(_ line: DrawingLine, in context: inout GraphicsContext)
         return
     }
     for i in 1..<count {
-        let taper = strokeTaper(i: i, count: count, taperFraction: 0.3)
+        // No taper — head or tail, live or committed. Same "no changes after it's laid down" rule
+        // as Pencil: taper's old fraction-of-still-growing-length math meant an already-drawn point's
+        // width could silently shift on a later redraw with no new pressure applied. Oscillation below
+        // is untouched by this — it's a fixed function of point index, not of the live/growing count,
+        // so it doesn't have the same bug and stays as Ink's actual character.
+        let taper = strokeTaper(i: i, count: count, taperFraction: 0.3, suppressTail: true, suppressHead: true)
         let pressure = i < line.widths.count ? line.widths[i] / baseW : 1.0
         // Ink oscillates slightly in width as if flow is uneven
         let oscillation: CGFloat = 1.0 + 0.12 * sin(CGFloat(i) * 0.8)
@@ -1014,13 +1139,15 @@ private func drawBrushLine(_ line: DrawingLine, in context: inout GraphicsContex
     let baseW = line.lineWidth
     let count = line.points.count
 
-    // Core stroke — full opacity, tapered
-    drawTaperedLine(line, color: line.color, in: &context, taperFraction: 0.35, minTaper: 0.0, opacity: 0.85)
+    // Core stroke — full opacity, tapered. No taper live or committed — same "no changes after
+    // it's laid down" rule as Pencil/Ink; see strokeTaper's own comment for the mechanism.
+    drawTaperedLine(line, color: line.color, in: &context, taperFraction: 0.35, minTaper: 0.0, opacity: 0.85, suppressTailTaperWhileLive: true, suppressHeadTaperWhileLive: true)
 
-    // Soft halo pass — wider, lower opacity for brush bleed effect
+    // Soft halo pass — wider, lower opacity for brush bleed effect. Same suppression applied here too —
+    // this loop has its own independent strokeTaper call, not routed through drawTaperedLine above.
     if count > 1 {
         for i in 1..<count {
-            let taper = strokeTaper(i: i, count: count, taperFraction: 0.35)
+            let taper = strokeTaper(i: i, count: count, taperFraction: 0.35, suppressTail: true, suppressHead: true)
             let w = baseW * max(0.0, taper) * 1.6 * pressureAt(i, in: line)
             var seg = Path()
             seg.move(to: line.points[i-1])
@@ -1069,7 +1196,11 @@ private func drawChalkLine(_ line: DrawingLine, in context: inout GraphicsContex
         if skip { continue }
         let opacity = 0.45 + CGFloat(seed % 40) / 100.0  // 0.45 – 0.85
         let widthVar = 0.7 + CGFloat(seed % 30) / 100.0  // 0.7 – 1.0
-        let taper = strokeTaper(i: i, count: count, taperFraction: 0.15)
+        // No taper — head or tail, live or committed. This was the "fills in a bit after your pen
+        // has moved from that area" bug: the mark right under the pen tip was always taper-thinned
+        // (tail zone, floored at 0.3x), then snapped back to full width once that point aged out of
+        // the tail zone as the stroke kept growing. Same class as Pencil/Ink/Brush's fix.
+        let taper = strokeTaper(i: i, count: count, taperFraction: 0.15, suppressTail: true, suppressHead: true)
         let w = baseW * widthVar * max(0.3, taper) * pressureAt(i, in: line)
 
         // Slight jitter offset for rough texture
@@ -1101,7 +1232,8 @@ private func drawNeonLine(_ line: DrawingLine, in context: inout GraphicsContext
     let passes: [(widthMult: CGFloat, opacity: CGFloat)] = [(5.0, 0.07), (2.8, 0.18), (0.9, 1.0)]
     for pass in passes {
         for i in 1..<count {
-            let taper = strokeTaper(i: i, count: count, taperFraction: 0.15)
+            // No taper — same rule as every other pen fixed this session.
+            let taper = strokeTaper(i: i, count: count, taperFraction: 0.15, suppressTail: true, suppressHead: true)
             let w = baseW * pass.widthMult * max(0.2, taper) * pressureAt(i, in: line)
             var seg = Path()
             seg.move(to: line.points[i-1])
@@ -1161,6 +1293,277 @@ private func drawSprayLine(_ line: DrawingLine, in context: inout GraphicsContex
     }
 }
 
+/// Same drag-to-build-coverage feel as Spray (denser where you move slower/
+/// linger over an area), but lays down soft, feathered blobs instead of many
+/// small hard-edged dots — repeated passes blend and darken smoothly rather
+/// than accumulating visible speckle texture.
+///
+/// **Perf note (fixed after real-device slowdown report):** the first version
+/// drew every blob inside one `context.drawLayer { layer.addFilter(.blur(...)) }`
+/// scope per stroke, matching Trim/Tube's technique. That's fine for Trim
+/// (2 continuous strokes per layer) but wrong here — a single airbrush
+/// stroke can pack hundreds of blobs into one layer, and `DrawingLayerCanvas`
+/// re-runs every past line's render function on *every* canvas redraw (e.g.
+/// every touch-move while drawing something else entirely), so an
+/// accumulating off-screen Gaussian blur pass over a huge shape, repeated
+/// every frame, for every airbrush stroke ever drawn on that layer, is what
+/// was compounding into real slowdown. Rebuilt to draw each blob as a
+/// `.radialGradient` fill (opaque center fading to transparent edge)
+/// instead — a native GPU shading primitive, not an off-screen blur filter,
+/// so the soft edge is "free" per blob rather than one expensive whole-layer
+/// post-process. Blob count per segment also eased back (was up to 6, now
+/// up to 4) as extra headroom.
+private func drawAirbrushLine(_ line: DrawingLine, in context: inout GraphicsContext) {
+    let baseW = line.lineWidth
+    let count = line.points.count
+    let radius = baseW * 1.6
+
+    func airbrushHash(_ a: Int, _ b: Int) -> UInt64 {
+        var s = UInt64(bitPattern: Int64(a)) &* 2654435761 &+ UInt64(bitPattern: Int64(b)) &* 40503
+        s ^= s >> 16
+        s = s &* 0x45d9f3b
+        s ^= s >> 16
+        return s
+    }
+
+    func drawBlob(center: CGPoint, radius blobR: CGFloat, opacity: Double) {
+        guard blobR > 0 else { return }
+        let path = Path(ellipseIn: CGRect(x: center.x - blobR, y: center.y - blobR, width: blobR*2, height: blobR*2))
+        let gradient = Gradient(stops: [
+            .init(color: line.color.opacity(opacity), location: 0),
+            .init(color: line.color.opacity(opacity * 0.35), location: 0.65),
+            .init(color: line.color.opacity(0), location: 1)
+        ])
+        context.fill(path, with: .radialGradient(gradient, center: center, startRadius: 0, endRadius: blobR))
+    }
+
+    if count == 1 {
+        let pt = line.points[0]
+        let r = baseW * 0.9 * pressureAt(0, in: line)
+        drawBlob(center: pt, radius: r, opacity: 0.6)
+        return
+    }
+    for i in 1..<count {
+        let p0 = line.points[i-1], p1 = line.points[i]
+        let ddx = p1.x - p0.x, ddy = p1.y - p0.y
+        let speed = sqrt(ddx*ddx + ddy*ddy)
+        let blobCount = max(1, Int(4 - speed * 0.2))
+        let pressure = pressureAt(i, in: line)
+        for k in 0..<blobCount {
+            let s = airbrushHash(i, k)
+            let angle = CGFloat(s & 0xFFFF) / 65535.0 * .pi * 2
+            let r = radius * CGFloat((s >> 16) & 0xFFFF) / 65535.0
+            let cx = p1.x + r * cos(angle)
+            let cy = p1.y + r * sin(angle)
+            let blobR = baseW * (0.55 + CGFloat((s >> 32) & 0xFF) / 850.0) * pressure
+            let opacity = 0.30 + CGFloat((s >> 40) & 0xFF) / 850.0
+            drawBlob(center: CGPoint(x: cx, y: cy), radius: blobR, opacity: opacity)
+        }
+    }
+}
+
+/// A single continuous path for the whole stroke, stroked once with a native
+/// dash pattern — cheap (one draw call regardless of stroke length, same
+/// class of technique as Tube's rebuild) and gives a genuinely continuous
+/// dash rhythm along the path, unlike dashing each short segment
+/// independently (which would restart the dash phase every segment and
+/// never look continuous). Trade-off: since it's one stroke call for the
+/// whole line, width is flat rather than tapering per-point with pressure —
+/// same trade-off Tube already accepts for the same reason.
+private func drawDashedLine(_ line: DrawingLine, in context: inout GraphicsContext) {
+    let baseW = line.lineWidth
+    let count = line.points.count
+    if count == 1 {
+        let pt = line.points[0]
+        context.fill(Path(ellipseIn: CGRect(x: pt.x - baseW/2, y: pt.y - baseW/2, width: baseW, height: baseW)),
+                     with: .color(line.color))
+        return
+    }
+    var path = Path()
+    path.move(to: line.points[0])
+    for i in 1..<count { path.addLine(to: line.points[i]) }
+    let dashLen = max(2, baseW * 1.4)
+    let gapLen  = max(2, baseW * 1.1)
+    context.stroke(path, with: .color(line.color),
+                   style: StrokeStyle(lineWidth: baseW, lineCap: .butt, lineJoin: .round, dash: [dashLen, gapLen]))
+}
+
+/// Small repeating heart shapes strung along the path at arc-length
+/// intervals — same spacing convention as Dotted/Bubble/Stars. Uses the
+/// classic closed-form parametric heart curve (x = 16sin³t, y = 13cos t −
+/// 5cos 2t − 2cos 3t − cos 4t) rather than a hand-built bezier/arc
+/// approximation — verified visually before writing this (rendered the
+/// exact formula with matplotlib) rather than trusting hand-typed control
+/// points for a shape this fiddly to get right by eye alone.
+private func heartPath(center: CGPoint, size: CGFloat, rotation: CGFloat) -> Path {
+    var path = Path()
+    let segments = 16
+    let scale = size / 16.0   // formula's natural x-amplitude is ±16
+    for i in 0...segments {
+        let t = CGFloat(i) / CGFloat(segments) * 2 * .pi
+        let hx = 16 * pow(sin(t), 3)
+        let hy = -(13 * cos(t) - 5 * cos(2*t) - 2 * cos(3*t) - cos(4*t))  // flip: formula's +y is up, canvas +y is down
+        let rx = hx * cos(rotation) - hy * sin(rotation)
+        let ry = hx * sin(rotation) + hy * cos(rotation)
+        let pt = CGPoint(x: center.x + rx * scale, y: center.y + ry * scale)
+        if i == 0 { path.move(to: pt) } else { path.addLine(to: pt) }
+    }
+    path.closeSubpath()
+    return path
+}
+
+private func drawHeartsLine(_ line: DrawingLine, in context: inout GraphicsContext) {
+    let baseW = line.lineWidth
+    let count = line.points.count
+    if count == 1 {
+        let pt = line.points[0]
+        context.fill(heartPath(center: pt, size: baseW * 0.9, rotation: 0), with: .color(line.color))
+        return
+    }
+    let heartSize    = baseW * 0.9
+    let heartSpacing = baseW * 1.7
+
+    var arcLen = [CGFloat](repeating: 0, count: count)
+    for i in 1..<count {
+        arcLen[i] = arcLen[i-1] + hypot(line.points[i].x - line.points[i-1].x,
+                                         line.points[i].y - line.points[i-1].y)
+    }
+
+    var nextAt: CGFloat = 0
+    var idx = 0
+    for i in 0..<count {
+        guard arcLen[i] >= nextAt else { continue }
+        nextAt += heartSpacing
+        let pt = line.points[i]
+        let pressure = pressureAt(i, in: line)
+        // Deterministic slight rotation variation, same sin-hash convention as Hairy/Thorns/Stars
+        let rot = (fabs(sin(CGFloat(idx) * 91.7 + 1.3)) - 0.5) * 0.5
+        context.fill(heartPath(center: pt, size: heartSize * pressure, rotation: rot), with: .color(line.color))
+        idx += 1
+    }
+}
+
+/// Small four-pointed twinkle/sparkle glyphs (✦) strung along the path at
+/// arc-length intervals — same spacing/pressure/jitter convention as Hearts.
+/// Deliberately sharp and angular (straight-line vertices between an outer
+/// and inner radius, not a curve) so it reads distinctly from Hearts' soft
+/// curves and from the Dual Tone "Stars" style's rounded five-point shape —
+/// a classic "magic sparkle" look. Replaces Chevron per direct request
+/// (Chevron worked fine, just wasn't wanted in the Pattern lineup anymore).
+private func sparklePath(center: CGPoint, size: CGFloat, rotation: CGFloat) -> Path {
+    var path = Path()
+    let outerR = size * 0.5
+    let innerR = outerR * 0.35
+    for i in 0..<8 {
+        let angle = CGFloat(i) * (.pi / 4) - .pi / 2 + rotation  // start pointing up
+        let r = (i % 2 == 0) ? outerR : innerR
+        let pt = CGPoint(x: center.x + r * cos(angle), y: center.y + r * sin(angle))
+        if i == 0 { path.move(to: pt) } else { path.addLine(to: pt) }
+    }
+    path.closeSubpath()
+    return path
+}
+
+private func drawSparkleLine(_ line: DrawingLine, in context: inout GraphicsContext) {
+    let baseW = line.lineWidth
+    let count = line.points.count
+    if count == 1 {
+        let pt = line.points[0]
+        context.fill(sparklePath(center: pt, size: baseW * 0.9, rotation: 0), with: .color(line.color))
+        return
+    }
+    let sparkleSize    = baseW * 0.9
+    let sparkleSpacing = baseW * 1.7
+
+    var arcLen = [CGFloat](repeating: 0, count: count)
+    for i in 1..<count {
+        arcLen[i] = arcLen[i-1] + hypot(line.points[i].x - line.points[i-1].x,
+                                         line.points[i].y - line.points[i-1].y)
+    }
+
+    var nextAt: CGFloat = 0
+    var idx = 0
+    for i in 0..<count {
+        guard arcLen[i] >= nextAt else { continue }
+        nextAt += sparkleSpacing
+        let pt = line.points[i]
+        let pressure = pressureAt(i, in: line)
+        // Deterministic rotation variation, same sin-hash convention as Hearts/Hairy/Thorns
+        let rot = fabs(sin(CGFloat(idx) * 63.1 + 2.7)) * (.pi / 4)
+        context.fill(sparklePath(center: pt, size: sparkleSize * pressure, rotation: rot), with: .color(line.color))
+        idx += 1
+    }
+}
+
+/// Spray/Airbrush-style scatter — same speed-based density and per-dot hash
+/// placement as `drawSprayLine` (denser where you move slower/linger) — but
+/// each dot's color is picked from a 4-way cycle instead of always
+/// `line.color`: `line.color`, `line.colorB`, and a lightened blend of each
+/// via the same `blendColors` helper Confetti already uses. Reuses Confetti's
+/// established "two colors you picked in Pen Studio, plus their lightened
+/// blends" color set, so every multi-color pen in the app draws from the
+/// same palette convention. Unlike Confetti's fixed sin-hash 0-1-2-3
+/// sequence, the color pick here comes from unused high bits (48-64) of
+/// Spray's own per-dot hash — bits 0-16/16-32/32-40/40-48 are already spoken
+/// for by angle/radius/dotR/opacity, see `drawSprayLine` above — so color
+/// varies dot-to-dot within a single burst rather than cycling in a fixed
+/// order, reading as genuinely scattered rather than a repeating stripe.
+private func drawSplatterLine(_ line: DrawingLine, in context: inout GraphicsContext) {
+    let baseW = line.lineWidth
+    let count = line.points.count
+    let radius = baseW * 2.2
+
+    func splatterHash(_ a: Int, _ b: Int) -> UInt64 {
+        var s = UInt64(bitPattern: Int64(a)) &* 2654435761 &+ UInt64(bitPattern: Int64(b)) &* 40503
+        s ^= s >> 16
+        s = s &* 0x45d9f3b
+        s ^= s >> 16
+        return s
+    }
+
+    func splatterColor(_ s: UInt64) -> Color {
+        switch (s >> 50) & 0x3 {
+        case 0:  return line.color
+        case 1:  return line.colorB
+        case 2:  return blendColors(line.color, .white, t: 0.45)
+        default: return blendColors(line.colorB, .white, t: 0.45)
+        }
+    }
+
+    if count == 1 {
+        let pt = line.points[0]
+        for k in 0..<12 {
+            let s = splatterHash(0, k)
+            let angle = CGFloat(s & 0xFFFF) / 65535.0 * .pi * 2
+            let r = radius * CGFloat((s >> 16) & 0xFFFF) / 65535.0
+            let dotR = baseW * 0.18
+            context.fill(Path(ellipseIn: CGRect(
+                x: pt.x + r * cos(angle) - dotR,
+                y: pt.y + r * sin(angle) - dotR,
+                width: dotR*2, height: dotR*2)),
+                with: .color(splatterColor(s).opacity(0.7)))
+        }
+        return
+    }
+    for i in 1..<count {
+        let p0 = line.points[i-1], p1 = line.points[i]
+        let ddx = p1.x - p0.x, ddy = p1.y - p0.y
+        let speed = sqrt(ddx*ddx + ddy*ddy)
+        let dotCount = max(2, Int(14 - speed * 0.4))
+        for k in 0..<dotCount {
+            let s = splatterHash(i, k)
+            let angle = CGFloat(s & 0xFFFF) / 65535.0 * .pi * 2
+            let r = radius * CGFloat((s >> 16) & 0xFFFF) / 65535.0
+            let cx = p1.x + r * cos(angle)
+            let cy = p1.y + r * sin(angle)
+            let dotR = baseW * (0.12 + CGFloat((s >> 32) & 0xFF) / 2550.0) * pressureAt(i, in: line)
+            let opacity = 0.4 + CGFloat((s >> 40) & 0xFF) / 637.0
+            context.fill(Path(ellipseIn: CGRect(x: cx - dotR, y: cy - dotR, width: dotR*2, height: dotR*2)),
+                         with: .color(splatterColor(s).opacity(opacity)))
+        }
+    }
+}
+
 private func drawWatercolorLine(_ line: DrawingLine, in context: inout GraphicsContext) {
     // Multiple semi-transparent passes: wide soft wash + medium body + thin edge darkening
     let baseW = line.lineWidth
@@ -1172,9 +1575,13 @@ private func drawWatercolorLine(_ line: DrawingLine, in context: inout GraphicsC
                      with: .color(line.color.opacity(0.25)))
         return
     }
-    // Pass 1: wide soft wet wash
+    // Pass 1: wide soft wet wash. No taper — head or tail, live or committed, same rule as every
+    // other pen fixed this session. This was the "long after I stop moving the pen, the line keeps
+    // getting thinner" bug: a stationary-but-still-touching pen keeps firing near-duplicate points at
+    // nearly the same spot, which keeps growing the live point count, which kept re-triggering the
+    // tail-zone thinning on every redraw even with zero actual movement.
     for i in 1..<count {
-        let taper = strokeTaper(i: i, count: count, taperFraction: 0.3)
+        let taper = strokeTaper(i: i, count: count, taperFraction: 0.3, suppressTail: true, suppressHead: true)
         let seed = Int(line.points[i].x * 3 + line.points[i].y * 7) & 0xFF
         let wVar = 0.85 + CGFloat(seed % 30) / 100.0
         let w = baseW * 2.2 * wVar * max(0.1, taper) * pressureAt(i, in: line)
@@ -1186,7 +1593,7 @@ private func drawWatercolorLine(_ line: DrawingLine, in context: inout GraphicsC
     }
     // Pass 2: medium body
     for i in 1..<count {
-        let taper = strokeTaper(i: i, count: count, taperFraction: 0.25)
+        let taper = strokeTaper(i: i, count: count, taperFraction: 0.25, suppressTail: true, suppressHead: true)
         let w = baseW * 1.2 * max(0.1, taper) * pressureAt(i, in: line)
         var seg = Path()
         seg.move(to: line.points[i-1])
@@ -1196,7 +1603,7 @@ private func drawWatercolorLine(_ line: DrawingLine, in context: inout GraphicsC
     }
     // Pass 3: thin edge darkening for pigment-pooling effect
     for i in 1..<count {
-        let taper = strokeTaper(i: i, count: count, taperFraction: 0.1)
+        let taper = strokeTaper(i: i, count: count, taperFraction: 0.1, suppressTail: true, suppressHead: true)
         let w = baseW * 0.35 * max(0.05, taper) * pressureAt(i, in: line)
         var seg = Path()
         seg.move(to: line.points[i-1])
@@ -1228,7 +1635,10 @@ private func drawDottedLine(_ line: DrawingLine, in context: inout GraphicsConte
         while t <= 1.0 {
             let x = p0.x + dx * t
             let y = p0.y + dy * t
-            let taper = strokeTaper(i: i, count: count, taperFraction: 0.15)
+            // No taper — same rule as every other pen this session. Caught late: this was the
+            // same "fills in a bit after your pen has moved from that area" bug as Chalk, just not
+            // yet reported since it was only checked for the pressure→size relationship.
+            let taper = strokeTaper(i: i, count: count, taperFraction: 0.15, suppressTail: true, suppressHead: true)
             let r = dotR * max(0.3, taper) * pressureAt(i, in: line)
             context.fill(Path(ellipseIn: CGRect(x: x - r, y: y - r, width: r*2, height: r*2)),
                          with: .color(line.color))
@@ -1257,7 +1667,9 @@ private func drawDualToneLine(_ line: DrawingLine, style: DualToneStyle, in cont
         for i in 1..<count {
             let t = CGFloat(i) / CGFloat(count - 1)
             let blended = blendColors(line.color, line.colorB, t: t)
-            let taper = strokeTaper(i: i, count: count, taperFraction: 0.2)
+            // Width taper suppressed same as everywhere else — separate from the `t` color-position
+            // question above, which is still an open design call, not yet resolved.
+            let taper = strokeTaper(i: i, count: count, taperFraction: 0.2, suppressTail: true, suppressHead: true)
             let w = baseW * max(0.08, taper) * pressureAt(i, in: line)
             var seg = Path()
             seg.move(to: line.points[i-1])
@@ -1282,7 +1694,8 @@ private func drawDualToneLine(_ line: DrawingLine, style: DualToneStyle, in cont
             guard len > 0 else { continue }
             let nx = -dy / len, ny = dx / len  // perpendicular unit vector
             let offset = baseW * 0.28
-            let taper = strokeTaper(i: i, count: count, taperFraction: 0.2)
+            // No taper — head or tail, live or committed. Same rule as every other pen this session.
+            let taper = strokeTaper(i: i, count: count, taperFraction: 0.2, suppressTail: true, suppressHead: true)
             let w = (baseW * 0.55) * max(0.08, taper) * pressureAt(i, in: line)
             // Stroke A
             var segA = Path()
@@ -1313,7 +1726,8 @@ private func drawDualToneLine(_ line: DrawingLine, style: DualToneStyle, in cont
             // t=0 → horizontal (colorA), t=1 → vertical (colorB)
             let t = total > 0 ? dy / total : 0.5
             let blended = blendColors(line.color, line.colorB, t: t)
-            let taper = strokeTaper(i: i, count: count, taperFraction: 0.2)
+            // No taper — same rule as every other pen this session.
+            let taper = strokeTaper(i: i, count: count, taperFraction: 0.2, suppressTail: true, suppressHead: true)
             let w = baseW * max(0.08, taper) * pressureAt(i, in: line)
             var seg = Path()
             seg.move(to: p0)
@@ -1330,11 +1744,22 @@ private func drawDualToneLine(_ line: DrawingLine, style: DualToneStyle, in cont
             context.fill(Path(ellipseIn: rect), with: .color(line.color))
             return
         }
-        let pulseLen = max(3, count / 12)  // pulse length scales with stroke length
+        // Pulse length is a fixed distance tied to the thickness setting, not the stroke's total
+        // length — the old `count / 12` made the band size depend on how long the stroke ended up
+        // being, which isn't known yet while still drawing, so already-drawn bands would visibly
+        // resize as the stroke grew. Arc-length based now, same spacing convention as Bubble/Stars/
+        // Hearts, so it's fixed and predictable from the very first segment.
+        let pulseDist = max(2.0, baseW * 1.5)
+        var altArcLen = [CGFloat](repeating: 0, count: count)
         for i in 1..<count {
-            let pulse = (i / pulseLen) % 2 == 0
+            altArcLen[i] = altArcLen[i-1] + hypot(line.points[i].x - line.points[i-1].x,
+                                                   line.points[i].y - line.points[i-1].y)
+        }
+        for i in 1..<count {
+            let pulse = Int(altArcLen[i] / pulseDist) % 2 == 0
             let segColor = pulse ? line.color : line.colorB
-            let taper = strokeTaper(i: i, count: count, taperFraction: 0.2)
+            // No taper — same rule as every other pen this session.
+            let taper = strokeTaper(i: i, count: count, taperFraction: 0.2, suppressTail: true, suppressHead: true)
             let w = baseW * max(0.08, taper) * pressureAt(i, in: line)
             var seg = Path()
             seg.move(to: line.points[i-1])
@@ -1378,7 +1803,8 @@ private func drawDualToneLine(_ line: DrawingLine, style: DualToneStyle, in cont
             let len = hypot(dx, dy)
             let nx  = len > 0 ? -dy / len : 0.0
             let ny  = len > 0 ?  dx / len : 1.0
-            let taper = strokeTaper(i: i, count: count, taperFraction: 0.15)
+            // No taper — same rule as every other pen this session.
+            let taper = strokeTaper(i: i, count: count, taperFraction: 0.15, suppressTail: true, suppressHead: true)
             let amp   = amplitude * taper * pressureAt(i, in: line)
             let sv    = sin(ang)
             ptsA[i] = CGPoint(x: pt.x + nx * amp * sv,  y: pt.y + ny * amp * sv)
@@ -1457,7 +1883,8 @@ private func drawDualToneLine(_ line: DrawingLine, style: DualToneStyle, in cont
                 let len = hypot(dx, dy)
                 guard len > 0 else { continue }
                 let nx = -dy/len, ny = dx/len
-                let taper = strokeTaper(i: i, count: count, taperFraction: 0.15)
+                // No taper — same rule as every other pen this session.
+                let taper = strokeTaper(i: i, count: count, taperFraction: 0.15, suppressTail: true, suppressHead: true)
                 let w = trimLineW * max(0.15, taper) * pressureAt(i, in: line)
                 let off = trimSpacing * max(0.15, taper) * pressureAt(i, in: line)
 
@@ -1477,7 +1904,7 @@ private func drawDualToneLine(_ line: DrawingLine, style: DualToneStyle, in cont
 
         // Middle line — crisp, colorA, drawn on top of the blurred pair.
         for i in 1..<count {
-            let taper = strokeTaper(i: i, count: count, taperFraction: 0.15)
+            let taper = strokeTaper(i: i, count: count, taperFraction: 0.15, suppressTail: true, suppressHead: true)
             let w = trimLineW * max(0.15, taper) * pressureAt(i, in: line)
             var seg = Path()
             seg.move(to: line.points[i-1])
@@ -1505,9 +1932,10 @@ private func drawDualToneLine(_ line: DrawingLine, style: DualToneStyle, in cont
                                                      line.points[i].y - line.points[i-1].y)
         }
 
-        // Core stroke — segment-by-segment for pressure response
+        // Core stroke — segment-by-segment for pressure response. No taper — same rule as
+        // every other pen this session.
         for i in 1..<count {
-            let taper = strokeTaper(i: i, count: count, taperFraction: 0.2)
+            let taper = strokeTaper(i: i, count: count, taperFraction: 0.2, suppressTail: true, suppressHead: true)
             let w = hairCoreW * max(0.08, taper) * pressureAt(i, in: line)
             var seg = Path()
             seg.move(to: line.points[i-1])
@@ -1578,9 +2006,10 @@ private func drawDualToneLine(_ line: DrawingLine, style: DualToneStyle, in cont
                                                        line.points[i].y - line.points[i-1].y)
         }
 
-        // Core stroke — segment-by-segment for pressure response
+        // Core stroke — segment-by-segment for pressure response. No taper — same rule as
+        // every other pen this session.
         for i in 1..<count {
-            let taper = strokeTaper(i: i, count: count, taperFraction: 0.2)
+            let taper = strokeTaper(i: i, count: count, taperFraction: 0.2, suppressTail: true, suppressHead: true)
             let w = thornCoreW * max(0.08, taper) * pressureAt(i, in: line)
             var seg = Path()
             seg.move(to: line.points[i-1])
@@ -1617,53 +2046,6 @@ private func drawDualToneLine(_ line: DrawingLine, style: DualToneStyle, in cont
             context.stroke(thorn, with: .color(line.colorB),
                            style: StrokeStyle(lineWidth: thornW * pressure, lineCap: .round))
             thornIdx += 1
-        }
-
-    case .zigzag:
-        // Sharp V-shaped path that snaps left/right at regular intervals.
-        // No center core — the zigzag IS the stroke. Colors alternate per zig/zag.
-        // Pressure scales both width and amplitude.
-        if count == 1 {
-            let pt = line.points[0]
-            context.fill(Path(ellipseIn: CGRect(x: pt.x - baseW/2, y: pt.y - baseW/2, width: baseW, height: baseW)), with: .color(line.color))
-            return
-        }
-        let zzAmplitude  = baseW * 0.65
-        let zzHalfSpace  = baseW * 1.2   // arc-length per zig or zag
-
-        var zzArcLen = [CGFloat](repeating: 0, count: count)
-        for i in 1..<count {
-            zzArcLen[i] = zzArcLen[i-1] + hypot(line.points[i].x - line.points[i-1].x,
-                                                  line.points[i].y - line.points[i-1].y)
-        }
-
-        // Precompute offset positions — each point displaced ±amplitude perp based on half-cycle
-        var zzPts = [CGPoint](repeating: .zero, count: count)
-        for i in 0..<count {
-            let halfCycle = Int(zzArcLen[i] / zzHalfSpace)
-            let side: CGFloat = halfCycle % 2 == 0 ? 1 : -1
-            let lo = max(0, i-1), hi = min(count-1, i+1)
-            let dx = line.points[hi].x - line.points[lo].x
-            let dy = line.points[hi].y - line.points[lo].y
-            let len = hypot(dx, dy)
-            let nx = len > 0 ? -dy / len : 0
-            let ny = len > 0 ?  dx / len : 1
-            let taper = strokeTaper(i: i, count: count, taperFraction: 0.1)
-            let amp = zzAmplitude * taper * pressureAt(i, in: line)
-            let pt = line.points[i]
-            zzPts[i] = CGPoint(x: pt.x + nx * amp * side, y: pt.y + ny * amp * side)
-        }
-
-        // Draw segment-by-segment, color determined by half-cycle of the midpoint
-        for i in 1..<count {
-            let halfCycle = Int((zzArcLen[i-1] + zzArcLen[i]) / 2 / zzHalfSpace)
-            let segColor = halfCycle % 2 == 0 ? line.color : line.colorB
-            let w = baseW * 0.48 * pressureAt(i, in: line)
-            var seg = Path()
-            seg.move(to: zzPts[i-1])
-            seg.addLine(to: zzPts[i])
-            context.stroke(seg, with: .color(segColor),
-                           style: StrokeStyle(lineWidth: w, lineCap: .round, lineJoin: .miter))
         }
 
     case .bubble:

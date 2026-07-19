@@ -118,7 +118,11 @@ struct ContentView: View {
     // lets DrawScreen default its "Submit to Today's Challenge" toggle to on
     // only in that context, off for the ordinary New-tab entry point.
     @State private var dailySubmitIntent: Bool = false
-    @State private var selectedTab: Int = 0
+    // Default landing tab is Gallery (1), not Today (0) — Daily Doodle has no real audience
+    // yet, so opening straight into an empty/near-empty daily contest isn't a good first
+    // impression. Today tab itself is untouched, still fully reachable via the tab bar; this
+    // is purely about where the app lands on open. Revisit once Daily Doodle has real users.
+    @State private var selectedTab: Int = 1
     @AppStorage("hasSeenOnboarding") private var hasSeenOnboarding: Bool = false
     @State private var showingOnboarding: Bool = false
     @State private var showUpdateAlert = false
@@ -194,7 +198,7 @@ struct ContentView: View {
         .modifier(DrawScreenPresenter(
             isPresented: $showingDraw,
             onDismiss: {
-                if selectedTab == 2 { selectedTab = 0 }
+                if selectedTab == 2 { selectedTab = 1 }   // fall back to Gallery, matching the new default landing tab
                 entryToEdit = nil
                 dailySubmitIntent = false
                 NotificationCenter.default.post(name: .snoodleProfilePhotoRestored, object: nil)
